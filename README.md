@@ -1,7 +1,7 @@
 # BlackCat Core — BlackCat\\Store
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/blackcatacademy/blackcat-core/main/.github/logo.png" alt="BlackCat Core Logo" width="160" />
+  <img src="https://github.com/blackcatacademy/blackcat-core/blob/master/.github/logo.png" alt="BlackCat Core Logo" width="160" />
 </p>
 
 **Status:** 🔧 *In Development*
