@@ -1,6 +1,17 @@
 <?php
 declare(strict_types=1);
 
+namespace BlackCat\Core\Mail;
+
+use BlackCat\Core\Security\KeyManager;
+use BlackCat\Core\Security\Crypto;
+use BlackCat\Core\Validation\Validator;
+use BlackCat\Core\Templates\EmailTemplates;
+use BlackCat\Core\Log\Logger;
+use PHPMailer\PHPMailer\PHPMailer;
+use PHPMailer\PHPMailer\Exception as PHPMailerException;
+use Finfo;
+
 /**
  * libs/Mailer.php
  *
@@ -18,28 +29,25 @@ declare(strict_types=1);
  *  - implements retry/backoff and locking
  */
 
-use PHPMailer\PHPMailer\PHPMailer;
-use PHPMailer\PHPMailer\Exception as PHPMailerException;
-
 final class Mailer
 {
     private static ?array $config = null;
-    private static ?PDO $pdo = null;
+    private static ?\PDO $pdo = null;
     private static bool $inited = false;
 
     /** @var ?string path to keys dir (optional) */
     private static ?string $keysDir = null;
 
-    public static function init(array $config, PDO $pdo): void
+    public static function init(array $config, \PDO $pdo): void
     {
         if (!class_exists('KeyManager') || !class_exists('Crypto') || !class_exists('Validator') || !class_exists('EmailTemplates')) {
-            throw new RuntimeException('Mailer init failed: required libs missing (KeyManager, Crypto, Validator, EmailTemplates).');
+            throw new \RuntimeException('Mailer init failed: required libs missing (KeyManager, Crypto, Validator, EmailTemplates).');
         }
         if (!class_exists('Logger')) {
-            throw new RuntimeException('Mailer init failed: Logger missing.');
+            throw new \RuntimeException('Mailer init failed: Logger missing.');
         }
         if (!class_exists('\PHPMailer\PHPMailer\PHPMailer')) {
-            throw new RuntimeException('Mailer init failed: PHPMailer not available. Ensure bootstrap loads PHPMailer.');
+            throw new \RuntimeException('Mailer init failed: PHPMailer not available. Ensure bootstrap loads PHPMailer.');
         }
         self::$config = $config;
         self::$pdo = $pdo;
@@ -51,7 +59,7 @@ final class Mailer
             self::$keysDir = $keysDir;
         } catch (\Throwable $e) {
             Logger::systemError($e);
-            throw new RuntimeException('Mailer init: Crypto initialization failed.');
+            throw new \RuntimeException('Mailer init: Crypto initialization failed.');
         }
 
         // No DKIM required/handled here (host provider signs mail or not).
@@ -60,25 +68,25 @@ final class Mailer
 
     public static function enqueue(array $payloadArr, int $maxRetries = 0): int
     {
-        if (!self::$inited) throw new RuntimeException('Mailer not initialized.');
+        if (!self::$inited) throw new \RuntimeException('Mailer not initialized.');
 
         $configMax = (int)(self::$config['smtp']['max_retries'] ?? 0);
         if ($maxRetries <= 0) $maxRetries = $configMax > 0 ? $configMax : 6;
 
         $json = json_encode($payloadArr, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         if ($json === false) {
-            throw new RuntimeException('Failed to encode notification payload to JSON.');
+            throw new \RuntimeException('Failed to encode notification payload to JSON.');
         }
         $templateName = $payloadArr['template'] ?? '';
-        if (!Validator::validateNotificationPayload($json, $templateName)) {
-            throw new RuntimeException('Invalid notification payload.');
+        if (!Validator::NotificationPayload($json, $templateName)) {
+            throw new \RuntimeException('Invalid notification payload.');
         }
 
         $keysDir = self::$keysDir ?? (self::$config['paths']['keys'] ?? null);
         $emailKeyInfo = KeyManager::getEmailKeyInfo($keysDir); // ['raw'=>binary,'version'=>'vN']
         $keyRaw = $emailKeyInfo['raw'] ?? null;
         if ($keyRaw === null) {
-            throw new RuntimeException('Email key not available.');
+            throw new \RuntimeException('Email key not available.');
         }
 
         $cipher = Crypto::encryptWithKeyBytes($json, $keyRaw, 'binary');
@@ -97,7 +105,7 @@ final class Mailer
         // optional: protect against extremely large payloads
         if (strlen($payloadForDb) > 2000000) { // 2MB safe-guard (adjust as needed)
             Logger::systemMessage('error', 'Mailer enqueue failed: payload too large', null, ['size' => strlen($payloadForDb)]);
-            throw new RuntimeException('Notification payload too large.');
+            throw new \RuntimeException('Notification payload too large.');
         }
 
         // získat user_id z payloadu
@@ -139,7 +147,7 @@ final class Mailer
             if (!$ok) {
                 $err = self::$pdo->errorInfo();
                 Logger::systemMessage('error', 'Mailer enqueue DB insert failed', $userId, ['error' => $err[2] ?? $err]);
-                throw new RuntimeException('Failed to enqueue notification (DB).');
+                throw new \RuntimeException('Failed to enqueue notification (DB).');
             }
             $id = (int) self::$pdo->lastInsertId();
             Logger::systemMessage('notice', 'Notification enqueued', $userId, ['id' => $id, 'template' => $templateName]);
@@ -152,7 +160,7 @@ final class Mailer
 
     public static function processPendingNotifications(int $limit = 100): array
     {
-        if (!self::$inited) throw new RuntimeException('Mailer not initialized.');
+        if (!self::$inited) throw new \RuntimeException('Mailer not initialized.');
         $report = ['processed' => 0, 'sent' => 0, 'failed' => 0, 'skipped' => 0, 'errors' => []];
 
         $pdo = self::$pdo;
@@ -169,9 +177,9 @@ final class Mailer
             LIMIT :lim
         ';
         $fetchStmt = $pdo->prepare($fetchSql);
-        $fetchStmt->bindValue(':lim', $limit, PDO::PARAM_INT);
+        $fetchStmt->bindValue(':lim', $limit, \PDO::PARAM_INT);
         $fetchStmt->execute();
-        $rows = $fetchStmt->fetchAll(PDO::FETCH_ASSOC);
+        $rows = $fetchStmt->fetchAll(\PDO::FETCH_ASSOC);
 
         foreach ($rows as $row) {
             $report['processed']++;
@@ -230,7 +238,7 @@ final class Mailer
                     continue;
                 }
 
-                if (!Validator::validateJson($plain)) {
+                if (!Validator::Json($plain)) {
                     self::markFailed($id, $retries, $maxRetries, 'invalid_json');
                     $report['failed']++;
                     Logger::systemMessage('warning', 'Notification payload JSON invalid', null, ['id' => $id]);
@@ -239,7 +247,7 @@ final class Mailer
 
                 $payload = json_decode($plain, true);
                 $templateName = $payload['template'] ?? '';
-                if (!Validator::validateNotificationPayload(json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), $templateName)) {
+                if (!Validator::NotificationPayload(json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), $templateName)) {
                     self::markFailed($id, $retries, $maxRetries, 'payload_validation_failed');
                     $report['failed']++;
                     Logger::systemMessage('warning', 'Notification payload validation failed', null, ['id' => $id, 'template' => $templateName]);
@@ -442,7 +450,7 @@ final class Mailer
     private static function sendSmtpEmail(string $to, string $subject, string $htmlBody, string $textBody, array $payload): array
     {
         if (!self::$config || !isset(self::$config['smtp'])) {
-            throw new RuntimeException('SMTP config missing.');
+            throw new \RuntimeException('SMTP config missing.');
         }
         $smtp = self::$config['smtp'];
         $host = trim((string)($smtp['host'] ?? ''));
@@ -473,7 +481,7 @@ final class Mailer
             return ['ok' => false, 'error' => 'no_recipients'];
         }
         foreach ($rcpts as $r) {
-            if (!Validator::validateEmail($r)) {
+            if (!Validator::Email($r)) {
                 return ['ok' => false, 'error' => 'invalid_recipient: ' . $r];
             }
         }

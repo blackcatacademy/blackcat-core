@@ -1,7 +1,12 @@
 <?php
 declare(strict_types=1);
 
+namespace BlackCat\Core\Cache;
+
 use Psr\SimpleCache\InvalidArgumentException as PsrInvalidArgumentException;
+use BlackCat\Core\Security\KeyManager;
+use BlackCat\Core\Security\Crypto;
+use BlackCat\Core\Log\Logger;
 
 /**
  * Production-ready file-based PSR-16 cache (improved).
@@ -75,14 +80,14 @@ class FileCache implements LockingCacheInterface
 
         if (!is_dir($this->cacheDir)) {
             if (!@mkdir($this->cacheDir, 0700, true) && !is_dir($this->cacheDir)) {
-                throw new RuntimeException("Cannot create cache directory: {$this->cacheDir}");
+                throw new \RuntimeException("Cannot create cache directory: {$this->cacheDir}");
             }
             @chmod($this->cacheDir, 0700);
         }
 
         $real = realpath($this->cacheDir);
         if ($real === false) {
-            throw new RuntimeException("Cannot resolve cacheDir realpath: {$this->cacheDir}");
+            throw new \RuntimeException("Cannot resolve cacheDir realpath: {$this->cacheDir}");
         }
         $this->cacheDirReal = rtrim($real, DIRECTORY_SEPARATOR);
 
@@ -100,13 +105,13 @@ class FileCache implements LockingCacheInterface
 
         if ($this->useEncryption) {
             if (!class_exists('KeyManager') || !class_exists('Crypto')) {
-                throw new RuntimeException('KeyManager or Crypto class not available; cannot enable encryption.');
+                throw new \RuntimeException('KeyManager or Crypto class not available; cannot enable encryption.');
             }
 
             try {
                 KeyManager::requireSodium();
-            } catch (Throwable $e) {
-                throw new RuntimeException('libsodium extension required for FileCache encryption: ' . $e->getMessage());
+            } catch (\Throwable $e) {
+                throw new \RuntimeException('libsodium extension required for FileCache encryption: ' . $e->getMessage());
             }
 
             try {
@@ -117,31 +122,31 @@ class FileCache implements LockingCacheInterface
                     KeyManager::keyByteLen()
                 );
                 if (!is_array($candidates) || empty($candidates)) {
-                    throw new RuntimeException('No key material found for FileCache encryption (check ENV ' . $this->cryptoEnvName . ' or keysDir ' . ($this->cryptoKeysDir ?? 'null') . ').');
+                    throw new \RuntimeException('No key material found for FileCache encryption (check ENV ' . $this->cryptoEnvName . ' or keysDir ' . ($this->cryptoKeysDir ?? 'null') . ').');
                 }
                 foreach ($candidates as &$c) {
-                    try { KeyManager::memzero($c); } catch (Throwable $_) {}
+                    try { KeyManager::memzero($c); } catch (\Throwable $_) {}
                 }
                 unset($candidates);
-            } catch (Throwable $e) {
-                throw new RuntimeException('FileCache encryption initialization failed: ' . $e->getMessage());
+            } catch (\Throwable $e) {
+                throw new \RuntimeException('FileCache encryption initialization failed: ' . $e->getMessage());
             }
         }
     }
 
     /**
      * Logging wrapper that uses your static Logger.
-     * - If Throwable $e is provided, calls Logger::systemError($e, ...)
+     * - If \Throwable $e is provided, calls Logger::systemError($e, ...)
      * - Otherwise calls Logger::systemMessage($level, $msg, null, $context)
      *
      * This wrapper never throws.
      *
      * @param string $level  'warning'|'error'|'info'|'critical'
      * @param string $msg
-     * @param Throwable|null $e
+     * @param \Throwable|null $e
      * @param array|null $context
      */
-    private function log(string $level, string $msg, ?Throwable $e = null, ?array $context = null): void
+    private function log(string $level, string $msg, ?\Throwable $e = null, ?array $context = null): void
     {
         try {
             if ($e !== null && class_exists('Logger') && method_exists('Logger', 'systemError')) {
@@ -149,7 +154,7 @@ class FileCache implements LockingCacheInterface
                 try {
                     Logger::systemError($e, null, null, $context ?? ['component' => 'FileCache']);
                     return;
-                } catch (Throwable $_) {
+                } catch (\Throwable $_) {
                     // swallow and fallback
                 }
             }
@@ -159,14 +164,14 @@ class FileCache implements LockingCacheInterface
                     $ctx = $context ?? ['component' => 'FileCache'];
                     Logger::systemMessage($level, $msg, null, $ctx);
                     return;
-                } catch (Throwable $_) {
+                } catch (\Throwable $_) {
                     // swallow
                 }
             }
 
             // final fallback
             error_log('[FileCache][' . $level . '] ' . $msg);
-        } catch (Throwable $_) {
+        } catch (\Throwable $_) {
             // absolutely silent fallback
         }
     }
@@ -223,8 +228,8 @@ class FileCache implements LockingCacheInterface
     private function normalizeTtl($ttl): ?int
     {
         if ($ttl === null) return null;
-        if ($ttl instanceof DateInterval) {
-            $now = new DateTimeImmutable();
+        if ($ttl instanceof \DateInterval) {
+            $now = new \DateTimeImmutable();
             $expiry = $now->add($ttl);
             return $expiry->getTimestamp() - $now->getTimestamp();
         }
@@ -385,12 +390,12 @@ class FileCache implements LockingCacheInterface
         $processedExpired = 0;
         $maxGcPerRun = 1000;
 
-        $it = new RecursiveIteratorIterator(
-            new RecursiveDirectoryIterator(
+        $it = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator(
                 $this->cacheDirReal,
-                FilesystemIterator::SKIP_DOTS | FilesystemIterator::CURRENT_AS_FILEINFO
+                \FilesystemIterator::SKIP_DOTS | \FilesystemIterator::CURRENT_AS_FILEINFO
             ),
-            RecursiveIteratorIterator::LEAVES_ONLY
+            \RecursiveIteratorIterator::LEAVES_ONLY
         );
 
         foreach ($it as $f) {
@@ -490,7 +495,7 @@ class FileCache implements LockingCacheInterface
                 );
                 $rawKey = $info['raw'];
                 $plain = Crypto::decryptWithKeyCandidates($payload, [$rawKey]);
-                try { KeyManager::memzero($rawKey); } catch (Throwable $_) {}
+                try { KeyManager::memzero($rawKey); } catch (\Throwable $_) {}
                 unset($rawKey, $info);
 
                 if ($plain !== null) {
@@ -499,7 +504,7 @@ class FileCache implements LockingCacheInterface
                     $this->counters['hits']++;
                     return $val;
                 }
-            } catch (Throwable $e) {
+            } catch (\Throwable $e) {
                 $this->log('warning', 'decrypt_by_version failed', $e);
             }
         }
@@ -520,7 +525,7 @@ class FileCache implements LockingCacheInterface
             $plain = Crypto::decryptWithKeyCandidates($payload, $candidates);
 
             foreach ($candidates as &$c) {
-                try { KeyManager::memzero($c); } catch (Throwable $_) {}
+                try { KeyManager::memzero($c); } catch (\Throwable $_) {}
             }
             unset($candidates);
 
@@ -529,7 +534,7 @@ class FileCache implements LockingCacheInterface
             if ($val === false && $plain !== serialize(false)) return $default;
             $this->counters['hits']++;
             return $val;
-        } catch (Throwable $e) {
+        } catch (\Throwable $e) {
             $this->log('warning', 'decrypt_all_keys failed', $e);
             return $default;
         }
@@ -545,7 +550,7 @@ class FileCache implements LockingCacheInterface
      *
      * @throws CacheInvalidArgumentException
      */
-    public function set(string $key, mixed $value, DateInterval|int|null $ttl = null): bool
+    public function set(string $key, mixed $value, \DateInterval|int|null $ttl = null): bool
     {
         $this->validateKey($key);
         $file = $this->getPath($key);
@@ -565,7 +570,7 @@ class FileCache implements LockingCacheInterface
                     false,
                     KeyManager::keyByteLen()
                 );
-            } catch (Throwable $e) {
+            } catch (\Throwable $e) {
                 $this->log('error', 'failed to obtain raw key', $e);
                 return false;
             }
@@ -574,20 +579,20 @@ class FileCache implements LockingCacheInterface
             $version = $info['version'] ?? null;
 
             if (!is_string($raw) || strlen($raw) !== KeyManager::keyByteLen()) {
-                try { KeyManager::memzero($raw); } catch (Throwable $_) {}
+                try { KeyManager::memzero($raw); } catch (\Throwable $_) {}
                 $this->log('error', 'invalid raw key returned by KeyManager');
                 return false;
             }
 
             try {
                 $encrypted = Crypto::encryptWithKeyBytes($plain, $raw, 'compact_base64');
-            } catch (Throwable $e) {
+            } catch (\Throwable $e) {
                 $this->log('error', 'encryptWithKeyBytes failed', $e);
-                try { KeyManager::memzero($raw); } catch (Throwable $_) {}
+                try { KeyManager::memzero($raw); } catch (\Throwable $_) {}
                 return false;
             }
 
-            try { KeyManager::memzero($raw); } catch (Throwable $_) {}
+            try { KeyManager::memzero($raw); } catch (\Throwable $_) {}
             unset($raw, $info);
 
             $data = [
@@ -604,7 +609,7 @@ class FileCache implements LockingCacheInterface
             if (random_int(1, $this->gcProbabilityDivisor) <= $this->gcProbability) {
                 $this->gc();
             }
-        } catch (Throwable $_) {}
+        } catch (\Throwable $_) {}
 
         try {
             $serialized = serialize($data);
@@ -621,7 +626,7 @@ class FileCache implements LockingCacheInterface
             $this->counters['sets']++;
             $this->enforceQuota();
             return true;
-        } catch (Throwable $e) {
+        } catch (\Throwable $e) {
             $this->log('error', 'set() error', $e);
             return false;
         }
@@ -644,7 +649,7 @@ class FileCache implements LockingCacheInterface
                 $this->log('warning', 'delete: path outside cacheDir');
                 return false;
             }
-            try { return unlink($file); } catch (Throwable $_) { return false; }
+            try { return unlink($file); } catch (\Throwable $_) { return false; }
         }
         return true;
     }
@@ -661,9 +666,9 @@ class FileCache implements LockingCacheInterface
         $safePrefix = preg_replace('/[^a-zA-Z0-9_\-]/', '_', mb_substr($prefix, 0, self::SAFE_PREFIX_LEN));
         $deleted = 0;
 
-        $it = new RecursiveIteratorIterator(
-            new RecursiveDirectoryIterator($this->cacheDirReal, FilesystemIterator::SKIP_DOTS | FilesystemIterator::CURRENT_AS_FILEINFO),
-            RecursiveIteratorIterator::LEAVES_ONLY
+        $it = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($this->cacheDirReal, \FilesystemIterator::SKIP_DOTS | \FilesystemIterator::CURRENT_AS_FILEINFO),
+            \RecursiveIteratorIterator::LEAVES_ONLY
         );
 
         foreach ($it as $f) {
@@ -678,7 +683,7 @@ class FileCache implements LockingCacheInterface
                 if (!$this->isPathInCacheDir($path)) continue;
                 try {
                     if (@unlink($path)) $deleted++;
-                } catch (Throwable $_) {
+                } catch (\Throwable $_) {
                     // ignore individual failures but continue
                 }
             }
@@ -696,8 +701,8 @@ class FileCache implements LockingCacheInterface
     public function clear(): bool
     {
         $success = true;
-        $it = new RecursiveIteratorIterator(
-            new RecursiveDirectoryIterator($this->cacheDirReal, FilesystemIterator::SKIP_DOTS)
+        $it = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($this->cacheDirReal, \FilesystemIterator::SKIP_DOTS)
         );
         foreach ($it as $f) {
             if (!$f->isFile()) continue;
@@ -742,7 +747,7 @@ class FileCache implements LockingCacheInterface
      *
      * @throws CacheInvalidArgumentException
      */
-    public function setMultiple(iterable $values, null|int|DateInterval $ttl = null): bool
+    public function setMultiple(iterable $values, null|int|\DateInterval $ttl = null): bool
     {
         $success = true;
         foreach ($values as $k => $v) {
@@ -810,7 +815,7 @@ class FileCache implements LockingCacheInterface
     private function gc(): void {
         $maxPerRun = 1000; // process limit - adjust as needed
         $processed = 0;
-        $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($this->cacheDirReal, FilesystemIterator::SKIP_DOTS | FilesystemIterator::CURRENT_AS_FILEINFO));
+        $it = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($this->cacheDirReal, \FilesystemIterator::SKIP_DOTS | \FilesystemIterator::CURRENT_AS_FILEINFO));
         foreach ($it as $f) {
             if ($processed++ >= $maxPerRun) break;
             if (!$f->isFile()) continue;
@@ -839,7 +844,7 @@ class FileCache implements LockingCacheInterface
 
         $pattern = $this->cacheDirReal . DIRECTORY_SEPARATOR . ($this->shardDepth > 0 ? '**/*.cache' : '*.cache'); // globstar pseudo - handled manually
         // collect files recursively (safe)
-        $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($this->cacheDirReal, FilesystemIterator::SKIP_DOTS | FilesystemIterator::CURRENT_AS_FILEINFO));
+        $it = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($this->cacheDirReal, \FilesystemIterator::SKIP_DOTS | \FilesystemIterator::CURRENT_AS_FILEINFO));
         $files = [];
         $total = 0;
         $count = 0;
@@ -880,4 +885,4 @@ class FileCache implements LockingCacheInterface
 /**
  * PSR-16 compatible InvalidArgumentException for this file cache.
  */
-class CacheInvalidArgumentException extends InvalidArgumentException implements PsrInvalidArgumentException {}
+class CacheInvalidArgumentException extends \InvalidArgumentException implements PsrInvalidArgumentException {}

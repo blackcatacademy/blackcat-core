@@ -1,5 +1,14 @@
 <?php
+
 declare(strict_types=1);
+
+namespace BlackCat\Core\Session;
+
+use BlackCat\Core\Database;
+use BlackCat\Core\Security\KeyManager;
+use BlackCat\Core\Security\Crypto;
+use BlackCat\Core\Security\CSRF;
+use BlackCat\Core\Log\Logger;
 
 final class SessionManager
 {
@@ -286,11 +295,11 @@ final class SessionManager
             $tokenHashBin = $derived['hash'];                // binary 32 bytes
             $tokenHashKeyVer = $derived['version'] ?? null;  // e.g. 'v2' or 'env'
             if (!is_string($tokenHashBin) || strlen($tokenHashBin) !== 32) {
-                throw new RuntimeException('Derived token hash invalid');
+                throw new \RuntimeException('Derived token hash invalid');
             }
         } catch (\Throwable $e) {
             if (class_exists('Logger')) { try { Logger::systemError($e, $userId); } catch (\Throwable $_) {} }
-            throw new RuntimeException('Unable to initialize session key.');
+            throw new \RuntimeException('Unable to initialize session key.');
         }
 
         $nowUtc = (new \DateTimeImmutable('now', new \DateTimeZone('UTC')))->format('Y-m-d H:i:s.u');
@@ -691,7 +700,7 @@ final class SessionManager
             }
         } catch (\Throwable $_) {
             if (class_exists('Logger')) {
-                try { Logger::systemError('[validateSession] Invalid expires_at value'); } catch (\Throwable $_) {}
+                try { Logger::Error('[validateSession] Invalid expires_at value'); } catch (\Throwable $_) {}
             }
             $validateCache[$cacheKey] = null;
             return null;

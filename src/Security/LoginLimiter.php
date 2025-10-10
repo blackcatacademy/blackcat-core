@@ -1,5 +1,12 @@
 <?php
+
 declare(strict_types=1);
+
+namespace BlackCat\Core\Security;
+
+use BlackCat\Core\Database;
+use BlackCat\Core\Log\Logger;
+use BlackCat\Core\Helpers\DeferredHelper;
 
 final class LoginLimiter
 {
@@ -52,10 +59,10 @@ final class LoginLimiter
             ':username_hash' => $usernameHashBin,
         ];
 
-        if (\Database::isInitialized()) {
+        if (Database::isInitialized()) {
             DeferredHelper::flush();
             try {
-                \Database::getInstance()->execute($sql, $params);
+                Database::getInstance()->execute($sql, $params);
             } catch (\Throwable $_) {
                 // silent fail — limiter nesmí shodit aplikaci
             }
@@ -64,7 +71,7 @@ final class LoginLimiter
 
         DeferredHelper::enqueue(function() use ($sql, $params) {
             try {
-                \Database::getInstance()->execute($sql, $params);
+                Database::getInstance()->execute($sql, $params);
             } catch (\Throwable $_) {
                 // silent fail
             }
@@ -78,7 +85,7 @@ final class LoginLimiter
      */
     public static function isBlocked(?string $ip = null, int $maxAttempts = self::DEFAULT_MAX_ATTEMPTS, int $windowSec = self::DEFAULT_WINDOW_SEC): bool
     {
-        if (!\Database::isInitialized()) {
+        if (!Database::isInitialized()) {
             return false; // bez DB neblokujeme
         }
 
@@ -102,7 +109,7 @@ final class LoginLimiter
         ];
 
         try {
-            $row = \Database::getInstance()->fetch($sql, $params);
+            $row = Database::getInstance()->fetch($sql, $params);
             $cnt = $row && isset($row['cnt']) ? (int)$row['cnt'] : 0;
             return $cnt >= $maxAttempts;
         } catch (\Throwable $_) {
@@ -116,7 +123,7 @@ final class LoginLimiter
      */
     public static function getAttemptsCount(?string $ip = null, int $windowSec = self::DEFAULT_WINDOW_SEC): int
     {
-        if (!\Database::isInitialized()) return 0;
+        if (!Database::isInitialized()) return 0;
         $ipHashBin = self::prepareBin32ForStorage(Logger::getHashedIp($ip)['hash']);
         if ($ipHashBin === null) return 0;
 
@@ -127,7 +134,7 @@ final class LoginLimiter
                   AND attempted_at >= :cutoff
                   AND success = 0";
         try {
-            $row = \Database::getInstance()->fetch($sql, [':ip_hash' => $ipHashBin, ':cutoff' => $cutoff]);
+            $row = Database::getInstance()->fetch($sql, [':ip_hash' => $ipHashBin, ':cutoff' => $cutoff]);
             return $row && isset($row['cnt']) ? (int)$row['cnt'] : 0;
         } catch (\Throwable $_) {
             return 0;
@@ -151,7 +158,7 @@ final class LoginLimiter
      */
     public static function getSecondsUntilUnblock(?string $ip = null, int $maxAttempts = self::DEFAULT_MAX_ATTEMPTS, int $windowSec = self::DEFAULT_WINDOW_SEC): int
     {
-        if (!\Database::isInitialized()) return 0;
+        if (!Database::isInitialized()) return 0;
         $ipHashBin = self::prepareBin32ForStorage(Logger::getHashedIp($ip)['hash']);
         if ($ipHashBin === null) return 0;
 
@@ -168,7 +175,7 @@ final class LoginLimiter
                 LIMIT $limit";
 
         try {
-            $rows = \Database::getInstance()->fetchAll($sql, [':ip_hash' => $ipHashBin, ':cutoff' => $cutoff]);
+            $rows = Database::getInstance()->fetchAll($sql, [':ip_hash' => $ipHashBin, ':cutoff' => $cutoff]);
             $count = is_array($rows) ? count($rows) : 0;
             if ($count < $maxAttempts) {
                 return 0; // není blokováno
@@ -202,7 +209,7 @@ final class LoginLimiter
      */
     public static function registerRegisterAttempt(bool $success = false, ?int $userId = null, ?string $userAgent = null, ?array $meta = null, ?string $error = null): void
     {
-        if (!\Database::isInitialized()) {
+        if (!Database::isInitialized()) {
             return;
         }
 
@@ -268,7 +275,7 @@ final class LoginLimiter
 
         try {
             DeferredHelper::flush();
-            \Database::getInstance()->execute($sql, $params);
+            Database::getInstance()->execute($sql, $params);
         } catch (\Throwable $_) {
             // silent fail (limiter nesmí shodit aplikaci)
         }
@@ -282,7 +289,7 @@ final class LoginLimiter
      */
     public static function isRegisterBlocked(?string $ip = null, int $maxAttempts = self::DEFAULT_MAX_ATTEMPTS, int $windowSec = self::DEFAULT_WINDOW_SEC): bool
     {
-        if (!\Database::isInitialized()) {
+        if (!Database::isInitialized()) {
             return false;
         }
 
@@ -301,7 +308,7 @@ final class LoginLimiter
                   AND type = 'register_failure'";
 
         try {
-            $row = \Database::getInstance()->fetch($sql, [':ip_hash' => $ipHashBin, ':cutoff' => $cutoff]);
+            $row = Database::getInstance()->fetch($sql, [':ip_hash' => $ipHashBin, ':cutoff' => $cutoff]);
             $cnt = $row && isset($row['cnt']) ? (int)$row['cnt'] : 0;
             return $cnt >= $maxAttempts;
         } catch (\Throwable $_) {
@@ -314,7 +321,7 @@ final class LoginLimiter
      */
     public static function getRegisterAttemptsCount(?string $ip = null, int $windowSec = self::DEFAULT_WINDOW_SEC): int
     {
-        if (!\Database::isInitialized()) return 0;
+        if (!Database::isInitialized()) return 0;
         $ipHashBin = self::prepareBin32ForStorage(Logger::getHashedIp($ip)['hash']);
         if ($ipHashBin === null) return 0;
 
@@ -325,7 +332,7 @@ final class LoginLimiter
                   AND occurred_at >= :cutoff
                   AND type = 'register_failure'";
         try {
-            $row = \Database::getInstance()->fetch($sql, [':ip_hash' => $ipHashBin, ':cutoff' => $cutoff]);
+            $row = Database::getInstance()->fetch($sql, [':ip_hash' => $ipHashBin, ':cutoff' => $cutoff]);
             return $row && isset($row['cnt']) ? (int)$row['cnt'] : 0;
         } catch (\Throwable $_) {
             return 0;
@@ -347,7 +354,7 @@ final class LoginLimiter
      */
     public static function getRegisterSecondsUntilUnblock(?string $ip = null, int $maxAttempts = self::DEFAULT_MAX_ATTEMPTS, int $windowSec = self::DEFAULT_WINDOW_SEC): int
     {
-        if (!\Database::isInitialized()) return 0;
+        if (!Database::isInitialized()) return 0;
         $ipHashBin = self::prepareBin32ForStorage(Logger::getHashedIp($ip)['hash']);
         if ($ipHashBin === null) return 0;
 
@@ -363,7 +370,7 @@ final class LoginLimiter
                 LIMIT $limit";
 
         try {
-            $rows = \Database::getInstance()->fetchAll($sql, [':ip_hash' => $ipHashBin, ':cutoff' => $cutoff]);
+            $rows = Database::getInstance()->fetchAll($sql, [':ip_hash' => $ipHashBin, ':cutoff' => $cutoff]);
             $count = is_array($rows) ? count($rows) : 0;
             if ($count < $maxAttempts) return 0;
 
@@ -388,7 +395,7 @@ final class LoginLimiter
      */
     public static function cleanup(int $olderThanSec = 86400): void
     {
-        if (!\Database::isInitialized()) {
+        if (!Database::isInitialized()) {
             return;
         }
 
@@ -398,7 +405,7 @@ final class LoginLimiter
         $params = [':cutoff' => $cutoff];
 
         try {
-            \Database::getInstance()->execute($sql, $params);
+            Database::getInstance()->execute($sql, $params);
         } catch (\Throwable $_) {
             // ignore
         }

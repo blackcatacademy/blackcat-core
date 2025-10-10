@@ -1,8 +1,13 @@
 <?php
 declare(strict_types=1);
 
+namespace BlackCat\Core\Security;
+use Psr\Log\LoggerInterface;
+use BlackCat\Core\Security\Crypto;
+
 final class CSRF
 {
+    private static ?LoggerInterface $logger = null;
     private const DEFAULT_TTL = 3600; // 1 hour
     private const DEFAULT_MAX_TOKENS = 16;
 
@@ -11,6 +16,10 @@ final class CSRF
     private static int $ttl = self::DEFAULT_TTL;
     private static int $maxTokens = self::DEFAULT_MAX_TOKENS;
 
+    public static function setLogger(?LoggerInterface $logger): void
+    {
+        self::$logger = $logger;
+    }
     /**
      * Inject reference to session array for testability / explicit init.
      * If $sessionRef is null, will attempt to use global $_SESSION (requires session_start()).
@@ -23,7 +32,7 @@ final class CSRF
     {
         if ($sessionRef === null) {
             if (session_status() !== PHP_SESSION_ACTIVE) {
-                throw new RuntimeException('Session not active — call bootstrap (session_start) first.');
+                throw new \LogicException('Session not active — call bootstrap (session_start) first.');
             }
             $sessionRef = &$_SESSION;
         }
@@ -51,8 +60,8 @@ final class CSRF
                 return $candidates[0]['version'];
             }
         } catch (\Throwable $e) {
-            if (class_exists('Logger')) {
-                try { Logger::systemError($e); } catch (\Throwable $_) {}
+            if (self::$logger) {
+                self::$logger->error('CSRF getKeyVersion failed', ['exception' => $e]);
             }
         }
         return null;
@@ -67,8 +76,24 @@ final class CSRF
                 self::init($ref);
                 return;
             }
-            throw new RuntimeException('CSRF not initialized. Call CSRF::init() after session_start().');
+            throw new \LogicException('CSRF not initialized. Call CSRF::init() after session_start().');
         }
+    }
+
+    public static function countTokens(): int
+    {
+        self::ensureInitialized();
+        return count(self::$session['csrf_tokens']);
+    }
+
+    public static function reset(): void
+    {
+        if (self::$session !== null) {
+            unset(self::$session['csrf_tokens']);
+        }
+        self::$session = null;
+        self::$ttl = self::DEFAULT_TTL;
+        self::$maxTokens = self::DEFAULT_MAX_TOKENS;
     }
 
     public static function token(): string
@@ -134,8 +159,8 @@ final class CSRF
         $candidates = Crypto::hmac($id . ':' . $val, 'CSRF_KEY', 'csrf_key', null, true);
         
         // token() vytváří mac jako bin2hex(...), převést zpět na binary
-        $macBin = @hex2bin($mac);
-        if ($macBin === false || strlen($macBin) !== 32) {
+        $macBin = hex2bin($mac);
+        if ($macBin === false || strlen($macBin) < 16) {
             return false;
         }
 

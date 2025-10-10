@@ -1,6 +1,8 @@
 <?php
 declare(strict_types=1);
 
+namespace BlackCat\Core\Log;
+
 /**
  * libs/AuditLogger.php
  *
@@ -27,12 +29,12 @@ final class AuditLogger
      * @param array $meta
      * @return bool
      */
-    public static function log(?PDO $pdo, $actorId, string $action, string $payloadEnc, string $keyVersion = '', array $meta = []): bool
+    public static function log(?\PDO $pdo, $actorId, string $action, string $payloadEnc, string $keyVersion = '', array $meta = []): bool
     {
-        $now = (new DateTimeImmutable('now', new DateTimeZone('UTC')))->format('Y-m-d H:i:s');
+        $now = (new \DateTimeImmutable('now', new \DateTimeZone('UTC')))->format('Y-m-d H:i:s');
 
         // Try DB first (best-effort)
-        if ($pdo instanceof PDO) {
+        if ($pdo instanceof \PDO) {
             try {
                 $sql = 'INSERT INTO audit_log (event_time, actor_id, action, payload_enc, key_version, meta)
                         VALUES (:t, :actor, :action, :payload, :kv, :meta)';
@@ -49,7 +51,7 @@ final class AuditLogger
                 if ($ok) return true;
                 // else fallthrough to file fallback
                 error_log('[AuditLogger] DB execute returned false; falling back to file');
-            } catch (Throwable $e) {
+            } catch (\Throwable $e) {
                 error_log('[AuditLogger] DB write failed: ' . $e->getMessage());
                 // continue to file fallback
             }
@@ -58,7 +60,7 @@ final class AuditLogger
         // File fallback
         try {
             return self::fileFallback($now, (string)($actorId ?? ''), $action, $payloadEnc, $keyVersion, $meta);
-        } catch (Throwable $e) {
+        } catch (\Throwable $e) {
             // Never let audit failure kill the app
             error_log('[AuditLogger] file fallback failed: ' . $e->getMessage());
             return false;
@@ -106,7 +108,7 @@ final class AuditLogger
         // ensure dir exists
         if (!is_dir($auditDir)) {
             if (!@mkdir($auditDir, 0700, true) && !is_dir($auditDir)) {
-                throw new RuntimeException('AuditLogger: failed to create audit dir: ' . $auditDir);
+                throw new \RuntimeException('AuditLogger: failed to create audit dir: ' . $auditDir);
             }
             @chmod($auditDir, 0700);
         }
@@ -122,29 +124,29 @@ final class AuditLogger
         ];
         $line = json_encode($entry, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         if ($line === false) {
-            throw new RuntimeException('AuditLogger: json_encode failed');
+            throw new \RuntimeException('AuditLogger: json_encode failed');
         }
         $line .= PHP_EOL;
 
         // create a tempfile in same dir
         $tmp = tempnam($auditDir, 'audit_');
         if ($tmp === false) {
-            throw new RuntimeException('AuditLogger: temp file creation failed in ' . $auditDir);
+            throw new \RuntimeException('AuditLogger: temp file creation failed in ' . $auditDir);
         }
 
         $fp = @fopen($tmp, 'cb');
         if ($fp === false) {
             @unlink($tmp);
-            throw new RuntimeException('AuditLogger: cannot open temp file for write: ' . $tmp);
+            throw new \RuntimeException('AuditLogger: cannot open temp file for write: ' . $tmp);
         }
 
         try {
             if (!flock($fp, LOCK_EX)) {
-                throw new RuntimeException('AuditLogger: flock failed on ' . $tmp);
+                throw new \RuntimeException('AuditLogger: flock failed on ' . $tmp);
             }
             $bytes = fwrite($fp, $line);
             if ($bytes === false || $bytes < strlen($line)) {
-                throw new RuntimeException('AuditLogger: incomplete write to temp file');
+                throw new \RuntimeException('AuditLogger: incomplete write to temp file');
             }
             fflush($fp);
             // permissions will be set on the filename after closing for portability
@@ -163,7 +165,7 @@ final class AuditLogger
                 $ok = self::appendFile($final, $line);
                 @unlink($tmp);
                 if (!$ok) {
-                    throw new RuntimeException('AuditLogger: rename to final failed and append fallback failed');
+                    throw new \RuntimeException('AuditLogger: rename to final failed and append fallback failed');
                 }
                 @chmod($final, 0600);
                 return true;
@@ -179,7 +181,7 @@ final class AuditLogger
             @chmod($final, 0600);
             return true;
         }
-        throw new RuntimeException('AuditLogger: append to final failed');
+        throw new \RuntimeException('AuditLogger: append to final failed');
     }
 
     /**

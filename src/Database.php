@@ -1,35 +1,43 @@
 <?php
 declare(strict_types=1);
 
-class DatabaseException extends RuntimeException {}
+namespace BlackCat\Core;
+
+use Psr\Log\LoggerInterface;
+
+class DatabaseException extends \RuntimeException {}
 
 final class Database
 {
     private static ?self $instance = null;
-    private ?PDO $pdo = null;
+    private ?\PDO $pdo = null;
     private array $config = [];
+    private ?LoggerInterface $logger = null;
 
     /**
      * Soukromý konstruktor — singleton
      */
-    private function __construct(array $config, PDO $pdo)
+    private function __construct(array $config, \PDO $pdo, ?LoggerInterface $logger = null)
     {
         $this->config = $config;
         $this->pdo = $pdo;
+        $this->logger = $logger;
     }
 
     /**
      * Inicializace (volej z bootstrapu) - eager connect
      *
+     * Pokud chceš logování, předej implementaci Psr\Log\LoggerInterface jako druhý parametr.
+     *
      * Konfigurace: [
      *   'dsn' => 'mysql:host=...;dbname=...;charset=utf8mb4',
      *   'user' => 'dbuser',
      *   'pass' => 'secret',
-     *   'options' => [PDO::ATTR_TIMEOUT => 5, ...],
+     *   'options' => [\PDO::ATTR_TIMEOUT => 5, ...],
      *   'init_commands' => [ "SET time_zone = '+00:00'", "SET sql_mode = 'STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION'" ]
      * ]
      */
-    public static function init(array $config): void
+    public static function init(array $config, ?LoggerInterface $logger = null): void
     {
         if (self::$instance !== null) {
             throw new DatabaseException('Database already initialized');
@@ -47,10 +55,10 @@ final class Database
 
         // Bezpečnostní defaulty, které nelze přepsat
         $enforcedDefaults = [
-            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-            PDO::ATTR_EMULATE_PREPARES => false,
-            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-            PDO::ATTR_STRINGIFY_FETCHES => false,
+            \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
+            \PDO::ATTR_EMULATE_PREPARES => false,
+            \PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC,
+            \PDO::ATTR_STRINGIFY_FETCHES => false,
         ];
 
         $options = $givenOptions;
@@ -59,42 +67,42 @@ final class Database
         }
 
         try {
-            $pdo = new PDO($dsn, $user, $pass, $options);
+            $pdo = new \PDO($dsn, $user, $pass, $options);
 
             // Run optional initialization commands (best-effort)
             if (!empty($initCommands) && is_array($initCommands)) {
                 foreach ($initCommands as $cmd) {
                     if (!is_string($cmd)) continue;
-                    try { $pdo->exec($cmd); } catch (PDOException $_) { /* ignore init failures */ }
+                    try { $pdo->exec($cmd); } catch (\PDOException $_) { /* ignore init failures */ }
                 }
             }
 
             // Basic connectivity check
             try {
                 $pdo->query('SELECT 1');
-            } catch (PDOException $e) {
-                // If the simple query fails, still create instance but note possible connectivity issues.
-                if (class_exists('Logger')) {
-                    // non-fatal connectivity warning
-                    Logger::warn('Database connectivity check failed', null, ['error' => substr((string)$e->getMessage(), 0, 200)]);
+            } catch (\PDOException $e) {
+                // non-fatal connectivity warning (pokud je logger dostupný)
+                if ($logger !== null) {
+                    try {
+                        $logger->warning('Database connectivity check failed', ['error' => substr((string)$e->getMessage(), 0, 200)]);
+                    } catch (\Throwable $_) { /* swallow logger errors */ }
                 }
                 throw new DatabaseException('Failed to connect to database', 0, $e);
             }
 
-        } catch (PDOException $e) {
-            // Minimal, non-sensitive log via centralized logger (no plaintext credentials).
-            if (class_exists('Logger')) {
-                // prefer systemError for richer info (silent on failure)
+        } catch (\PDOException $e) {
+            // Minimal, non-sensitive log via injected logger (no plaintext credentials).
+            if ($logger !== null) {
                 try {
-                    Logger::systemError($e, null, null, ['phase' => 'init', 'preview' => null]);
+                    $logger->error('Failed to connect to database (init)', ['exception' => $e, 'phase' => 'init']);
                 } catch (\Throwable $_) {
-                    // swallow — Logger must not throw
+                    // swallow — logger must not throw
                 }
             }
             throw new DatabaseException('Failed to connect to database', 0, $e);
         }
 
-        self::$instance = new self($config, $pdo);
+        self::$instance = new self($config, $pdo, $logger);
     }
 
     /**
@@ -111,12 +119,25 @@ final class Database
     /**
      * Vrátí PDO instanci (init musí být volané předtím)
      */
-    public function getPdo(): PDO
+    public function getPdo(): \PDO
     {
         if ($this->pdo === null) {
             throw new DatabaseException('Database not initialized properly (PDO missing).');
         }
         return $this->pdo;
+    }
+
+    public function setLogger(\Psr\Log\LoggerInterface $logger): void
+    {
+        $this->logger = $logger;
+    }
+    
+    /**
+     * Volitelně získat logger (může být null).
+     */
+    public function getLogger(): ?LoggerInterface
+    {
+        return $this->logger;
     }
 
     /**
@@ -129,10 +150,6 @@ final class Database
 
     /* ----------------- Helper metody ----------------- */
 
-    /**
-     * Prepare and execute statement with safe explicit binding.
-     * Returns PDOStatement on success or throws DatabaseException.
-     */
     /** @var bool */
     private bool $debug = false;
 
@@ -144,9 +161,6 @@ final class Database
 
     /**
      * Prepare and execute statement with smart binding.
-     * Supports both named (:name) and positional (?) placeholders.
-     * If $params is sequential (0-based keys) -> použije $stmt->execute($params)
-     * Otherwise provede explicitní bindValue pro lepší typovou bezpečnost.
      */
     public function prepareAndRun(string $sql, array $params = []): \PDOStatement
     {
@@ -167,19 +181,20 @@ final class Database
                     $paramName = (strpos((string)$key, ':') === 0) ? $key : ':' . $key;
 
                     if ($value === null) {
-                        $stmt->bindValue($paramName, null, PDO::PARAM_NULL);
+                        $stmt->bindValue($paramName, null, \PDO::PARAM_NULL);
                     } elseif (is_int($value)) {
-                        $stmt->bindValue($paramName, $value, PDO::PARAM_INT);
+                        $stmt->bindValue($paramName, $value, \PDO::PARAM_INT);
                     } elseif (is_bool($value)) {
-                        $stmt->bindValue($paramName, $value ? 1 : 0, PDO::PARAM_INT);
+                        $stmt->bindValue($paramName, $value, \PDO::PARAM_BOOL);
                     } elseif (is_string($value)) {
-                        if (strpos($value, "\0") !== false && defined('PDO::PARAM_LOB')) {
-                            $stmt->bindValue($paramName, $value, PDO::PARAM_LOB);
+                        // pokud string obsahuje NUL, považujeme ho za LOB (binární)
+                        if (strpos($value, "\0") !== false) {
+                            $stmt->bindValue($paramName, $value, \PDO::PARAM_LOB);
                         } else {
-                            $stmt->bindValue($paramName, $value, PDO::PARAM_STR);
+                            $stmt->bindValue($paramName, $value, \PDO::PARAM_STR);
                         }
                     } else {
-                        $stmt->bindValue($paramName, (string)$value, PDO::PARAM_STR);
+                        $stmt->bindValue($paramName, (string)$value, \PDO::PARAM_STR);
                     }
                 }
                 $stmt->execute();
@@ -187,30 +202,29 @@ final class Database
 
             $durationMs = (microtime(true) - $start) * 1000.0;
 
-            if ($this->debug && class_exists('Logger')) {
-                try {
-                    Logger::info('Database query executed', null, [
+            // debug / slow query logging via injected PSR logger (pokud existuje)
+            try {
+                if ($this->debug && $this->logger !== null) {
+                    $this->logger->info('Database query executed', [
                         'preview' => $this->sanitizeSqlPreview($sql),
                         'duration_ms' => round($durationMs, 2),
                     ]);
-                } catch (\Throwable $_) {}
-            } elseif ($durationMs > $this->slowQueryThresholdMs && class_exists('Logger')) {
-                try {
-                    Logger::warn('Slow database query', null, [
+                } elseif ($durationMs > $this->slowQueryThresholdMs && $this->logger !== null) {
+                    $this->logger->warning('Slow database query', [
                         'preview' => $this->sanitizeSqlPreview($sql),
                         'duration_ms' => round($durationMs, 2),
                     ]);
-                } catch (\Throwable $_) {}
+                }
+            } catch (\Throwable $_) {
+                // never bubble logger errors
             }
 
             return $stmt;
-        } catch (PDOException $e) {
-            if (class_exists('Logger')) {
+        } catch (\PDOException $e) {
+            if ($this->logger !== null) {
                 try {
-                    Logger::systemError($e, null, null, ['sql_preview' => $this->sanitizeSqlPreview($sql)]);
-                } catch (\Throwable $_) {
-                    // never bubble logging errors
-                }
+                    $this->logger->error('Database query failed', ['exception' => $e, 'sql_preview' => $this->sanitizeSqlPreview($sql)]);
+                } catch (\Throwable $_) {}
             }
             throw new DatabaseException('Database query failed', 0, $e);
         }
@@ -223,7 +237,10 @@ final class Database
             $stmt = $this->getPdo()->query($sql);
             if ($stmt === false) throw new DatabaseException('Query failed');
             return $stmt;
-        } catch (PDOException $e) {
+        } catch (\PDOException $e) {
+            if ($this->logger !== null) {
+                try { $this->logger->error('Query failed', ['exception' => $e, 'sql_preview' => $this->sanitizeSqlPreview($sql)]); } catch (\Throwable $_) {}
+            }
             throw new DatabaseException('Query failed', 0, $e);
         }
     }
@@ -237,7 +254,6 @@ final class Database
 
     /**
      * transaction wrapper with support for savepoints (nested transactions).
-     * Vrací návratovou hodnotu callable.
      */
     public function transaction(callable $fn): mixed
     {
@@ -301,9 +317,9 @@ final class Database
     public function beginTransaction(): bool
     {
         try { return $this->getPdo()->beginTransaction(); }
-        catch (PDOException $e) { 
-            if (class_exists('Logger')) {
-            try { Logger::systemError($e, null, null, ['phase' => 'beginTransaction']); } catch (\Throwable $_) {}
+        catch (\PDOException $e) {
+            if ($this->logger !== null) {
+                try { $this->logger->error('Failed to begin transaction', ['exception' => $e, 'phase' => 'beginTransaction']); } catch (\Throwable $_) {}
             }
             throw new DatabaseException('Failed to begin transaction', 0, $e);
         }
@@ -312,9 +328,9 @@ final class Database
     public function commit(): bool
     {
         try { return $this->getPdo()->commit(); }
-        catch (PDOException $e) { 
-            if (class_exists('Logger')) {
-            try { Logger::systemError($e, null, null, ['phase' => 'commit']); } catch (\Throwable $_) {}
+        catch (\PDOException $e) {
+            if ($this->logger !== null) {
+                try { $this->logger->error('Failed to commit transaction', ['exception' => $e, 'phase' => 'commit']); } catch (\Throwable $_) {}
             }
             throw new DatabaseException('Failed to commit transaction', 0, $e);
         }
@@ -323,9 +339,9 @@ final class Database
     public function rollback(): bool
     {
         try { return $this->getPdo()->rollBack(); }
-        catch (PDOException $e) { 
-            if (class_exists('Logger')) {
-            try { Logger::systemError($e, null, null, ['phase' => 'rollback']); } catch (\Throwable $_) {}
+        catch (\PDOException $e) {
+            if ($this->logger !== null) {
+                try { $this->logger->error('Failed to rollback transaction', ['exception' => $e, 'phase' => 'rollback']); } catch (\Throwable $_) {}
             }
             throw new DatabaseException('Failed to rollback transaction', 0, $e);
         }
@@ -390,7 +406,6 @@ final class Database
 
     /**
      * Vrátí pole hodnot z jedné kolony (první sloupec každého řádku).
-     * Např. SELECT id FROM ... -> [1,2,3]
      */
     public function fetchColumn(string $sql, array $params = []): array
     {
@@ -404,7 +419,6 @@ final class Database
 
     /**
      * Vrátí asociativní pole párově key=>value podle první a druhé kolony.
-     * Pokud dotaz vrací jen jednu kolonu, hodnoty budou = první kolona.
      */
     public function fetchPairs(string $sql, array $params = []): array
     {
@@ -422,7 +436,6 @@ final class Database
 
     /**
      * Zjistí, zda existuje nějaký záznam (bool).
-     * Používá LIMIT 1 pro efektivitu pokud dotaz logicky vrací více.
      */
     public function exists(string $sql, array $params = []): bool
     {
@@ -432,8 +445,7 @@ final class Database
     }
 
     /**
-     * Jednoduchý per-request cache pro časté read-only dotazy (např. kategorie v hlavičce).
-     * TTL v sekundách (default 2s; 0 = bez expirace v rámci requestu).
+     * Jednoduchý per-request cache pro časté read-only dotazy.
      */
     public function cachedFetchAll(string $sql, array $params = [], int $ttl = 2): array
     {
@@ -452,9 +464,7 @@ final class Database
     }
 
     /**
-     * Paginate helper: vrátí ['items'=>[], 'total'=>int, 'page'=>int, 'perPage'=>int]
-     * Pokud je $countSql null, pokusí se automaticky spočítat COUNT(*) obalením dotazu (pozor na komplexní queries).
-     * Preferuj předat $countSql pokud máš velký/komplexní dotaz.
+     * Paginate helper ...
      */
     public function paginate(string $sql, array $params = [], int $page = 1, int $perPage = 20, ?string $countSql = null): array
     {
@@ -462,22 +472,18 @@ final class Database
         $perPage = max(1, (int)$perPage);
         $offset = ($page - 1) * $perPage;
 
-        // fetch items with limit
         $pagedSql = $sql . " LIMIT :__limit OFFSET :__offset";
         $paramsWithLimit = $params;
         $paramsWithLimit['__limit'] = $perPage;
         $paramsWithLimit['__offset'] = $offset;
         $items = $this->fetchAll($pagedSql, $paramsWithLimit);
 
-        // total count
         if ($countSql !== null) {
             $total = (int)$this->fetchValue($countSql, $params, 0);
         } else {
-            // bezpečnostní fallback — obalit query; může selhat u některých SQL konstrukcí
             try {
                 $total = (int)$this->fetchValue("SELECT COUNT(*) FROM ({$sql}) AS __count_sub", $params, 0);
             } catch (\Throwable $_) {
-                // pokud to nepůjde, zkus len(items) jako konservativní hodnota
                 $total = count($items);
             }
         }

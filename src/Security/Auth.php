@@ -1,5 +1,10 @@
 <?php
+
 declare(strict_types=1);
+
+namespace BlackCat\Core\Security;
+
+use BlackCat\Core\Log\Logger;
 
 final class Auth
 {
@@ -100,7 +105,7 @@ final class Auth
         ];
     }
 
-    private static function updateEmailHashIdempotent(PDO $db, int $userId, string $hashBin, string $hashVer): bool
+    private static function updateEmailHashIdempotent(\PDO $db, int $userId, string $hashBin, string $hashVer): bool
     {
         // update if missing OR version differs
         $sql = 'UPDATE pouzivatelia
@@ -109,10 +114,10 @@ final class Auth
         $stmt = $db->prepare($sql);
 
         // bind LOB and strings; bind both :v and :v_check (some PDO drivers don't like reusing same named param)
-        $stmt->bindValue(':h', $hashBin, PDO::PARAM_LOB);
-        $stmt->bindValue(':v', $hashVer, PDO::PARAM_STR);
-        $stmt->bindValue(':v_check', $hashVer, PDO::PARAM_STR);
-        $stmt->bindValue(':id', $userId, PDO::PARAM_INT);
+        $stmt->bindValue(':h', $hashBin, \PDO::PARAM_LOB);
+        $stmt->bindValue(':v', $hashVer, \PDO::PARAM_STR);
+        $stmt->bindValue(':v_check', $hashVer, \PDO::PARAM_STR);
+        $stmt->bindValue(':id', $userId, \PDO::PARAM_INT);
 
         try {
             $stmt->execute();
@@ -346,7 +351,7 @@ final class Auth
      * This function is defensive: KeyManager or DB failures are logged (if Logger exists)
      * and result in a safe "no user found" rather than a fatal error.
      */
-    private static function lookupUserByEmail(PDO $db, string $emailNormalized): array
+    private static function lookupUserByEmail(\PDO $db, string $emailNormalized): array
     {
         static $cache = []; // per-request cache: key => ['candidates'=>..., 'latest'=>...]
         $cacheKey = 'email_lookup:' . $emailNormalized;
@@ -420,9 +425,9 @@ final class Auth
                     if (!isset($cand['hash'])) continue;
                     // candidate 'hash' expected as binary string; 'version' may exist
                     $candHash = $cand['hash'];
-                    $q->bindValue(':h', $candHash, PDO::PARAM_LOB);
+                    $q->bindValue(':h', $candHash, \PDO::PARAM_LOB);
                     $q->execute();
-                    $found = $q->fetch(PDO::FETCH_ASSOC);
+                    $found = $q->fetch(\PDO::FETCH_ASSOC);
                     if ($found) {
                         $result['user'] = $found;
                         $result['matched_email_hash_version'] = $cand['version'] ?? null;
@@ -444,7 +449,7 @@ final class Auth
                 // prepare a statement similar to the real one and bind a random blob
                 $qDummy = $db->prepare('SELECT 1 FROM pouzivatelia WHERE email_hash = :h LIMIT 1');
                 $dummy = random_bytes(32);
-                $qDummy->bindValue(':h', $dummy, PDO::PARAM_LOB);
+                $qDummy->bindValue(':h', $dummy, \PDO::PARAM_LOB);
                 // execute once to emulate DB cost of a real search
                 $qDummy->execute();
                 // ignore result
@@ -463,7 +468,7 @@ final class Auth
      *
      * Note: does NOT create session/cookies - leave that to controller (or integrate SessionManager / JWT here).
      */
-    public static function login(PDO $db, string $email, string $password, int $maxFailed = 5): array
+    public static function login(\PDO $db, string $email, string $password, int $maxFailed = 5): array
     {
         // základní validace formátu (ale NELOGUJEME a NEUCHOVÁVÁME plain email)
         if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
@@ -477,7 +482,7 @@ final class Auth
         // Normalise email
         $emailNormalized = trim($email);
         if (class_exists('Normalizer')) {
-            $emailNormalized = Normalizer::normalize($emailNormalized, Normalizer::FORM_C) ?: $emailNormalized;
+            $emailNormalized = \Normalizer::normalize($emailNormalized, \Normalizer::FORM_C) ?: $emailNormalized;
         }
         $emailNormalized = mb_strtolower($emailNormalized, 'UTF-8');
 
@@ -593,7 +598,7 @@ try {
 
             $stmt = $db->prepare('SELECT failed_logins, is_locked FROM pouzivatelia WHERE id = :id LIMIT 1');
             $stmt->execute([':id' => $u['id']]);
-            $row = $stmt->fetch(PDO::FETCH_ASSOC);
+            $row = $stmt->fetch(\PDO::FETCH_ASSOC);
             $failed = (int)($row['failed_logins'] ?? 0);
             $isLocked = !empty($row['is_locked']);
             if ($isLocked) {
@@ -632,12 +637,12 @@ try {
                                     WHERE id = :id');
 
             if ($ipHashBin !== null) {
-                $stmt->bindValue(':ip_hash', $ipHashBin, PDO::PARAM_LOB);
+                $stmt->bindValue(':ip_hash', $ipHashBin, \PDO::PARAM_LOB);
             } else {
-                $stmt->bindValue(':ip_hash', null, PDO::PARAM_NULL);
+                $stmt->bindValue(':ip_hash', null, \PDO::PARAM_NULL);
             }
-            $stmt->bindValue(':ip_key', $ipKeyId, $ipKeyId !== null ? PDO::PARAM_STR : PDO::PARAM_NULL);
-            $stmt->bindValue(':id', $u['id'], PDO::PARAM_INT);
+            $stmt->bindValue(':ip_key', $ipKeyId, $ipKeyId !== null ? \PDO::PARAM_STR : \PDO::PARAM_NULL);
+            $stmt->bindValue(':id', $u['id'], \PDO::PARAM_INT);
             $stmt->execute();
         } catch (\Throwable $e) {
             if (class_exists('Logger')) Logger::systemError($e, $u['id'] ?? null);
@@ -701,17 +706,17 @@ try {
                                                     SET email_enc = :enc, email_key_version = :kv
                                                     WHERE id = :id AND (email_enc IS NULL OR LENGTH(email_enc) = 0 OR email_key_version <> :kv_check)');
 
-                                $upd->bindValue(':enc', $encPayload, PDO::PARAM_LOB);
+                                $upd->bindValue(':enc', $encPayload, \PDO::PARAM_LOB);
 
                                 // bind both versions because :kv was used twice in SQL originally
                                 if ($curEmailKeyVer === null) {
-                                    $upd->bindValue(':kv', null, PDO::PARAM_NULL);
-                                    $upd->bindValue(':kv_check', null, PDO::PARAM_NULL);
+                                    $upd->bindValue(':kv', null, \PDO::PARAM_NULL);
+                                    $upd->bindValue(':kv_check', null, \PDO::PARAM_NULL);
                                 } else {
-                                    $upd->bindValue(':kv', $curEmailKeyVer, PDO::PARAM_STR);
-                                    $upd->bindValue(':kv_check', $curEmailKeyVer, PDO::PARAM_STR);
+                                    $upd->bindValue(':kv', $curEmailKeyVer, \PDO::PARAM_STR);
+                                    $upd->bindValue(':kv_check', $curEmailKeyVer, \PDO::PARAM_STR);
                                 }
-                                $upd->bindValue(':id', $u['id'], PDO::PARAM_INT);
+                                $upd->bindValue(':id', $u['id'], \PDO::PARAM_INT);
 
                                 try {
                                     $upd->execute();
@@ -768,27 +773,27 @@ try {
                                         last_login_ip_key = :ip_key
                                     WHERE id = :id');
             if ($ipHashBin !== null) {
-                $stmt->bindValue(':ip_hash', $ipHashBin, PDO::PARAM_LOB);
+                $stmt->bindValue(':ip_hash', $ipHashBin, \PDO::PARAM_LOB);
             } else {
-                $stmt->bindValue(':ip_hash', null, PDO::PARAM_NULL);
+                $stmt->bindValue(':ip_hash', null, \PDO::PARAM_NULL);
             }
-            $stmt->bindValue(':ip_key', $ipKeyId, $ipKeyId !== null ? PDO::PARAM_STR : PDO::PARAM_NULL);
-            $stmt->bindValue(':id', $u['id'], PDO::PARAM_INT);
+            $stmt->bindValue(':ip_key', $ipKeyId, $ipKeyId !== null ? \PDO::PARAM_STR : \PDO::PARAM_NULL);
+            $stmt->bindValue(':id', $u['id'], \PDO::PARAM_INT);
             $stmt->execute();
 
             if ($newHash !== null) {
                 if ($newPepver !== null) {
                     $sth = $db->prepare('UPDATE pouzivatelia SET heslo_hash = :hash, heslo_algo = :meta, heslo_key_version = :pep WHERE id = :id');
-                    $sth->bindValue(':hash', $newHash, PDO::PARAM_STR);
-                    $sth->bindValue(':meta', $newAlgoMeta, PDO::PARAM_STR);
-                    $sth->bindValue(':pep', $newPepver, PDO::PARAM_STR);
-                    $sth->bindValue(':id', $u['id'], PDO::PARAM_INT);
+                    $sth->bindValue(':hash', $newHash, \PDO::PARAM_STR);
+                    $sth->bindValue(':meta', $newAlgoMeta, \PDO::PARAM_STR);
+                    $sth->bindValue(':pep', $newPepver, \PDO::PARAM_STR);
+                    $sth->bindValue(':id', $u['id'], \PDO::PARAM_INT);
                     $sth->execute();
                 } else {
                     $sth = $db->prepare('UPDATE pouzivatelia SET heslo_hash = :hash, heslo_algo = :meta WHERE id = :id');
-                    $sth->bindValue(':hash', $newHash, PDO::PARAM_STR);
-                    $sth->bindValue(':meta', $newAlgoMeta, PDO::PARAM_STR);
-                    $sth->bindValue(':id', $u['id'], PDO::PARAM_INT);
+                    $sth->bindValue(':hash', $newHash, \PDO::PARAM_STR);
+                    $sth->bindValue(':meta', $newAlgoMeta, \PDO::PARAM_STR);
+                    $sth->bindValue(':id', $u['id'], \PDO::PARAM_INT);
                     $sth->execute();
                 }
             }

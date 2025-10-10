@@ -1,14 +1,48 @@
 <?php
 declare(strict_types=1);
-// Custom exception for KeyManager errors
+
+namespace BlackCat\Core\Security;
+
+use Psr\Log\LoggerInterface;
+use BlackCat\Core\Database;
+
 class KeyManagerException extends \RuntimeException {}
 
 final class KeyManager
 {
     private const DEFAULT_PER_REQUEST_CACHE_TTL = 300; // seconds, but here just per-request static cache
-
+    private static ?LoggerInterface $logger = null;
     private static array $cache = []; // simple per-request cache ['key_<env>_<basename>[_vN]'=> ['raw'=>..., 'version'=>...]]
     
+    public static function setLogger(?LoggerInterface $logger): void
+    {
+        self::$logger = $logger;
+    }
+
+    private static function getLogger(): ?LoggerInterface
+    {
+        if (self::$logger !== null) {
+            return self::$logger;
+        }
+        if (Database::isInitialized()) {
+            try {
+                return Database::getInstance()->getLogger();
+            } catch (\Throwable $_) {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    private static function logError(string $message, array $context = []): void
+    {
+        $logger = self::getLogger();
+        if ($logger !== null) {
+            try {
+                $logger->error($message, $context);
+            } catch (\Throwable $_) {}
+        }
+    }
     /**
      * Return array of all available raw keys (for a basename), newest last.
      * Example return: [binary1, binary2, ...]
@@ -53,7 +87,7 @@ final class KeyManager
     public static function requireSodium(): void
     {
         if (!extension_loaded('sodium')) {
-            throw new RuntimeException('libsodium extension required');
+            throw new \RuntimeException('libsodium extension required');
         }
     }
 
@@ -62,7 +96,7 @@ final class KeyManager
         return SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_KEYBYTES;
     }
 
-    public static function rotateKey(string $basename, string $keysDir, ?PDO $pdo = null, int $keepVersions = 5, bool $archiveOld = false, ?string $archiveDir = null): array
+    public static function rotateKey(string $basename, string $keysDir, ?\PDO $pdo = null, int $keepVersions = 5, bool $archiveOld = false, ?string $archiveDir = null): array
     {
         self::requireSodium();
         $wantedLen = self::keyByteLen();
@@ -108,16 +142,16 @@ final class KeyManager
             // compute fingerprint for audit (sha256 hex)
             $fingerprint = hash('sha256', $raw);
 
-            // Log to DB key_events / key_rotation_jobs if PDO provided (best-effort)
+            // Log to DB key_events / key_rotation_jobs if \PDO provided (best-effort)
             if ($pdo !== null) {
                 try {
                     // insert key_events
                     $stmt = $pdo->prepare("INSERT INTO key_events (key_id, basename, event_type, actor_id, note, meta, source) VALUES (NULL, :basename, 'rotated', NULL, :note, :meta, 'rotation')");
                     $meta = json_encode(['filename' => basename($target), 'fingerprint' => $fingerprint]);
                     $stmt->execute([':basename' => $basename, ':note' => 'Automatic rotation', ':meta' => $meta]);
-                } catch (PDOException $e) {
+                } catch (\PDOException $e) {
                     // log but continue — rotation already created file
-                    error_log('[KeyManager::rotateKey] DB log failed: ' . $e->getMessage());
+                    self::logError('[KeyManager::rotateKey] DB log failed', ['exception' => $e]);
                 }
             }
 
@@ -126,7 +160,7 @@ final class KeyManager
                 self::cleanupOldVersions($dir, $basename, $keepVersions, $archiveOld, $archiveDir);
             } catch (\Throwable $e) {
                 // don't fail rotation; just log
-                error_log('[KeyManager::rotateKey] cleanup failed: ' . $e->getMessage());
+                self::logError('[KeyManager::rotateKey] cleanup failed', ['exception' => $e]);
             }
 
             // zero raw in memory
@@ -163,20 +197,20 @@ final class KeyManager
                 }
                 if (!is_dir($archiveDir)) {
                     if (!@mkdir($archiveDir, 0750, true)) {
-                        error_log('[KeyManager::cleanupOldVersions] archive mkdir failed: ' . $archiveDir);
+                        self::logError('[KeyManager::cleanupOldVersions] archive mkdir failed', ['dir' => $archiveDir]);
                         continue;
                     }
                 }
                 $dest = rtrim($archiveDir, '/\\') . '/' . basename($path);
                 // atomic move
                 if (!@rename($path, $dest)) {
-                    error_log('[KeyManager::cleanupOldVersions] archive rename failed: ' . $path);
+                    self::logError('[KeyManager::cleanupOldVersions] archive rename failed', ['path' => $path]);
                     continue;
                 }
                 @chmod($dest, 0400);
             } else {
                 // default SAFE behavior: do NOT delete, only log
-                error_log('[KeyManager::cleanupOldVersions] old key present (not deleted): ' . $path);
+                self::logError('[KeyManager::cleanupOldVersions] old key present (not deleted)', ['path' => $path]);
                 // Optionally you could check file age and warn
             }
         }
@@ -247,7 +281,7 @@ final class KeyManager
      * @param string $basename
      * @param bool $generateIfMissing
      * @return string base64-encoded key
-     * @throws RuntimeException
+     * @throws \RuntimeException
      */
     public static function getBase64Key(string $envName, ?string $keysDir = null, string $basename = '', bool $generateIfMissing = false, ?int $expectedByteLen = null): string
     {
@@ -351,7 +385,7 @@ final class KeyManager
         $dir = dirname($path);
         if (!is_dir($dir)) {
             if (!@mkdir($dir, 0750, true)) {
-                throw new RuntimeException('Failed to create keys directory: ' . $dir);
+                throw new \RuntimeException('Failed to create keys directory: ' . $dir);
             }
         }
 
@@ -359,14 +393,14 @@ final class KeyManager
         $written = @file_put_contents($tmp, $raw, LOCK_EX);
         if ($written === false || $written !== strlen($raw)) {
             @unlink($tmp);
-            throw new RuntimeException('Failed to write key temp file');
+            throw new \RuntimeException('Failed to write key temp file');
         }
 
         @chmod($tmp, 0400);
 
         if (!@rename($tmp, $path)) {
             @unlink($tmp);
-            throw new RuntimeException('Failed to atomically move key file to destination');
+            throw new \RuntimeException('Failed to atomically move key file to destination');
         }
 
         // zajistíme správná práva i po rename
@@ -374,7 +408,7 @@ final class KeyManager
 
         clearstatcache(true, $path);
         if (!is_readable($path) || filesize($path) !== strlen($raw)) {
-            throw new RuntimeException('Key file appears corrupted after write');
+            throw new \RuntimeException('Key file appears corrupted after write');
         }
     }
 

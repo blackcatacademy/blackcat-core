@@ -21,7 +21,7 @@ declare(strict_types=1);
  *  $config['paths']['email_templates']  => optional (defaults to templates/emails)
  *  $config['debug']                     => bool (optional)
  */
-
+namespace {
 if (!function_exists('templates_internal_render')) {
     /**
      * Include template in isolated scope.
@@ -56,8 +56,10 @@ if (!function_exists('templates_internal_render')) {
         return $renderer($__file, $__vars);
     }
 }
+}
+namespace BlackCat\Core\Templates;
 
-class Templates
+final class Templates
 {
     protected const DEFAULT_VIEWS_DIR = __DIR__ . '/../www/views';
     protected const DEFAULT_EMAIL_SUBDIR = 'emails';
@@ -373,7 +375,7 @@ class Templates
 /**
  * EmailTemplates uses email templates directory (configurable).
  */
-class EmailTemplates extends Templates
+final class EmailTemplates extends Templates
 {
     /**
      * Render e-mail HTML template from configured email templates dir.
@@ -405,7 +407,7 @@ class EmailTemplates extends Templates
  * SafeHtml - wrapper indicating content is safe HTML.
  * If HTMLPurifier is available it will sanitize the passed HTML.
  */
-class SafeHtml
+final class SafeHtml
 {
     private string $html;
     /** @var \HTMLPurifier|null */

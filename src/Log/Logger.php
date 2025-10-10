@@ -1,6 +1,12 @@
 <?php
 declare(strict_types=1);
 
+namespace BlackCat\Core\Log;
+
+use BlackCat\Core\Database;
+use BlackCat\Core\Security\KeyManager;
+use BlackCat\Core\Helpers\DeferredHelper;
+
 /**
  * Production-ready Logger
  *
@@ -96,7 +102,7 @@ final class Logger
             }
 
             $keysDir = defined('KEYS_DIR') ? KEYS_DIR : ($_ENV['KEYS_DIR'] ?? null);
-            $info = \KeyManager::getIpHashKeyInfo($keysDir);
+            $info = KeyManager::getIpHashKeyInfo($keysDir);
             $keyRaw = $info['raw'] ?? null;
             $keyVer = isset($info['version']) && is_string($info['version']) ? $info['version'] : null;
 
@@ -110,7 +116,7 @@ final class Logger
 
             // best-effort memzero of key material
             if (method_exists('KeyManager', 'memzero')) {
-                try { \KeyManager::memzero($keyRaw); } catch (\Throwable $_) {}
+                try { KeyManager::memzero($keyRaw); } catch (\Throwable $_) {}
             } elseif (function_exists('sodium_memzero')) {
                 @sodium_memzero($keyRaw);
                 $keyRaw = null;
@@ -118,7 +124,7 @@ final class Logger
 
             // best-effort: purge KeyManager per-request cache for this env so no copies remain
             if (method_exists('KeyManager', 'purgeCacheFor')) {
-                try { \KeyManager::purgeCacheFor('IP_HASH_KEY'); } catch (\Throwable $_) {}
+                try { KeyManager::purgeCacheFor('IP_HASH_KEY'); } catch (\Throwable $_) {}
             }
 
             return ['hash' => $hmacBin, 'key_id' => $keyVer, 'used' => 'keymanager'];
@@ -245,11 +251,11 @@ final class Logger
             ':meta_email' => $metaEmail,
         ];
 
-        if (\Database::isInitialized()) {
+        if (Database::isInitialized()) {
             // flush earlier items to try to preserve ordering
             DeferredHelper::flush();
             try {
-                \Database::getInstance()->execute($sql, $params);
+                Database::getInstance()->execute($sql, $params);
             } catch (\Throwable $e) {
                 // silent fail in production — logger nesmí shodit aplikaci
                 return;
@@ -260,7 +266,7 @@ final class Logger
         // DB not ready -> enqueue safe, pre-sanitized SQL/params
         DeferredHelper::enqueue(function() use ($sql, $params) {
             try {
-                \Database::getInstance()->execute($sql, $params);
+                Database::getInstance()->execute($sql, $params);
             } catch (\Throwable $e) {
                 // silent fail – logger nikdy nesmí shodit aplikaci
             }
@@ -293,10 +299,10 @@ final class Logger
             ':meta' => $json,
         ];
 
-        if (\Database::isInitialized()) {
+        if (Database::isInitialized()) {
             DeferredHelper::flush();
             try {
-                \Database::getInstance()->execute($sql, $params);
+                Database::getInstance()->execute($sql, $params);
             } catch (\Throwable $e) {
                 return;
             }
@@ -305,7 +311,7 @@ final class Logger
 
         DeferredHelper::enqueue(function() use ($sql, $params) {
             try {
-                \Database::getInstance()->execute($sql, $params);
+                Database::getInstance()->execute($sql, $params);
             } catch (\Throwable $e) {
                 // silent fail – logger nikdy nesmí shodit aplikaci
             }
@@ -399,10 +405,10 @@ final class Logger
 
         // Pokud máš vlastní Database wrapper, který správně váže nibinární hodnoty – ok.
         // Jinak níže nabízím přímý PDO fallback.
-        if (\Database::isInitialized()) {
+        if (Database::isInitialized()) {
             DeferredHelper::flush();
             try {
-                \Database::getInstance()->execute($sql, $params);
+                Database::getInstance()->execute($sql, $params);
             } catch (\Throwable $e) {
                 // silent fail — nechceme shodit aplikaci kvůli auditu
                 return;
@@ -412,7 +418,7 @@ final class Logger
 
         DeferredHelper::enqueue(function() use ($sql, $params) {
             try {
-                \Database::getInstance()->execute($sql, $params);
+                Database::getInstance()->execute($sql, $params);
             } catch (\Throwable $e) {
                 // silent fail – logger nikdy nesmí shodit aplikaci
             }
@@ -478,10 +484,10 @@ final class Logger
             ':status' => http_response_code() ?: null,
         ];
 
-        if (\Database::isInitialized()) {
+        if (Database::isInitialized()) {
             DeferredHelper::flush();
             try {
-                \Database::getInstance()->execute($sql, $params);
+                Database::getInstance()->execute($sql, $params);
             } catch (\Throwable $e) {
                 return;
             }
@@ -490,7 +496,7 @@ final class Logger
 
         DeferredHelper::enqueue(function() use ($sql, $params) {
             try {
-                \Database::getInstance()->execute($sql, $params);
+                Database::getInstance()->execute($sql, $params);
             } catch (\Throwable $e) {
                 // silent fail – logger nikdy nesmí shodit aplikaci
             }
@@ -563,10 +569,10 @@ final class Logger
             ':status' => http_response_code() ?: null,
         ];
 
-        if (\Database::isInitialized()) {
+        if (Database::isInitialized()) {
             DeferredHelper::flush();
             try {
-                \Database::getInstance()->execute($sql, $params);
+                Database::getInstance()->execute($sql, $params);
             } catch (\Throwable $ex) {
                 return;
             }
@@ -575,7 +581,7 @@ final class Logger
 
         DeferredHelper::enqueue(function() use ($sql, $params) {
             try {
-                \Database::getInstance()->execute($sql, $params);
+                Database::getInstance()->execute($sql, $params);
             } catch (\Throwable $e) {
                 // silent fail – logger nikdy nesmí shodit aplikaci
             }

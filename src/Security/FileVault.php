@@ -1,6 +1,11 @@
 <?php
 declare(strict_types=1);
 
+namespace BlackCat\Core\Security;
+
+use BlackCat\Core\Log\AuditLogger;
+use BlackCat\Core\Log\Logger;
+
 /**
  * libs/FileVault.php
  *
@@ -150,7 +155,7 @@ final class FileVault
             }
 
             if (isset($raw) && strlen($raw) !== SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_KEYBYTES) {
-                throw new RuntimeException('Invalid key length for FileVault');
+                throw new \RuntimeException('Invalid key length for FileVault');
             }
             // else fallthrough to KeyManager locateLatest
         }
@@ -159,12 +164,12 @@ final class FileVault
         try {
             $info = KeyManager::getRawKeyBytes('FILEVAULT_KEY', self::getKeysDir(), 'filevault_key', false);
             if (!is_array($info) || !isset($info['raw'])) {
-                throw new RuntimeException('KeyManager did not return key info');
+                throw new \RuntimeException('KeyManager did not return key info');
             }
             return ['raw' => $info['raw'], 'version' => $info['version'] ?? 'v1'];
-        } catch (Throwable $e) {
+        } catch (\Throwable $e) {
             // do not leak internal exception messages — rethrow a generic runtime exception
-            throw new RuntimeException('getFilevaultKeyInfo failure');
+            throw new \RuntimeException('getFilevaultKeyInfo failure');
         }
     }
 
@@ -188,7 +193,7 @@ final class FileVault
             $keyInfo = self::getFilevaultKeyInfo(null);
             $key = $keyInfo['raw'];
             $keyVersion = $keyInfo['version'];
-        } catch (Throwable $e) {
+        } catch (\Throwable $e) {
             self::logError('uploadAndEncrypt: key retrieval failed: ' . $e->getMessage());
             return false;
         }
@@ -220,7 +225,7 @@ final class FileVault
         try {
             // write version byte
             if (fwrite($out, chr(self::VERSION)) === false) {
-                throw new RuntimeException('failed writing version byte');
+                throw new \RuntimeException('failed writing version byte');
             }
 
             $useStream = ($filesize > self::STREAM_THRESHOLD);
@@ -229,38 +234,38 @@ final class FileVault
                 // secretstream init_push
                 $res = sodium_crypto_secretstream_xchacha20poly1305_init_push($key);
                 if (!is_array($res) || count($res) !== 2) {
-                    throw new RuntimeException('secretstream init_push failed');
+                    throw new \RuntimeException('secretstream init_push failed');
                 }
                 [$state, $header] = $res;
                 if (!is_string($header) || strlen($header) !== SODIUM_CRYPTO_SECRETSTREAM_XCHACHA20POLY1305_HEADERBYTES) {
-                    throw new RuntimeException('secretstream header invalid length');
+                    throw new \RuntimeException('secretstream header invalid length');
                 }
 
                 $iv_len = strlen($header);
-                if ($iv_len > 255) throw new RuntimeException('header too long');
+                if ($iv_len > 255) throw new \RuntimeException('header too long');
 
                 if (fwrite($out, chr($iv_len)) === false || fwrite($out, $header) === false) {
-                    throw new RuntimeException('failed writing header');
+                    throw new \RuntimeException('failed writing header');
                 }
 
                 // tag_len == 0 marks secretstream mode
-                if (fwrite($out, chr(0)) === false) throw new RuntimeException('failed writing tag_len');
+                if (fwrite($out, chr(0)) === false) throw new \RuntimeException('failed writing tag_len');
 
                 $in = fopen($srcTmp, 'rb');
-                if ($in === false) throw new RuntimeException('cannot open source for read: ' . $srcTmp);
+                if ($in === false) throw new \RuntimeException('cannot open source for read: ' . $srcTmp);
 
                 while (!feof($in)) {
                     $chunk = fread($in, self::FRAME_SIZE);
-                    if ($chunk === false) throw new RuntimeException('read error from source');
+                    if ($chunk === false) throw new \RuntimeException('read error from source');
                     $isFinal = feof($in);
                     $tag = $isFinal ? SODIUM_CRYPTO_SECRETSTREAM_XCHACHA20POLY1305_TAG_FINAL : SODIUM_CRYPTO_SECRETSTREAM_XCHACHA20POLY1305_TAG_MESSAGE;
                     $frame = sodium_crypto_secretstream_xchacha20poly1305_push($state, $chunk, '', $tag);
-                    if ($frame === false) throw new RuntimeException('secretstream push failed');
+                    if ($frame === false) throw new \RuntimeException('secretstream push failed');
 
                     $frameLen = strlen($frame);
                     $lenBuf = pack('N', $frameLen);
                     if (fwrite($out, $lenBuf) === false || fwrite($out, $frame) === false) {
-                        throw new RuntimeException('write error while writing frame');
+                        throw new \RuntimeException('write error while writing frame');
                     }
                 }
 
@@ -278,12 +283,12 @@ final class FileVault
                     'encryption_algo' => 'secretstream_xchacha20poly1305'
                 ];
                 $metaJson = json_encode($meta, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-                if ($metaJson === false) throw new RuntimeException('meta json encode failed');
+                if ($metaJson === false) throw new \RuntimeException('meta json encode failed');
 
                 $metaTmp = $tmpDest . '.meta';
                 if (file_put_contents($metaTmp, $metaJson, LOCK_EX) === false) {
                     @unlink($metaTmp);
-                    throw new RuntimeException('failed writing meta temp file');
+                    throw new \RuntimeException('failed writing meta temp file');
                 }
                 chmod($metaTmp, 0600);
 
@@ -295,7 +300,7 @@ final class FileVault
                     if (!copy($tmpDest, $destEnc) || !unlink($tmpDest)) {
                         @unlink($tmpDest);
                         @unlink($metaTmp);
-                        throw new RuntimeException('failed to move tmp file to destination');
+                        throw new \RuntimeException('failed to move tmp file to destination');
                     }
                 }
                 // move meta
@@ -317,23 +322,23 @@ final class FileVault
 
             // SINGLE-PASS small file
             $plaintext = file_get_contents($srcTmp);
-            if ($plaintext === false) throw new RuntimeException('failed to read small source into memory');
+            if ($plaintext === false) throw new \RuntimeException('failed to read small source into memory');
 
             // AEAD encrypt
             $nonce = random_bytes(SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_NPUBBYTES);
             $combined = sodium_crypto_aead_xchacha20poly1305_ietf_encrypt($plaintext, '', $nonce, $key);
-            if ($combined === false) throw new RuntimeException('AEAD encrypt failed');
+            if ($combined === false) throw new \RuntimeException('AEAD encrypt failed');
 
             $tagLen = SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_ABYTES;
             $tag = substr($combined, -$tagLen);
             $cipher = substr($combined, 0, -$tagLen);
 
             $iv_len = strlen($nonce);
-            if ($iv_len > 255 || $tagLen > 255) throw new RuntimeException('iv/tag too long');
+            if ($iv_len > 255 || $tagLen > 255) throw new \RuntimeException('iv/tag too long');
 
-            if (fwrite($out, chr($iv_len)) === false || fwrite($out, $nonce) === false) throw new RuntimeException('failed writing iv');
-            if (fwrite($out, chr($tagLen)) === false || fwrite($out, $tag) === false) throw new RuntimeException('failed writing tag');
-            if (fwrite($out, $cipher) === false) throw new RuntimeException('failed writing ciphertext');
+            if (fwrite($out, chr($iv_len)) === false || fwrite($out, $nonce) === false) throw new \RuntimeException('failed writing iv');
+            if (fwrite($out, chr($tagLen)) === false || fwrite($out, $tag) === false) throw new \RuntimeException('failed writing tag');
+            if (fwrite($out, $cipher) === false) throw new \RuntimeException('failed writing ciphertext');
 
             fflush($out);
             fclose($out); $out = null;
@@ -347,12 +352,12 @@ final class FileVault
                 'encryption_algo' => 'xchacha20poly1305_ietf'
             ];
             $metaJson = json_encode($meta, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-            if ($metaJson === false) throw new RuntimeException('meta json encode failed');
+            if ($metaJson === false) throw new \RuntimeException('meta json encode failed');
 
             $metaTmp = $tmpDest . '.meta';
             if (file_put_contents($metaTmp, $metaJson, LOCK_EX) === false) {
                 @unlink($metaTmp);
-                throw new RuntimeException('failed writing meta temp file');
+                throw new \RuntimeException('failed writing meta temp file');
             }
             chmod($metaTmp, 0600);
             chmod($tmpDest, 0600);
@@ -362,7 +367,7 @@ final class FileVault
                 if (!copy($tmpDest, $destEnc) || !unlink($tmpDest)) {
                     @unlink($tmpDest);
                     @unlink($metaTmp);
-                    throw new RuntimeException('failed to move tmp file to destination');
+                    throw new \RuntimeException('failed to move tmp file to destination');
                 }
             }
             if (!@rename($metaTmp, $destEnc . '.meta')) {
@@ -377,7 +382,7 @@ final class FileVault
 
             $success = true;
             return $destEnc;
-        } catch (Throwable $e) {
+        } catch (\Throwable $e) {
             // cleanup and log
             if (is_resource($in)) { fclose($in); $in = null; }
             if (is_resource($out)) { fclose($out); $out = null; }
@@ -388,12 +393,12 @@ final class FileVault
         } finally {
             // best-effort memzero key and ensure handles closed
             if (isset($key) && is_string($key) && $key !== '') {
-                try { KeyManager::memzero($key); } catch (Throwable $ee) { /* swallow */ }
+                try { KeyManager::memzero($key); } catch (\Throwable $ee) { /* swallow */ }
                 $key = null;
             }
             // also try to memzero possible $keyInfo raw (if still in scope)
             if (isset($keyInfo) && is_array($keyInfo) && isset($keyInfo['raw']) && is_string($keyInfo['raw'])) {
-                try { KeyManager::memzero($keyInfo['raw']); } catch (Throwable $_) {}
+                try { KeyManager::memzero($keyInfo['raw']); } catch (\Throwable $_) {}
             }
             if (is_resource($in)) { fclose($in); }
             if (is_resource($out)) { fclose($out); }
@@ -437,7 +442,7 @@ final class FileVault
             $keyInfo = self::getFilevaultKeyInfo($specificKeyVersion);
             $key = $keyInfo['raw'];
             $keyVersion = $keyInfo['version'];
-        } catch (Throwable $e) {
+        } catch (\Throwable $e) {
             self::logError('decryptAndStream: key retrieval failed: ' . $e->getMessage());
             return false;
         }
@@ -446,7 +451,7 @@ final class FileVault
         if ($fh === false) {
             self::logError('decryptAndStream: cannot open encrypted file: ' . $encPath);
             // wipe key
-            try { KeyManager::memzero($key); } catch (Throwable $_) {}
+            try { KeyManager::memzero($key); } catch (\Throwable $_) {}
             return false;
         }
 
@@ -456,35 +461,35 @@ final class FileVault
             // version
             $versionByte = fread($fh, 1);
             if ($versionByte === false || strlen($versionByte) !== 1) {
-                throw new RuntimeException('failed reading version byte');
+                throw new \RuntimeException('failed reading version byte');
             }
             $version = ord($versionByte);
             if ($version !== self::VERSION) {
-                throw new RuntimeException('unsupported version: ' . $version);
+                throw new \RuntimeException('unsupported version: ' . $version);
             }
 
             // iv_len
             $b = fread($fh, 1);
-            if ($b === false || strlen($b) !== 1) throw new RuntimeException('failed reading iv_len');
+            if ($b === false || strlen($b) !== 1) throw new \RuntimeException('failed reading iv_len');
             $iv_len = ord($b);
-            if ($iv_len < 0 || $iv_len > 255) throw new RuntimeException('unreasonable iv_len: ' . $iv_len);
+            if ($iv_len < 0 || $iv_len > 255) throw new \RuntimeException('unreasonable iv_len: ' . $iv_len);
 
             $iv = '';
             if ($iv_len > 0) {
                 $iv = fread($fh, $iv_len);
-                if ($iv === false || strlen($iv) !== $iv_len) throw new RuntimeException('failed reading iv/header');
+                if ($iv === false || strlen($iv) !== $iv_len) throw new \RuntimeException('failed reading iv/header');
             }
 
             // tag_len
             $b = fread($fh, 1);
-            if ($b === false || strlen($b) !== 1) throw new RuntimeException('failed reading tag_len');
+            if ($b === false || strlen($b) !== 1) throw new \RuntimeException('failed reading tag_len');
             $tag_len = ord($b);
-            if ($tag_len < 0 || $tag_len > 255) throw new RuntimeException('unreasonable tag_len: ' . $tag_len);
+            if ($tag_len < 0 || $tag_len > 255) throw new \RuntimeException('unreasonable tag_len: ' . $tag_len);
 
             $tag = '';
             if ($tag_len > 0) {
                 $tag = fread($fh, $tag_len);
-                if ($tag === false || strlen($tag) !== $tag_len) throw new RuntimeException('failed reading tag');
+                if ($tag === false || strlen($tag) !== $tag_len) throw new \RuntimeException('failed reading tag');
             }
 
             // Prepare headers
@@ -502,10 +507,10 @@ final class FileVault
             if ($tag_len > 0) {
                 // single-pass: rest is cipher (without tag)
                 $cipher = stream_get_contents($fh);
-                if ($cipher === false) throw new RuntimeException('failed reading ciphertext');
+                if ($cipher === false) throw new \RuntimeException('failed reading ciphertext');
                 $combined = $cipher . $tag;
                 $plain = sodium_crypto_aead_xchacha20poly1305_ietf_decrypt($combined, '', $iv, $key);
-                if ($plain === false) throw new RuntimeException('single-pass decryption failed (auth)');
+                if ($plain === false) throw new \RuntimeException('single-pass decryption failed (auth)');
 
                 // stream plaintext
                 $pos = 0;
@@ -533,15 +538,15 @@ final class FileVault
                 if ($lenBuf === false || strlen($lenBuf) === 0) {
                     break; // EOF
                 }
-                if (strlen($lenBuf) !== 4) throw new RuntimeException('incomplete frame length header');
+                if (strlen($lenBuf) !== 4) throw new \RuntimeException('incomplete frame length header');
                 $un = unpack('Nlen', $lenBuf);
                 $frameLen = $un['len'] ?? 0;
-                if ($frameLen <= 0) throw new RuntimeException('invalid frame length: ' . $frameLen);
+                if ($frameLen <= 0) throw new \RuntimeException('invalid frame length: ' . $frameLen);
                 $frame = fread($fh, $frameLen);
-                if ($frame === false || strlen($frame) !== $frameLen) throw new RuntimeException('failed reading frame payload');
+                if ($frame === false || strlen($frame) !== $frameLen) throw new \RuntimeException('failed reading frame payload');
 
                 $res = sodium_crypto_secretstream_xchacha20poly1305_pull($state, $frame);
-                if ($res === false || !is_array($res)) throw new RuntimeException('secretstream pull failed (auth?)');
+                if ($res === false || !is_array($res)) throw new \RuntimeException('secretstream pull failed (auth?)');
                 [$plainChunk, $tagFrame] = $res;
                 echo $plainChunk;
                 $outTotal += strlen($plainChunk);
@@ -556,17 +561,17 @@ final class FileVault
             // audit log (best-effort)
             self::maybeAudit($encPath, $downloadName, $contentLength ?? $outTotal, $keyVersion);
             return true;
-        } catch (Throwable $e) {
+        } catch (\Throwable $e) {
             self::logError('decryptAndStream: ' . $e->getMessage());
             return false;
         } finally {
             if (is_resource($fh)) fclose($fh);
             if (isset($key) && is_string($key) && $key !== '') {
-                try { KeyManager::memzero($key); } catch (Throwable $_) {}
+                try { KeyManager::memzero($key); } catch (\Throwable $_) {}
                 $key = null;
             }
             if (isset($keyInfo) && is_array($keyInfo) && isset($keyInfo['raw']) && is_string($keyInfo['raw'])) {
-                try { KeyManager::memzero($keyInfo['raw']); } catch (Throwable $_) {}
+                try { KeyManager::memzero($keyInfo['raw']); } catch (\Throwable $_) {}
             }
         }
     }
@@ -614,7 +619,7 @@ final class FileVault
             if (is_callable(self::$actorProvider)) {
                 try {
                     $actorId = call_user_func(self::$actorProvider);
-                } catch (Throwable $_) {
+                } catch (\Throwable $_) {
                     $actorId = null;
                 }
             }
@@ -633,7 +638,7 @@ final class FileVault
 
             // AuditLogger::log(PDO $pdo = null, string $actorId, string $action, string $payloadEnc, string $keyVersion = '', array $meta = [])
             AuditLogger::log($pdo instanceof \PDO ? $pdo : null, (string)$actorId, 'file_download', $payload, $keyVersion ?? '', []);
-        } catch (Throwable $e) {
+        } catch (\Throwable $e) {
             // swallow — audit is best-effort
             error_log('[FileVault] audit log failed');
         }
@@ -645,7 +650,7 @@ final class FileVault
             try {
                 Logger::error('[FileVault] ' . $msg);
                 return;
-            } catch (Throwable $e) {
+            } catch (\Throwable $e) {
                 // fallback
             }
         }

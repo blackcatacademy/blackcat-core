@@ -1,6 +1,8 @@
 <?php
 declare(strict_types=1);
 
+namespace BlackCat\Core\Cache;
+
 use Psr\SimpleCache\CacheInterface;
 
 /**

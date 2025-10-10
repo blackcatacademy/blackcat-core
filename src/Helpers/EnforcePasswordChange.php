@@ -1,6 +1,12 @@
 <?php
-// libs/EnforcePasswordChange.php
+
 declare(strict_types=1);
+
+namespace BlackCat\Core\Helpers;
+
+use BlackCat\Core\Database;
+use BlackCat\Core\Log\Logger;
+use BlackCat\Core\Session\SessionManager;
 
 final class EnforcePasswordChange
 {
