@@ -26,12 +26,12 @@
   },
   "autoload": {
     "psr-4": {
-      "BlackCat\\Store\\": "src/"
+      "BlackCat\\Core\\": "src/"
     }
   },
   "autoload-dev": {
     "psr-4": {
-      "BlackCat\\Store\\Tests\\": "tests/"
+      "BlackCat\\Core\\Tests\\": "tests/"
     }
   },
   "minimum-stability": "stable",

@@ -4,6 +4,7 @@ declare(strict_types=1);
 namespace BlackCat\Core;
 
 use Psr\Log\LoggerInterface;
+use BlackCat\Core\Log\LoggerPsrAdapter;
 
 class DatabaseException extends \RuntimeException {}
 
@@ -41,6 +42,16 @@ final class Database
     {
         if (self::$instance !== null) {
             throw new DatabaseException('Database already initialized');
+        }
+
+        // pokud nebyl předán PSR logger, vytvoříme náš adaptér (safe, obalené try/catch)
+        if ($logger === null) {
+            try {
+                $logger = new LoggerPsrAdapter();
+            } catch (\Throwable $_) {
+                // pokud adaptér z nějakého důvodu nelze vytvořit, necháme $logger jako null
+                $logger = null;
+            }
         }
 
         $dsn = $config['dsn'] ?? null;
@@ -94,7 +105,11 @@ final class Database
             // Minimal, non-sensitive log via injected logger (no plaintext credentials).
             if ($logger !== null) {
                 try {
-                    $logger->error('Failed to connect to database (init)', ['exception' => $e, 'phase' => 'init']);
+                    $logger->error('Failed to connect to database (init)', [
+                                    'message' => $e->getMessage(),
+                                    'code' => $e->getCode(),
+                                    'phase' => 'init'
+                                ]);
                 } catch (\Throwable $_) {
                     // swallow — logger must not throw
                 }
@@ -259,6 +274,7 @@ final class Database
     {
         $pdo = $this->getPdo();
 
+        // Pokud ještě nejsme v transakci, zahájíme běžnou
         if (!$pdo->inTransaction()) {
             $this->beginTransaction();
             try {
@@ -271,10 +287,16 @@ final class Database
             }
         }
 
-        // už jsme v transakci => savepoint
+        // --- Jsme v transakci → pokus o savepoint (nested transaction) ---
+        if (!$this->supportsSavepoints()) {
+            // fallback — žádné savepointy, prostě to jen spustíme v rámci stávající transakce
+            return $fn($this);
+        }
+
         static $fallbackCounter = 0;
         try {
             $sp = 'SP_' . bin2hex(random_bytes(6));
+            $sp = preg_replace('/[^A-Za-z0-9_]/', '', $sp);
         } catch (\Throwable $_) {
             $fallbackCounter++;
             $sp = 'SP_FALLBACK_' . $fallbackCounter;
@@ -347,14 +369,32 @@ final class Database
         }
     }
 
-    public function lastInsertId(?string $name = null): string
+    public function lastInsertId(?string $name = null): ?string
     {
-        return $this->getPdo()->lastInsertId($name);
+        try {
+            return $this->getPdo()->lastInsertId($name);
+        } catch (\Throwable $e) {
+            $this->logger?->warning('lastInsertId() failed', [
+                'message' => $e->getMessage(),
+            ]);
+            return null;
+        }
+    }
+
+    private function supportsSavepoints(): bool
+    {
+        try {
+            $driver = $this->getPdo()->getAttribute(\PDO::ATTR_DRIVER_NAME);
+            return in_array($driver, ['mysql', 'pgsql', 'sqlite'], true);
+        } catch (\Throwable $_) {
+            return false;
+        }
     }
 
     /* sanitizace SQL preview pro log (neukládat parametry s citlivými údaji) */
     private function sanitizeSqlPreview(string $sql): string
     {
+        $s = preg_replace("/'[^']{5,}'/", "'…'", $sql);
         // collapse whitespace & remove newlines
         $s = preg_replace('/\s+/', ' ', trim($sql));
         $max = 300;
