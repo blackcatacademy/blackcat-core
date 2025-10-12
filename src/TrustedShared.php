@@ -173,6 +173,20 @@ final class TrustedShared
         // current server timestamp (UTC)
         $nowUtc = gmdate('Y-m-d H:i:s');
 
+        // safe subset of config for handlers (avoid passing full config)
+        $configMin = [];
+        try {
+            $appConfig = $opts['config'] ?? ($opts['database']->config ?? ($GLOBALS['config'] ?? []));
+            if (is_array($appConfig)) {
+                $configMin['capchav3'] = $appConfig['capchav3'] ?? [];
+                $configMin['paths'] = $appConfig['paths'] ?? [];
+                // další bezpečné klíče pokud potřebuješ (smtp, paths, app_url apod.)
+                $configMin['smtp_from'] = $appConfig['smtp']['from'] ?? ($appConfig['smtp_from'] ?? null);
+            }
+        } catch (\Throwable $_) {
+            $configMin = [];
+        }
+
         $trustedShared = [
             'user'         => $user,
             'csrfToken'    => $csrfToken,
@@ -181,6 +195,7 @@ final class TrustedShared
             'db'           => $db,
             'gopayAdapter' => $gopayAdapter,
             'now_utc'      => $nowUtc,
+            'config_min'   => $configMin,
         ];
 
         return $trustedShared;
@@ -206,6 +221,76 @@ final class TrustedShared
             if (array_key_exists($k, $trustedShared)) $out[$k] = $trustedShared[$k];
         }
         return $out;
+    }
+    
+    /**
+     * Prepare mapping of shareSpec -> concrete variables for handler include scope.
+     *
+     * @param array $trustedShared  The array returned by create()
+     * @param bool|array $shareSpec The share specification from routes (true|false|array)
+     * @param array $opts           Optional extra opts: ['config'=>array]
+     * @return array                Mapped variables to extract() into handler
+     */
+    public static function prepareForHandler(array $trustedShared, bool|array $shareSpec, array $opts = []): array
+    {
+        if ($shareSpec === true) {
+            // provide conservative set (but still don't pass whole raw config)
+            // map common keys from trustedShared
+            $out = $trustedShared;
+            // replace full config with config_min if present
+            if (isset($trustedShared['config_min'])) {
+                $out['config'] = $trustedShared['config_min'];
+            }
+            return $out;
+        }
+
+        if ($shareSpec === false) return [];
+
+        $mapped = [];
+        foreach ($shareSpec as $key) {
+            switch ($key) {
+                case 'config':
+                    // prefer config passed in opts, else config_min from trustedShared
+                    $mapped['config'] = $opts['config'] ?? $trustedShared['config_min'] ?? [];
+                    break;
+
+                case 'Logger':
+                    $mapped['Logger'] = \BlackCat\Core\Log\Logger::class;
+                    break;
+
+                case 'MailHelper':
+                    $mapped['MailHelper'] = \BlackCat\Core\Helpers\MailHelper::class;
+                    break;
+
+                case 'Mailer':
+                    $mapped['Mailer'] = \BlackCat\Core\Mail\Mailer::class;
+                    break;
+
+                case 'Recaptcha':
+                    $mapped['Recaptcha'] = \BlackCat\Core\Security\Recaptcha::class;
+                    break;
+
+                case 'KEYS_DIR':
+                    $mapped['KEYS_DIR'] = defined('KEYS_DIR') ? KEYS_DIR : ($trustedShared['config_min']['paths']['keys'] ?? null);
+                    break;
+
+                case 'csrf':
+                    $mapped['csrf'] = $trustedShared['csrf'] ?? $trustedShared['csrfToken'] ?? null;
+                    break;
+
+                case 'CSRF':
+                    $mapped['CSRF'] = \BlackCat\Core\Security\CSRF::class;
+                    break;
+
+                default:
+                    if (array_key_exists($key, $trustedShared)) {
+                        $mapped[$key] = $trustedShared[$key];
+                    }
+                    break;
+            }
+        }
+
+        return $mapped;
     }
 
     /**
