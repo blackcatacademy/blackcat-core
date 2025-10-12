@@ -97,7 +97,7 @@ final class Logger
         }
 
         try {
-            if (!class_exists('KeyManager') || !method_exists('KeyManager', 'getIpHashKeyInfo')) {
+            if (!class_exists(KeyManager::class, true)) {
                 return ['hash' => null, 'key_id' => null, 'used' => 'none'];
             }
 

@@ -167,7 +167,7 @@ final class SessionManager
 
     private static function ensureCryptoInitialized(): void
     {
-        if (!class_exists('Crypto') || !class_exists('KeyManager')) {
+        if (!class_exists(Crypto::class, true) || !class_exists(KeyManager::class, true)) {
             throw new \RuntimeException('Crypto/KeyManager required for session encryption');
         }
         // idempotent: Crypto::initFromKeyManager will set internal key if not set
@@ -202,7 +202,7 @@ final class SessionManager
             self::executeDb($db, $sql, [':blob' => $blob, ':token_hash' => $tokenHashBin]);
         } catch (\Throwable $e) {
             // log and fail silently (do not break app flow)
-            if (class_exists('Logger')) {
+            if (class_exists(Logger::class, true)) {
                 try { Logger::systemError($e, $_SESSION['user_id'] ?? null); } catch (\Throwable $_) {}
             }
         }
@@ -224,7 +224,7 @@ final class SessionManager
                 $r = self::fetchOne($db, $sql, [':token_hash' => $tokenHashBin]);
                 $blob = $r['session_blob'] ?? null;
             } catch (\Throwable $e) {
-                if (class_exists('Logger')) { try { Logger::systemError($e, $_SESSION['user_id'] ?? null); } catch (\Throwable $_) {} }
+                if (class_exists(Logger::class, true)) { try { Logger::systemError($e, $_SESSION['user_id'] ?? null); } catch (\Throwable $_) {} }
                 return false;
             }
         }
@@ -252,7 +252,7 @@ final class SessionManager
             if ($userIdFromDb !== null) $_SESSION['user_id'] = $userIdFromDb;
             return true;
         } catch (\Throwable $e) {
-            if (class_exists('Logger')) { try { Logger::systemError($e, $_SESSION['user_id'] ?? null); } catch (\Throwable $_) {} }
+            if (class_exists(Logger::class, true)) { try { Logger::systemError($e, $_SESSION['user_id'] ?? null); } catch (\Throwable $_) {} }
             return false;
         }
     }
@@ -298,7 +298,7 @@ final class SessionManager
                 throw new \RuntimeException('Derived token hash invalid');
             }
         } catch (\Throwable $e) {
-            if (class_exists('Logger')) { try { Logger::systemError($e, $userId); } catch (\Throwable $_) {} }
+            if (class_exists(Logger::class, true)) { try { Logger::systemError($e, $userId); } catch (\Throwable $_) {} }
             throw new \RuntimeException('Unable to initialize session key.');
         }
 
@@ -316,7 +316,7 @@ final class SessionManager
 
             $ipHashBin = null;
             $ipHashKey = null;
-            if (class_exists('Logger')) {
+            if (class_exists(Logger::class, true)) {
                 try {
                     $ipRes = Logger::getHashedIp($ipRaw);
                     $ipHashBin = $ipRes['hash'] ?? null;
@@ -345,7 +345,7 @@ final class SessionManager
 
             self::executeDb($db, $sql, $params);
 
-            if (class_exists('Logger')) {
+            if (class_exists(Logger::class, true)) {
                 try {
                     $meta = ['source' => 'SessionManager::createSession', '_token_hash_key' => $tokenHashKeyVer];
                     $meta['_token_hash_hex'] = bin2hex($tokenHashBin);
@@ -356,7 +356,7 @@ final class SessionManager
                 } catch (\Throwable $_) {}
             }
         } catch (\Throwable $e) {
-            if (class_exists('Logger')) { try { Logger::systemError($e, $userId); } catch (\Throwable $_) {} }
+            if (class_exists(Logger::class, true)) { try { Logger::systemError($e, $userId); } catch (\Throwable $_) {} }
             throw new \RuntimeException('Unable to persist session.');
         }
 
@@ -428,7 +428,7 @@ final class SessionManager
                 $candidates = array_slice($candidates, 0, $maxCandidates);
             }
         } catch (\Throwable $e) {
-            if (class_exists('Logger')) { try { Logger::systemError($e); } catch (\Throwable $_) {} }
+            if (class_exists(Logger::class, true)) { try { Logger::systemError($e); } catch (\Throwable $_) {} }
             $validateCache[$cacheKey] = null;
             return null;
         }
@@ -465,7 +465,7 @@ final class SessionManager
             $stmt->execute();
             $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC);
         } catch (\Throwable $e) {
-            if (class_exists('Logger')) { try { Logger::systemError($e); } catch (\Throwable $_) {} }
+            if (class_exists(Logger::class, true)) { try { Logger::systemError($e); } catch (\Throwable $_) {} }
             $validateCache[$cacheKey] = null;
             return null;
         }
@@ -505,7 +505,7 @@ final class SessionManager
             try {
                 $decryptedOk = self::loadSessionBlobAndPopulate($db, $row, $candidate, $candidateVersion);
             } catch (\Throwable $e) {
-                if (class_exists('Logger')) { try { Logger::systemError($e); } catch (\Throwable $_) {} }
+                if (class_exists(Logger::class, true)) { try { Logger::systemError($e); } catch (\Throwable $_) {} }
                 $decryptedOk = false;
             }
 
@@ -596,7 +596,7 @@ final class SessionManager
                         $stmtAudit->bindValue(':created_at', $nowUtc);
                         $stmtAudit->execute();
 
-                        if (class_exists('Logger')) {
+                        if (class_exists(Logger::class, true)) {
                             Logger::systemMessage(
                                 'warning',
                                 'Session revoked after repeated decrypt failures',
@@ -609,7 +609,7 @@ final class SessionManager
                     $db->commit(); // commit až po všem
                 } catch (\Throwable $e) {
                     try { $db->rollBack(); } catch (\Throwable $_) {}
-                    if (class_exists('Logger')) { try { Logger::systemError($e); } catch (\Throwable $_) {} }
+                    if (class_exists(Logger::class, true)) { try { Logger::systemError($e); } catch (\Throwable $_) {} }
                 }
                 // pokračuj na dalšího kandidáta
                 continue;
@@ -656,7 +656,7 @@ final class SessionManager
                         }
                     }
                 } catch (\Throwable $e) {
-                    if (class_exists('Logger')) { try { Logger::systemError($e); } catch (\Throwable $_) {} }
+                    if (class_exists(Logger::class, true)) { try { Logger::systemError($e); } catch (\Throwable $_) {} }
                     $ipMismatch = true;
                 }
             } else {
@@ -673,7 +673,7 @@ final class SessionManager
             $ua = $_SERVER['HTTP_USER_AGENT'] ?? null;
             $normalizedUa = self::truncateUserAgent($ua);
             if (($row['user_agent'] ?? null) !== null && $row['user_agent'] !== $normalizedUa) {
-                if (class_exists('Logger')) {
+                if (class_exists(Logger::class, true)) {
                     try { Logger::systemMessage('warning', 'Candidate rejected: UA mismatch', null, ['candidate_version' => $candidateVersion]); } catch (\Throwable $_) {}
                 }
                 continue;
@@ -699,7 +699,7 @@ final class SessionManager
                 return null;
             }
         } catch (\Throwable $_) {
-            if (class_exists('Logger')) {
+            if (class_exists(Logger::class, true)) {
                 try { Logger::Error('[validateSession] Invalid expires_at value'); } catch (\Throwable $_) {}
             }
             $validateCache[$cacheKey] = null;
@@ -723,7 +723,7 @@ final class SessionManager
             $stmt->execute();
 
         } catch (\Throwable $e) {
-            if (class_exists('Logger')) { try { Logger::systemError($e); } catch (\Throwable $_) {} }
+            if (class_exists(Logger::class, true)) { try { Logger::systemError($e); } catch (\Throwable $_) {} }
         }
 
         // uložit do per-request cache a vrátit
@@ -750,7 +750,7 @@ final class SessionManager
                                 $sql = 'UPDATE sessions SET revoked = 1 WHERE token_hash = :token_hash';
                                 self::executeDb($db, $sql, [':token_hash' => $candidate]);
                             } catch (\Throwable $e) {
-                                if (class_exists('Logger')) { try { Logger::systemError($e, $userId); } catch (\Throwable $_) {} }
+                                if (class_exists(Logger::class, true)) { try { Logger::systemError($e, $userId); } catch (\Throwable $_) {} }
                             }
                         }
                     } catch (\Throwable $_) {
@@ -793,7 +793,7 @@ final class SessionManager
         @session_destroy();
 
         // Audit session destruction (pass token hash bin if available)
-        if (class_exists('Logger')) {
+        if (class_exists(Logger::class, true)) {
             try {
                 if (isset($candidate)) {
                     Logger::session('session_destroyed', $userId ?? null, null, null, null, null, $candidate);

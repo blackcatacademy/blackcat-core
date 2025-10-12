@@ -4,7 +4,7 @@ declare(strict_types=1);
 namespace BlackCat\Core;
 
 use Psr\Log\LoggerInterface;
-use BlackCat\Core\Log\LoggerPsrAdapter;
+use BlackCat\Core\Adapter\LoggerPsrAdapter;
 
 class DatabaseException extends \RuntimeException {}
 

@@ -44,7 +44,7 @@ final class Worker
         self::$gopayAdapter = $gopayAdapter;
         self::$inited     = true;
 
-        if (class_exists('Logger')) {
+        if (class_exists(Logger::class, true)) {
             try { Logger::systemMessage('notice', 'Worker initialized'); } catch (\Throwable $_) {}
         }
     }
@@ -78,14 +78,14 @@ final class Worker
     {
         self::ensureInited();
 
-        if (!class_exists('Mailer')) {
+        if (!class_exists(Mailer::class, true)) {
             throw new \RuntimeException('Mailer lib missing.');
         }
 
         // Acquire short lock so multiple cron runners don't run notifications concurrently
         $lockName = self::LOCK_PREFIX . 'notifications';
         if (!self::lock($lockName, 300)) {
-            if (class_exists('Logger')) try { Logger::systemMessage('notice', 'Notification worker already running — skipping'); } catch (\Throwable $_) {}
+            if (class_exists(Logger::class, true)) try { Logger::systemMessage('notice', 'Notification worker already running — skipping'); } catch (\Throwable $_) {}
             return ['notice' => 'locked'];
         }
 
@@ -95,14 +95,14 @@ final class Worker
                 try {
                     $report = Mailer::processPendingNotifications($limit);
                 } catch (\Throwable $e) {
-                    if (class_exists('Logger')) try { Logger::systemError($e); } catch (\Throwable $_) {}
+                    if (class_exists(Logger::class, true)) try { Logger::systemError($e); } catch (\Throwable $_) {}
                     $report['errors'][] = $e->getMessage();
                 }
             } else {
                 $report['notice'] = 'immediate disabled';
             }
 
-            if (class_exists('Logger')) try { Logger::systemMessage('notice', 'Notification worker finished', null, $report); } catch (\Throwable $_) {}
+            if (class_exists(Logger::class, true)) try { Logger::systemMessage('notice', 'Notification worker finished', null, $report); } catch (\Throwable $_) {}
             return $report;
         } finally {
             self::unlock($lockName);
@@ -116,7 +116,7 @@ final class Worker
         $stmt = self::$pdo->prepare('DELETE FROM notifications WHERE created_at < DATE_SUB(NOW(), INTERVAL ? DAY) AND status = "sent"');
         $stmt->execute([$days]);
         $count = $stmt->rowCount();
-        if (class_exists('Logger')) try { Logger::systemMessage('notice', 'Cleanup old notifications', null, ['deleted' => $count]); } catch (\Throwable $_) {}
+        if (class_exists(Logger::class, true)) try { Logger::systemMessage('notice', 'Cleanup old notifications', null, ['deleted' => $count]); } catch (\Throwable $_) {}
         return $count;
     }
 
@@ -139,7 +139,7 @@ final class Worker
         $stmt->execute([$auditDays]);
         $report['session_audit_deleted'] = $stmt->rowCount();
 
-        if (class_exists('Logger')) try { Logger::systemMessage('notice', 'Cleanup sessions finished', null, $report); } catch (\Throwable $_) {}
+        if (class_exists(Logger::class, true)) try { Logger::systemMessage('notice', 'Cleanup sessions finished', null, $report); } catch (\Throwable $_) {}
         return $report;
     }
 
@@ -147,19 +147,19 @@ final class Worker
     public static function registerJob(string $name, callable $callback): void
     {
         self::$jobs[$name] = $callback;
-        if (class_exists('Logger')) try { Logger::systemMessage('notice', "Registered job {$name}"); } catch (\Throwable $_) {}
+        if (class_exists(Logger::class, true)) try { Logger::systemMessage('notice', "Registered job {$name}"); } catch (\Throwable $_) {}
     }
 
     public static function runJob(string $name, array $args = []): void
     {
         if (!isset(self::$jobs[$name])) {
-            if (class_exists('Logger')) try { Logger::systemMessage('warning', "Job {$name} not found"); } catch (\Throwable $_) {}
+            if (class_exists(Logger::class, true)) try { Logger::systemMessage('warning', "Job {$name} not found"); } catch (\Throwable $_) {}
             return;
         }
         try {
             call_user_func_array(self::$jobs[$name], $args);
         } catch (\Throwable $e) {
-            if (class_exists('Logger')) try { Logger::systemError($e); } catch (\Throwable $_) {}
+            if (class_exists(Logger::class, true)) try { Logger::systemError($e); } catch (\Throwable $_) {}
         }
     }
 
@@ -178,7 +178,7 @@ final class Worker
             $upd->execute([$ttl, $name]);
             return $upd->rowCount() > 0;
         } catch (\Throwable $e) {
-            if (class_exists('Logger')) try { Logger::systemError($e); } catch (\Throwable $_) {}
+            if (class_exists(Logger::class, true)) try { Logger::systemError($e); } catch (\Throwable $_) {}
             return false;
         }
     }
@@ -190,7 +190,7 @@ final class Worker
             $stmt = self::$pdo->prepare('DELETE FROM worker_locks WHERE name = ?');
             $stmt->execute([$name]);
         } catch (\Throwable $e) {
-            if (class_exists('Logger')) try { Logger::systemError($e); } catch (\Throwable $_) {}
+            if (class_exists(Logger::class, true)) try { Logger::systemError($e); } catch (\Throwable $_) {}
         }
     }
 
@@ -209,7 +209,7 @@ final class Worker
         $stmt = self::$pdo->prepare('INSERT INTO key_rotation_jobs (basename, target_version, scheduled_at, attempts, status, executed_by, created_at) VALUES (?, ?, ?, 0, "pending", ?, NOW())');
         $stmt->execute([$basename, $targetVersion, $scheduledAt, $executedBy]);
         $id = (int) self::$pdo->lastInsertId();
-        if (class_exists('Logger')) try { Logger::systemMessage('notice', 'Scheduled key rotation', $executedBy, ['job_id' => $id, 'basename' => $basename, 'scheduled_at' => $scheduledAt]); } catch (\Throwable $_) {}
+        if (class_exists(Logger::class, true)) try { Logger::systemMessage('notice', 'Scheduled key rotation', $executedBy, ['job_id' => $id, 'basename' => $basename, 'scheduled_at' => $scheduledAt]); } catch (\Throwable $_) {}
         return $id;
     }
 
@@ -222,7 +222,7 @@ final class Worker
     {
         self::ensureInited();
 
-        if (!class_exists('KeyManager')) throw new \RuntimeException('KeyManager missing');
+        if (!class_exists(KeyManager::class, true)) throw new \RuntimeException('KeyManager missing');
         $res = null;
 
         // short lock per basename to avoid concurrent rotations
@@ -247,11 +247,11 @@ final class Worker
             $ins = self::$pdo->prepare('INSERT INTO key_events (key_id, basename, event_type, actor_id, job_id, note, meta, source, created_at) VALUES (NULL, ?, "rotated", ?, ?, "rotation forced", ?, "admin", NOW())');
             $ins->execute([$basename, $executedBy, $jobId, $meta]);
 
-            if (class_exists('Logger')) try { Logger::systemMessage('notice', 'Key rotated (forced)', $executedBy, ['basename' => $basename, 'res' => $res]); } catch (\Throwable $_) {}
+            if (class_exists(Logger::class, true)) try { Logger::systemMessage('notice', 'Key rotated (forced)', $executedBy, ['basename' => $basename, 'res' => $res]); } catch (\Throwable $_) {}
 
             return $res;
         } catch (\Throwable $e) {
-            if (class_exists('Logger')) try { Logger::systemError($e); } catch (\Throwable $_) {}
+            if (class_exists(Logger::class, true)) try { Logger::systemError($e); } catch (\Throwable $_) {}
             throw $e;
         } finally {
             self::unlock($lockName);
@@ -310,7 +310,7 @@ final class Worker
                     $done->execute([json_encode($res, JSON_UNESCAPED_UNICODE), $jobId]);
 
                     $out[$jobId] = ['status' => 'done', 'res' => $res];
-                    if (class_exists('Logger')) try { Logger::systemMessage('notice', 'Key rotation job done', null, ['job' => $jobId, 'basename' => $basename]); } catch (\Throwable $_) {}
+                    if (class_exists(Logger::class, true)) try { Logger::systemMessage('notice', 'Key rotation job done', null, ['job' => $jobId, 'basename' => $basename]); } catch (\Throwable $_) {}
 
                 } finally {
                     self::unlock($lockName);
@@ -322,7 +322,7 @@ final class Worker
                     $fail = self::$pdo->prepare("UPDATE key_rotation_jobs SET status = 'failed', finished_at = NOW(), result = ? WHERE id = ?");
                     $fail->execute([json_encode($err, JSON_UNESCAPED_UNICODE), $jobId]);
                 } catch (\Throwable $_) {}
-                if (class_exists('Logger')) try { Logger::systemError($e); } catch (\Throwable $_) {}
+                if (class_exists(Logger::class, true)) try { Logger::systemError($e); } catch (\Throwable $_) {}
                 $out[$jobId] = ['status' => 'failed', 'error' => $e->getMessage()];
             }
         }
@@ -333,18 +333,18 @@ final class Worker
     // -------------------- Example: registration mail helper --------------------
     public static function registrationMail(int $userId, array $payload): void
     {
-        if (!class_exists('Mailer')) throw new \RuntimeException('Mailer lib missing.');
+        if (!class_exists(Mailer::class, true)) throw new \RuntimeException('Mailer lib missing.');
 
         try {
             $payload['user_id'] = $userId;
             $id = Mailer::enqueue($payload);
-            if (class_exists('Logger')) try { Logger::systemMessage('notice', 'Notification enqueued', $userId, ['notification_id' => $id]); } catch (\Throwable $_) {}
+            if (class_exists(Logger::class, true)) try { Logger::systemMessage('notice', 'Notification enqueued', $userId, ['notification_id' => $id]); } catch (\Throwable $_) {}
 
             // best-effort immediate attempt, non-fatal
             $report = Mailer::processPendingNotifications(1);
-            if (class_exists('Logger')) try { Logger::systemMessage('notice', 'Immediate send attempt', $userId, $report); } catch (\Throwable $_) {}
+            if (class_exists(Logger::class, true)) try { Logger::systemMessage('notice', 'Immediate send attempt', $userId, $report); } catch (\Throwable $_) {}
         } catch (\Throwable $e) {
-            if (class_exists('Logger')) try { Logger::systemError($e); } catch (\Throwable $_) {}
+            if (class_exists(Logger::class, true)) try { Logger::systemError($e); } catch (\Throwable $_) {}
         }
     }
     
@@ -402,7 +402,7 @@ final class Worker
         } catch (\Throwable $e) {
             try { self::$pdo->rollBack(); } catch (\Throwable $_) {}
             $report['errors'][] = 'claim_failed: ' . $e->getMessage();
-            if (class_exists('Logger')) try { Logger::systemError($e); } catch (\Throwable $_) {}
+            if (class_exists(Logger::class, true)) try { Logger::systemError($e); } catch (\Throwable $_) {}
             return $report;
         }
 
@@ -423,7 +423,7 @@ final class Worker
             ');
 
             $lastError = $res['last_error'] ?? null;
-            if (!empty($lastError) && class_exists('Logger')) {
+            if (!empty($lastError) && class_exists(Logger::class, true)) {
                 Logger::systemError(new \RuntimeException($lastError), null, null, ['transaction_id' => $orderId]);
             }
 
@@ -446,7 +446,7 @@ final class Worker
             }
 
         } catch (\Throwable $e) {
-            if (class_exists('Logger')) {
+            if (class_exists(Logger::class, true)) {
                 try {
                     Logger::systemError($e, null, null, ['transaction_id' => $orderId]);
                 } catch (\Throwable $_) {}

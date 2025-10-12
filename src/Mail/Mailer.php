@@ -40,13 +40,13 @@ final class Mailer
 
     public static function init(array $config, \PDO $pdo): void
     {
-        if (!class_exists('KeyManager') || !class_exists('Crypto') || !class_exists('Validator') || !class_exists('EmailTemplates')) {
+        if (!class_exists(KeyManager::class, true) || !class_exists(Crypto::class, true) || !class_exists(Validator::class, true) || !class_exists(EmailTemplates::class, true)) {
             throw new \RuntimeException('Mailer init failed: required libs missing (KeyManager, Crypto, Validator, EmailTemplates).');
         }
-        if (!class_exists('Logger')) {
+        if (!class_exists(Logger::class, true)) {
             throw new \RuntimeException('Mailer init failed: Logger missing.');
         }
-        if (!class_exists('\PHPMailer\PHPMailer\PHPMailer')) {
+        if (!class_exists(PHPMailer::class, true)) {
             throw new \RuntimeException('Mailer init failed: PHPMailer not available. Ensure bootstrap loads PHPMailer.');
         }
         self::$config = $config;
@@ -345,9 +345,9 @@ final class Mailer
                         }
 
                         $mime = 'application/octet-stream';
-                        if (class_exists('finfo')) {
+                        if (class_exists(\finfo::class, true)) {
                             try {
-                                $finfo = new finfo(FILEINFO_MIME_TYPE);
+                                $finfo = new \finfo(FILEINFO_MIME_TYPE);
                                 $m = $finfo->buffer($bin);
                                 if (is_string($m) && $m !== '') $mime = $m;
                             } catch (\Throwable $_) {

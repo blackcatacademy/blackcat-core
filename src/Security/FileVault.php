@@ -610,7 +610,7 @@ final class FileVault
     private static function maybeAudit(string $encPath, string $downloadName, ?int $plainSize, ?string $keyVersion = null): void
     {
         try {
-            if (!class_exists('AuditLogger')) return;
+            if (!class_exists(AuditLogger::class, true)) return;
 
             $pdo = self::$auditPdo ?? null;
 
@@ -646,7 +646,7 @@ final class FileVault
 
     private static function logError(string $msg): void
     {
-        if (class_exists('Logger') && method_exists('Logger', 'error')) {
+        if (class_exists(Logger::class, true) && method_exists(Logger::class, 'error')) {
             try {
                 Logger::error('[FileVault] ' . $msg);
                 return;

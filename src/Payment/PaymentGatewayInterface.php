@@ -1,7 +1,8 @@
 <?php
-// File: libs/PaymentGatewayInterface.php
-// -----------------------------
+
 declare(strict_types=1);
+
+namespace BlackCat\Core\Payment;
 
 interface PaymentGatewayInterface
 {

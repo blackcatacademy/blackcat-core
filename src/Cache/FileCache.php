@@ -4,6 +4,7 @@ declare(strict_types=1);
 namespace BlackCat\Core\Cache;
 
 use Psr\SimpleCache\InvalidArgumentException as PsrInvalidArgumentException;
+use BlackCat\Core\Cache\LockingCacheInterface;
 use BlackCat\Core\Security\KeyManager;
 use BlackCat\Core\Security\Crypto;
 use BlackCat\Core\Log\Logger;
@@ -104,7 +105,7 @@ class FileCache implements LockingCacheInterface
         @chmod($this->cacheDirReal, 0700);
 
         if ($this->useEncryption) {
-            if (!class_exists('KeyManager') || !class_exists('Crypto')) {
+            if (!class_exists(KeyManager::class, true) || !class_exists(Crypto::class, true)) {
                 throw new \RuntimeException('KeyManager or Crypto class not available; cannot enable encryption.');
             }
 
@@ -149,7 +150,7 @@ class FileCache implements LockingCacheInterface
     private function log(string $level, string $msg, ?\Throwable $e = null, ?array $context = null): void
     {
         try {
-            if ($e !== null && class_exists('Logger') && method_exists('Logger', 'systemError')) {
+            if ($e !== null && class_exists(Logger::class, true) && method_exists(Logger::class, 'systemError')) {
                 // call systemError for exceptions — keep it silent if it fails
                 try {
                     Logger::systemError($e, null, null, $context ?? ['component' => 'FileCache']);
@@ -159,7 +160,7 @@ class FileCache implements LockingCacheInterface
                 }
             }
 
-            if (class_exists('Logger') && method_exists('Logger', 'systemMessage')) {
+            if (class_exists(Logger::class, true) && method_exists(Logger::class, 'systemMessage')) {
                 try {
                     $ctx = $context ?? ['component' => 'FileCache'];
                     Logger::systemMessage($level, $msg, null, $ctx);

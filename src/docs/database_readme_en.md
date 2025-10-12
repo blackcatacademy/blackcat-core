@@ -176,7 +176,7 @@ ReflectionClass::from(Database::class)
 ## 📚 License & Author
 
 Part of the **BlackCat Core** framework  
-(c) 2025 — MIT License  
+(c) 2025 — copyright Black Cat Academy s. r. o., license: [SEE IN LICENSE](https://github.com/blackcatacademy/blackcat-core/blob/master/LICENSE)
 Author: *Vit Black*
 
 ---

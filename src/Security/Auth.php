@@ -36,7 +36,7 @@ final class Auth
      */
     private static function limiterIsBlocked(?string $clientIp): bool
     {
-        if (!class_exists('LoginLimiter') || !method_exists('LoginLimiter', 'isBlocked')) {
+        if (!class_exists(LoginLimiter::class, true) || !method_exists(LoginLimiter::class, 'isBlocked')) {
             return false; // fail-open
         }
         try {
@@ -48,7 +48,7 @@ final class Auth
 
     private static function limiterGetSecondsUntilUnblock(?string $clientIp): int
     {
-        if (!class_exists('LoginLimiter') || !method_exists('LoginLimiter', 'getSecondsUntilUnblock')) {
+        if (!class_exists(LoginLimiter::class, true) || !method_exists(LoginLimiter::class, 'getSecondsUntilUnblock')) {
             return 0;
         }
         try {
@@ -66,7 +66,7 @@ final class Auth
      */
     private static function limiterRegisterAttempt(?string $clientIp, bool $success, ?int $userId, $usernameHashBinForAttempt): void
     {
-        if (!class_exists('LoginLimiter') || !method_exists('LoginLimiter', 'registerAttempt')) {
+        if (!class_exists(LoginLimiter::class, true) || !method_exists(LoginLimiter::class, 'registerAttempt')) {
             return;
         }
         try {
@@ -123,7 +123,7 @@ final class Auth
             $stmt->execute();
             return ($stmt->rowCount() > 0);
         } catch (\Throwable $e) {
-            if (class_exists('Logger')) {
+            if (class_exists(Logger::class, true)) {
                 Logger::error('Auth: email_hash idempotent update failed (likely race)', $userId, ['err' => $e->getMessage()]);
             }
             // swallow - race is acceptable
@@ -163,7 +163,7 @@ final class Auth
     private static function getPepperInfo(): array
     {
         // Do not cache raw pepper bytes in static scope to minimize time they exist in memory.
-        if (!class_exists('KeyManager') || !method_exists('KeyManager', 'getPasswordPepperInfo')) {
+        if (!class_exists(KeyManager::class, true) || !method_exists(KeyManager::class, 'getPasswordPepperInfo')) {
             throw new \RuntimeException('KeyManager::getPasswordPepperInfo required but not available');
         }
 
@@ -328,7 +328,7 @@ final class Auth
                 password_verify(random_bytes(16), $dummyHash);
             }
         } catch (\Throwable $e) {
-            if (class_exists('Logger')) {
+            if (class_exists(Logger::class, true)) {
                 try { Logger::systemError($e); } catch (\Throwable $_) {}
             }
             $result = ['ok' => false, 'matched_version' => null];
@@ -372,7 +372,7 @@ final class Auth
             $latest = null;
 
             try {
-                if (!class_exists('KeyManager')) {
+                if (!class_exists(KeyManager::class, true)) {
                     // no KeyManager -> cannot do HMAC lookup
                     $cache[$cacheKey] = ['candidates' => [], 'latest' => null];
                     return $result;
@@ -405,7 +405,7 @@ final class Auth
                 $cache[$cacheKey] = ['candidates' => $candidates, 'latest' => $latest];
                 $result['usernameHashBinForAttempt'] = $latest;
             } catch (\Throwable $e) {
-                if (class_exists('Logger')) {
+                if (class_exists(Logger::class, true)) {
                     try { Logger::systemError($e); } catch (\Throwable $_) {}
                 }
                 // fail-safe: return no user
@@ -435,7 +435,7 @@ final class Auth
                     }
                 }
             } catch (\Throwable $e) {
-                if (class_exists('Logger')) {
+                if (class_exists(Logger::class, true)) {
                     try { Logger::systemError($e); } catch (\Throwable $_) {}
                 }
                 // On DB error return safe no-user
@@ -472,7 +472,7 @@ final class Auth
     {
         // základní validace formátu (ale NELOGUJEME a NEUCHOVÁVÁME plain email)
         if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
-            if (class_exists('Logger')) {
+            if (class_exists(Logger::class, true)) {
                 Logger::auth('login_failure', null);
             }
             usleep(150_000);
@@ -481,7 +481,7 @@ final class Auth
 
         // Normalise email
         $emailNormalized = trim($email);
-        if (class_exists('Normalizer')) {
+        if (class_exists(\Normalizer::class, true)) {
             $emailNormalized = \Normalizer::normalize($emailNormalized, \Normalizer::FORM_C) ?: $emailNormalized;
         }
         $emailNormalized = mb_strtolower($emailNormalized, 'UTF-8');
@@ -489,7 +489,7 @@ final class Auth
         // get client IP once (best-effort)
         $clientIp = null;
         try {
-            if (class_exists('Logger') && method_exists('Logger', 'getClientIp')) {
+            if (class_exists(Logger::class, true) && method_exists(Logger::class, 'getClientIp')) {
                 $clientIp = Logger::getClientIp();
             }
         } catch (\Throwable $_) {
@@ -504,7 +504,7 @@ final class Auth
                 // anonymize IP for logs: short prefix of HMAC (if available)
                 $ipShort = null;
                 try {
-                    if (class_exists('Logger') && method_exists('Logger', 'getHashedIp')) {
+                    if (class_exists(Logger::class, true) && method_exists(Logger::class, 'getHashedIp')) {
                         $r = Logger::getHashedIp($clientIp);
                         $hb = $r['hash'] ?? null;
                         if (is_string($hb) && strlen($hb) >= 4) {
@@ -514,11 +514,11 @@ final class Auth
                 } catch (\Throwable $_) {
                     $ipShort = null;
                 }
-                if (class_exists('Logger')) {
-                    if (method_exists('Logger', 'info')) {
+                if (class_exists(Logger::class, true)) {
+                    if (method_exists(Logger::class, 'info')) {
                         Logger::info('Auth: login blocked by limiter', null, ['ip_sh' => $ipShort, 'wait_s' => $secs]);
                     }
-                    if (method_exists('Logger', 'auth')) {
+                    if (method_exists(Logger::class, 'auth')) {
                         Logger::auth('login_failure', null);
                     }
                 }
@@ -534,9 +534,9 @@ $u = null;
 $usernameHashBinForAttempt = null;
 try {
     // keep the sanity check: KeyManager must exist in production
-    if (!class_exists('KeyManager') || !method_exists('KeyManager', 'deriveHmacWithLatest')) {
+    if (!class_exists(KeyManager::class, true) || !method_exists(KeyManager::class, 'deriveHmacWithLatest')) {
         // critical misconfiguration -> log and return server error
-        if (class_exists('Logger')) {
+        if (class_exists(Logger::class, true)) {
             Logger::systemError(new \RuntimeException('KeyManager deriveHmac helpers missing (EMAIL_HASH_KEY)'));
             return ['success' => false, 'user' => null, 'message' => 'Chyba serveru'];
         } else {
@@ -549,7 +549,7 @@ try {
     $usernameHashBinForAttempt = $lookup['usernameHashBinForAttempt'] ?? null;
     $u = $lookup['user'] ?? null;
 } catch (\Throwable $e) {
-    if (class_exists('Logger')) {
+    if (class_exists(Logger::class, true)) {
         try { Logger::systemError($e); } catch (\Throwable $_) {}
     }
     return ['success' => false, 'user' => null, 'message' => 'Chyba serveru'];
@@ -561,8 +561,8 @@ try {
             // register IP attempt (failure) - best-effort
             self::limiterRegisterAttempt($clientIp, false, $userId, $usernameHashBinForAttempt);
 
-            if (class_exists('Logger')) {
-                if (method_exists('Logger', 'auth')) {
+            if (class_exists(Logger::class, true)) {
+                if (method_exists(Logger::class, 'auth')) {
                     Logger::auth('login_failure', $userId);
                 }
             } else {
@@ -583,7 +583,7 @@ try {
 
         } catch (\Throwable $e) {
             // critical error (pepper missing etc.)
-            if (class_exists('Logger')) Logger::systemError($e, $u['id'] ?? null);
+            if (class_exists(Logger::class, true)) Logger::systemError($e, $u['id'] ?? null);
             return ['success' => false, 'user' => null, 'message' => 'Chyba serveru'];
         }
 
@@ -602,12 +602,12 @@ try {
             $failed = (int)($row['failed_logins'] ?? 0);
             $isLocked = !empty($row['is_locked']);
             if ($isLocked) {
-                if (class_exists('Logger')) Logger::auth('lockout', $u['id']);
+                if (class_exists(Logger::class, true)) Logger::auth('lockout', $u['id']);
             } else {
-                if (class_exists('Logger')) Logger::auth('login_failure', $u['id']);
+                if (class_exists(Logger::class, true)) Logger::auth('login_failure', $u['id']);
             }
             } catch (\Throwable $e) {
-                if (class_exists('Logger')) Logger::systemError($e, $u['id'] ?? null);
+                if (class_exists(Logger::class, true)) Logger::systemError($e, $u['id'] ?? null);
             }
 
             // register IP limiter failure
@@ -621,9 +621,9 @@ try {
         $ipKeyId = null;
         try {
             // get IP hash info for storing in users table
-            if (!class_exists('Logger')) throw new \RuntimeException('Logger required for IP hashing helper');
+            if (!class_exists(Logger::class, true)) throw new \RuntimeException('Logger required for IP hashing helper');
             $ipResult = ['hash' => null, 'key_id' => null];
-            if (class_exists('Logger') && method_exists('Logger','getHashedIp')) {
+            if (class_exists(Logger::class, true) && method_exists(Logger::class,'getHashedIp')) {
                 try { $ipResult = Logger::getHashedIp($clientIp); } catch (\Throwable $_) { /* keep defaults */ }
             }
             $ipHashBin = $ipResult['hash'] ?? null;
@@ -645,7 +645,7 @@ try {
             $stmt->bindValue(':id', $u['id'], \PDO::PARAM_INT);
             $stmt->execute();
         } catch (\Throwable $e) {
-            if (class_exists('Logger')) Logger::systemError($e, $u['id'] ?? null);
+            if (class_exists(Logger::class, true)) Logger::systemError($e, $u['id'] ?? null);
         }
 
         // register success attempt in limiter (best-effort)
@@ -657,7 +657,7 @@ try {
                 $keysDir = self::requireKeysDir();
 
                 // 1) email_hash (HMAC) - derive latest and idempotently update
-                if ($emailToMigrate !== '' && class_exists('KeyManager')) {
+                if ($emailToMigrate !== '' && class_exists(KeyManager::class, true)) {
                     try {
                         $hinfo = KeyManager::deriveHmacWithLatest('EMAIL_HASH_KEY', $keysDir, 'email_hash_key', $emailToMigrate);
                         $hashBin = $hinfo['hash'] ?? null;
@@ -668,19 +668,19 @@ try {
                             // if your function still doesn't return bool, you can keep it void — we still call it.
                             $didUpdate = self::updateEmailHashIdempotent($db, (int)$u['id'], $hashBin, $hashVer);
                             if ($didUpdate) {
-                                if (class_exists('Logger')) {
+                                if (class_exists(Logger::class, true)) {
                                     Logger::info('Auth: email_hash updated', $u['id'], ['ver' => $hashVer]);
                                 }
                             }
                         }
                     } catch (\Throwable $e) {
-                        if (class_exists('Logger')) Logger::error('Auth: email_hash derive failed', $u['id'] ?? null, ['exception' => (string)$e]);
+                        if (class_exists(Logger::class, true)) Logger::error('Auth: email_hash derive failed', $u['id'] ?? null, ['exception' => (string)$e]);
                         // non-fatal
                     }
                 }
 
                 // 2) email_enc (AEAD) - simple re-encrypt of trusted normalized email with current key
-                if ($emailToMigrate !== '' && class_exists('KeyManager') && class_exists('Crypto') && function_exists('sodium_crypto_aead_xchacha20poly1305_ietf_encrypt')) {
+                if ($emailToMigrate !== '' && class_exists(KeyManager::class, true) && class_exists(Crypto::class, true) && function_exists('sodium_crypto_aead_xchacha20poly1305_ietf_encrypt')) {
                     try {
                         $ek = null;
                         try {
@@ -720,7 +720,7 @@ try {
 
                                 try {
                                     $upd->execute();
-                                    if (class_exists('Logger')) {
+                                    if (class_exists(Logger::class, true)) {
                                         if ($upd->rowCount() > 0) {
                                             Logger::info('Auth: email_enc re-encrypted (simple path)', $u['id'], ['ver' => $curEmailKeyVer]);
                                         } else {
@@ -728,20 +728,20 @@ try {
                                         }
                                     }
                                 } catch (\Throwable $e) {
-                                    if (class_exists('Logger')) Logger::error('Auth: email_enc DB update failed', $u['id'], ['exception' => (string)$e]);
+                                    if (class_exists(Logger::class, true)) Logger::error('Auth: email_enc DB update failed', $u['id'], ['exception' => (string)$e]);
                                 }
                             } catch (\Throwable $e) {
-                                if (class_exists('Logger')) Logger::error('Auth: email encryption failed (simple path)', $u['id'] ?? null, ['exception' => (string)$e]);
+                                if (class_exists(Logger::class, true)) Logger::error('Auth: email encryption failed (simple path)', $u['id'] ?? null, ['exception' => (string)$e]);
                             } finally {
                                 try { KeyManager::memzero($curEmailKeyRaw); } catch (\Throwable $_) {}
                             }
                         }
                     } catch (\Throwable $e) {
-                        if (class_exists('Logger')) Logger::error('Auth: email simple migration failed', $u['id'] ?? null, ['exception' => (string)$e]);
+                        if (class_exists(Logger::class, true)) Logger::error('Auth: email simple migration failed', $u['id'] ?? null, ['exception' => (string)$e]);
                     }
                 }
             } catch (\Throwable $e) {
-                if (class_exists('Logger')) Logger::error('Auth: email migration on login failed (outer simple path)', $u['id'] ?? null, ['exception' => (string)$e]);
+                if (class_exists(Logger::class, true)) Logger::error('Auth: email migration on login failed (outer simple path)', $u['id'] ?? null, ['exception' => (string)$e]);
             }
             // --- end simplified migration ---
 
@@ -805,10 +805,10 @@ try {
             if (isset($newPepver)) { unset($newPepver); }
         } catch (\Throwable $e) {
             if ($db->inTransaction()) { try { $db->rollBack(); } catch (\Throwable $_) {} }
-            if (class_exists('Logger')) Logger::systemError($e, $u['id'] ?? null);
+            if (class_exists(Logger::class, true)) Logger::systemError($e, $u['id'] ?? null);
         }
 
-        if (class_exists('Logger')) Logger::auth('login_success', $u['id']);
+        if (class_exists(Logger::class, true)) Logger::auth('login_success', $u['id']);
 
         $allowed = ['id','actor_type','is_active','last_login_at']; // extend intentionally
         $uSafe = [];

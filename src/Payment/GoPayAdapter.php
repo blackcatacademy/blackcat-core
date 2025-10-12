@@ -1,7 +1,13 @@
 <?php
+
 declare(strict_types=1);
 
-require_once __DIR__ . '/GoPayStatus.php';
+namespace BlackCat\Core\Payment;
+
+use BlackCat\Core\Database;
+use Psr\Log\LoggerInterface;
+use Psr\SimpleCache\CacheInterface;
+
 /**
  * Final adapter for GoPay integration.
  *
@@ -9,8 +15,6 @@ require_once __DIR__ . '/GoPayStatus.php';
  *
  * NOTE: adapt GoPay SDK method names if they differ (createPayment, getStatus, refundPayment).
  */
-use Psr\Log\LoggerInterface;
-use Psr\SimpleCache\CacheInterface;
 
 final class GoPayAdapter
 {

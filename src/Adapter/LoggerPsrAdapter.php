@@ -1,10 +1,11 @@
 <?php
 declare(strict_types=1);
 
-namespace BlackCat\Core\Log;
+namespace BlackCat\Core\Adapter;
 
 use Psr\Log\LoggerInterface;
 use Psr\Log\LogLevel;
+use BlackCat\Core\Log\Logger;
 
 /**
  * Adapter implementing PSR-3 on top of your static Logger.

@@ -1,4 +1,4 @@
-# BlackCat Core — BlackCat\\Store
+# BlackCat Core — BlackCat\Core
 
 <p align="left">
   <img src="https://github.com/blackcatacademy/blackcat-core/blob/master/.github/logo.png" alt="BlackCat Core Logo" width="160" />

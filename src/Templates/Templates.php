@@ -21,45 +21,10 @@ declare(strict_types=1);
  *  $config['paths']['email_templates']  => optional (defaults to templates/emails)
  *  $config['debug']                     => bool (optional)
  */
-namespace {
-if (!function_exists('templates_internal_render')) {
-    /**
-     * Include template in isolated scope.
-     *
-     * $__file - absolute path (validated)
-     * $__vars - associative array of variables (already escaped or SafeHtml)
-     *
-     * Returns rendered string. Re-throws exceptions from template.
-     */
-    function templates_internal_render(string $__file, array $__vars): string
-    {
-        $renderer = static function (string $__file, array $__vars): string {
-            // Ensure only safe variable names get extracted
-            foreach ($__vars as $k => $v) {
-                if (!is_string($k) || !preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $k)) {
-                    unset($__vars[$k]);
-                }
-            }
-            extract($__vars, EXTR_SKIP);
-            ob_start();
-            try {
-                include $__file;
-            } catch (\Throwable $e) {
-                ob_end_clean();
-                throw $e;
-            }
-            // capture output, cleanup $__vars to free memory in this scope, then return
-            $out = (string) ob_get_clean();
-            unset($__vars);
-            return $out;
-        };
-        return $renderer($__file, $__vars);
-    }
-}
-}
+
 namespace BlackCat\Core\Templates;
 
-final class Templates
+class Templates
 {
     protected const DEFAULT_VIEWS_DIR = __DIR__ . '/../www/views';
     protected const DEFAULT_EMAIL_SUBDIR = 'emails';
@@ -288,6 +253,38 @@ final class Templates
         self::$resolvedCache[$key] = $real;
         return $real;
     }
+        /**
+     * Include template in isolated scope.
+     *
+     * $__file - absolute path (validated)
+     * $__vars - associative array of variables (already escaped or SafeHtml)
+     *
+     * Returns rendered string. Re-throws exceptions from template.
+     */
+    private static function internalRender(string $__file, array $__vars): string
+    {
+        $renderer = static function (string $__file, array $__vars): string {
+            // Ensure only safe variable names get extracted
+            foreach ($__vars as $k => $v) {
+                if (!is_string($k) || !preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $k)) {
+                    unset($__vars[$k]);
+                }
+            }
+            extract($__vars, EXTR_SKIP);
+            ob_start();
+            try {
+                include $__file;
+            } catch (\Throwable $e) {
+                ob_end_clean();
+                throw $e;
+            }
+            // capture output, cleanup $__vars to free memory in this scope, then return
+            $out = (string) ob_get_clean();
+            unset($__vars);
+            return $out;
+        };
+        return $renderer($__file, $__vars);
+    }
 
     /**
      * Core renderer used by both Templates and EmailTemplates.
@@ -362,7 +359,7 @@ final class Templates
         }
 
         try {
-            return templates_internal_render($real, $esc);
+            return self::internalRender($candidate, $esc);
         } catch (\Throwable $e) {
             if ($debug) {
                 throw $e;
@@ -415,7 +412,7 @@ final class SafeHtml
 
     public function __construct(string $html)
     {
-        if (class_exists('\\HTMLPurifier')) {
+        if (class_exists(\HTMLPurifier::class, true)) {
             try {
                 if (self::$purifier === null) {
                     $config = \HTMLPurifier_Config::createDefault();

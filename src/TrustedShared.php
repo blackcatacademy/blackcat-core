@@ -1,32 +1,22 @@
 <?php
+
 declare(strict_types=1);
 
-/**
- * TrustedShared
- *
- * Central helper to build and manage the per-request "trusted shared" array
- * used by index.php to pass safe variables into handlers and templates.
- *
- * Goals:
- *  - build the canonical array (categories, db, user, csrfToken, adapters, ...)
- *  - provide helper to select which keys are exposed to includes / templates
- *  - keep failures silent (log when Logger exists) and avoid throwing
- *
- * Usage (example from index.php):
- *   require_once __DIR__ . '/libs/TrustedShared.php';
- *   $trustedShared = TrustedShared::create([
- *       'database'     => $database,        // optional — will try Database::getInstance()
- *       'user'         => $user,            // optional
- *       'userId'       => $currentUserId,   // optional
- *       'gopayAdapter' => $gopayAdapter,    // optional
- *       'enrichUser'   => true,             // optional: fetch purchased books etc
- *   ]);
- *
- *   // select subset for include/template
- *   $sharedForInclude   = TrustedShared::select($trustedShared, $shareSpec);
- *   $sharedForTemplate  = TrustedShared::select($trustedShared, $shareSpec);
- */
+namespace BlackCat\Core;
 
+use BlackCat\Core\Log\Logger;
+use BlackCat\Core\Cache\FileCache;
+use BlackCat\Core\Security\CSRF;
+
+/**
+ * TrustedShared - improved
+ *
+ * - fixes logger detection bug
+ * - masks common sensitive user fields by default
+ * - more robust categories fetching (cachedFetchAll, fallback to fetchAll, optional APCu)
+ * - safer purchased-books enrichment (supports fetchAll/fetchColumn results)
+ * - non-throwing: always returns array (best-effort)
+ */
 final class TrustedShared
 {
     private function __construct() {}
@@ -34,57 +24,98 @@ final class TrustedShared
     /**
      * Create the trusted shared array.
      *
-     * Accepts optional dependencies to avoid global lookups in tests.
-     * Known keys in $opts: database, user, userId, gopayAdapter, enrichUser (bool)
-     *
-     * Always returns an array (never throws). On error it logs via Logger if available.
+     * Known opts:
+     *   - database
+     *   - user
+     *   - userId
+     *   - gopayAdapter
+     *   - enrichUser (bool)         // enrich user with purchased_books
+     *   - maskUserSensitive (bool)  // default true - remove password/token fields
+     *   - categories_ttl (int|null) // seconds for APCu fallback cache (null = no apcu caching)
      *
      * @param array $opts
      * @return array
      */
     public static function create(array $opts = []): array
     {
+        // opts (extended)
         $db = $opts['database'] ?? null;
         $user = $opts['user'] ?? null;
         $userId = $opts['userId'] ?? null;
         $gopayAdapter = $opts['gopayAdapter'] ?? ($opts['gopay'] ?? null);
         $enrichUser = $opts['enrichUser'] ?? false;
 
+        // --- ensure PSR-16 cache: prefer opts['cache'], otherwise try to auto-create FileCache (no encryption) ---
+        $cache = $opts['cache'] ?? null;
+        $cacheDir = $opts['cache_dir'] ?? null;
+        $categoriesTtl = array_key_exists('categories_ttl', $opts) ? $opts['categories_ttl'] : 300; // default 5 min
+        // mask sensitive fields in user array before returning to templates (default true)
+        $maskUserSensitive = $opts['maskUserSensitive'] ?? true;
+
+        if ($cache === null && class_exists(FileCache::class, true)) {
+            try {
+                // create FileCache with provided cacheDir (no encryption)
+                $cache = new FileCache($cacheDir ?? null, false, null);
+            } catch (\Throwable $e) {
+                self::logWarn('TrustedShared: FileCache init failed', ['exception' => (string)$e]);
+                $cache = null;
+            }
+        }
+
         // try to obtain Database singleton if not provided
         if ($db === null) {
             try {
-                if (class_exists('Database') && method_exists('Database', 'getInstance')) {
-                    $db = \Database::getInstance();
+                if (class_exists(Database::class, true)) {
+                    $db = Database::getInstance();
                 }
-            } catch (Throwable $e) {
+            } catch (\Throwable $e) {
                 self::logWarn('TrustedShared: Database not available', ['exception' => (string)$e]);
                 $db = null;
             }
         }
 
-        // CSRF token helper
+        // CSRF token helper (check method exists)
         $csrfToken = null;
         try {
-            if (class_exists('CSRF') && method_exists('CSRF', 'token')) {
-                $csrfToken = \CSRF::token();
+            if (class_exists(CSRF::class, true) && method_exists(CSRF::class, 'token')) {
+                $csrfToken = CSRF::token();
             }
-        } catch (Throwable $e) {
+        } catch (\Throwable $e) {
             self::logWarn('TrustedShared: failed to get CSRF token', ['exception' => (string)$e]);
             $csrfToken = null;
         }
 
-        // categories (best-effort, cachedFetchAll if available)
+        // categories (best-effort, prefer PSR-16 cache, fallback to DB)
         $categories = [];
+
         if ($db !== null) {
-            try {
-                if (method_exists($db, 'cachedFetchAll')) {
-                    $categories = $db->cachedFetchAll('SELECT * FROM categories ORDER BY nazov ASC');
-                } elseif (method_exists($db, 'fetchAll')) {
-                    $categories = $db->fetchAll('SELECT * FROM categories ORDER BY nazov ASC');
+            $cacheKey = 'trustedshared_categories_v1';
+
+            // 1) Try PSR-16 cache if available
+            if ($cache !== null && $categoriesTtl !== null) {
+                try {
+                    $cached = $cache->get($cacheKey, null);
+                    if ($cached !== null) {
+                        $categories = is_array($cached) ? $cached : [];
+                    }
+                } catch (\Throwable $e) {
+                    self::logWarn('TrustedShared: cache get failed for categories', ['exception' => (string)$e]);
                 }
-            } catch (Throwable $e) {
-                self::logWarn('TrustedShared: failed to fetch categories', ['exception' => (string)$e]);
-                $categories = [];
+            }
+
+            // 2) If miss -> fetch from DB (single place)
+            if ($categories === []) {
+                $rows = self::fetchCategoryRows($db);
+                if (is_array($rows)) $categories = $rows;
+
+                // 3) store to PSR-16 cache (if present) — store even empty arrays to avoid repeated DB hits
+                if ($cache !== null && $categoriesTtl !== null && is_array($categories)) {
+                    try {
+                        $cache->set($cacheKey, $categories, (int)$categoriesTtl);
+                    } catch (\Throwable $e) {
+                        self::logWarn('TrustedShared: cache set failed for categories', ['exception' => (string)$e]);
+                    }
+                }
             }
         }
 
@@ -97,21 +128,49 @@ final class TrustedShared
                 }
 
                 if ($user !== null && isset($user['id'])) {
-                    // purchased books as integer IDs (best-effort; don't fail on error)
-                    if (method_exists($db, 'fetchColumn')) {
-                        $pbooks = $db->fetchColumn(
+                    // purchased books as integer IDs (best-effort; support multiple DB helper signatures)
+                    $pbookIds = [];
+                    if (method_exists($db, 'fetchAll')) {
+                        $rows = $db->fetchAll(
                             'SELECT DISTINCT oi.book_id FROM orders o INNER JOIN order_items oi ON oi.order_id = o.id WHERE o.user_id = :uid AND o.status = :paid_status',
                             ['uid' => $userId, 'paid_status' => 'paid']
                         );
-                        $user['purchased_books'] = array_map('intval', (array)$pbooks);
+                        // rows might be array of arrays [['book_id'=>1], ...] or flat ints
+                        if (is_array($rows)) {
+                            foreach ($rows as $r) {
+                                if (is_array($r)) {
+                                    $val = $r['book_id'] ?? reset($r);
+                                } else {
+                                    $val = $r;
+                                }
+                                $pbookIds[] = (int)$val;
+                            }
+                        }
+                    } elseif (method_exists($db, 'fetchColumn')) {
+                        $col = $db->fetchColumn(
+                            'SELECT DISTINCT oi.book_id FROM orders o INNER JOIN order_items oi ON oi.order_id = o.id WHERE o.user_id = :uid AND o.status = :paid_status',
+                            ['uid' => $userId, 'paid_status' => 'paid']
+                        );
+                        if (is_array($col)) {
+                            $pbookIds = array_map('intval', $col);
+                        } elseif ($col !== null) {
+                            $pbookIds[] = (int)$col;
+                        }
                     }
+
+                    $user['purchased_books'] = array_values(array_unique($pbookIds));
                 }
-            } catch (Throwable $e) {
+            } catch (\Throwable $e) {
                 self::logWarn('TrustedShared: failed to enrich user', ['exception' => (string)$e]);
             }
         }
 
-        // current server timestamp (UTC) may be handy in templates
+        // mask sensitive user fields (best-effort)
+        if ($maskUserSensitive && is_array($user)) {
+            $user = self::sanitizeUser($user);
+        }
+
+        // current server timestamp (UTC)
         $nowUtc = gmdate('Y-m-d H:i:s');
 
         $trustedShared = [
@@ -133,8 +192,6 @@ final class TrustedShared
      *             false -> return []
      *             array -> return only listed keys (if exist)
      *
-     * This mirrors the selection logic in your front controller.
-     *
      * @param array $trustedShared
      * @param bool|array $shareSpec
      * @return array
@@ -153,7 +210,7 @@ final class TrustedShared
 
     /**
      * Merge handler vars with shared vars for template, protecting shared values.
-     * We want handler vars first, and then shared vars so shared wins on key collisions.
+     * Handler vars first, shared last (shared wins).
      *
      * @param array $handlerVars
      * @param array $sharedForTemplate
@@ -165,7 +222,53 @@ final class TrustedShared
     }
 
     /**
+     * Sanitize user array by removing common sensitive fields.
+     * Does not try to be exhaustive, but removes common passwords/tokens.
+     *
+     * @param array $user
+     * @return array
+     */
+    private static function sanitizeUser(array $user): array
+    {
+        $sensitive = ['password', 'password_hash', 'pwd', 'token', 'remember_token', 'ssn', 'secret'];
+        foreach ($sensitive as $k) {
+            if (array_key_exists($k, $user)) unset($user[$k]);
+        }
+        // also mask email if required? keep full email by default but you can change here
+        return $user;
+    }
+
+    /**
+     * Fetch categories:
+     * - prefer DB->cachedFetchAll()
+     * - fallback to DB->fetchAll()
+     * - fallback to DB->query->fetchAll()
+     *
+     * @param mixed $db
+     * @return array
+     */
+    private static function fetchCategoryRows($db): array
+    {
+        try {
+            if (method_exists($db, 'cachedFetchAll')) {
+                return (array) $db->cachedFetchAll('SELECT * FROM categories ORDER BY nazov ASC');
+            }
+            if (method_exists($db, 'fetchAll')) {
+                return (array) $db->fetchAll('SELECT * FROM categories ORDER BY nazov ASC');
+            }
+            if (method_exists($db, 'query')) {
+                $stmt = $db->query('SELECT * FROM categories ORDER BY nazov ASC');
+                return ($stmt !== false && method_exists($stmt, 'fetchAll')) ? (array)$stmt->fetchAll() : [];
+            }
+        } catch (\Throwable $e) {
+            self::logWarn('TrustedShared: fetchCategoryRows DB error', ['exception' => (string)$e]);
+        }
+        return [];
+    }
+
+    /**
      * Safe logger helper (silent if Logger isn't available).
+     *
      * @param string $msg
      * @param array|null $ctx
      * @return void
@@ -173,10 +276,28 @@ final class TrustedShared
     private static function logWarn(string $msg, ?array $ctx = null): void
     {
         try {
-            if (class_exists('Logger') && method_exists('Logger', 'warn')) {
-                \Logger::warn($msg, null, $ctx);
+            if (class_exists(Logger::class, true)) {
+                // prefer structured systemMessage/systemError if available
+                if (method_exists(Logger::class, 'systemMessage')) {
+                    try {
+                        Logger::systemMessage('warning', $msg, null, $ctx ?? ['component' => 'TrustedShared']);
+                        return;
+                    } catch (\Throwable $_) {
+                        // swallow and try other
+                    }
+                }
+                if (method_exists(Logger::class, 'warn')) {
+                    try {
+                        Logger::warn($msg, null, $ctx);
+                        return;
+                    } catch (\Throwable $_) {
+                        // swallow
+                    }
+                }
             }
-        } catch (Throwable $_) {
+            // last resort
+            error_log('[TrustedShared][warning] ' . $msg . ($ctx ? ' | ' . json_encode($ctx) : ''));
+        } catch (\Throwable $_) {
             // deliberately silent
         }
     }

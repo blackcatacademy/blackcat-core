@@ -1,5 +1,8 @@
 <?php
+
 declare(strict_types=1);
+
+namespace BlackCat\Core\Payment;
 
 /**
  * - PSR-3 Logger dependency.
@@ -9,7 +12,7 @@ declare(strict_types=1);
  */
 use Psr\Log\LoggerInterface;
 use Psr\SimpleCache\CacheInterface;
-// use LockingCacheInterface;
+use BlackCat\Core\Cache\LockingCacheInterface;
 
 final class GoPayTokenException extends \RuntimeException {}
 final class GoPayHttpException extends \RuntimeException {}
@@ -52,7 +55,7 @@ final class GoPaySdkWrapper implements PaymentGatewayInterface
 
         // prefer robustní init SDK — pokus v try/catch bez spolehnutí na přesné class_exists checks
         try {
-            if (class_exists('\GoPay\Api')) {
+            if (class_exists(\GoPay\Api::class, true)) {
                 $this->client = \GoPay\Api::payments([
                     'goid' => $this->cfg['goid'],
                     'clientId' => $this->cfg['clientId'],
