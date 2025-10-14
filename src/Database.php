@@ -396,7 +396,7 @@ final class Database
     {
         $s = preg_replace("/'[^']{5,}'/", "'…'", $sql);
         // collapse whitespace & remove newlines
-        $s = preg_replace('/\s+/', ' ', trim($sql));
+        $s = preg_replace('/\s+/', ' ', trim($s));
         $max = 300;
         if (function_exists('mb_strlen')) {
             return mb_strlen($s) > $max ? mb_substr($s, 0, $max) . '...' : $s;

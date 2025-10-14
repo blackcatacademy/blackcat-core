@@ -250,38 +250,152 @@ final class TrustedShared
         foreach ($shareSpec as $key) {
             switch ($key) {
                 case 'config':
-                    // prefer config passed in opts, else config_min from trustedShared
                     $mapped['config'] = $opts['config'] ?? $trustedShared['config_min'] ?? [];
                     break;
 
+                // Logger / logging
                 case 'Logger':
-                    $mapped['Logger'] = \BlackCat\Core\Log\Logger::class;
+                    if (class_exists(\BlackCat\Core\Log\Logger::class)) $mapped['Logger'] = \BlackCat\Core\Log\Logger::class;
+                    break;
+                case 'AuditLogger':
+                    if (class_exists(\BlackCat\Core\Log\AuditLogger::class)) $mapped['AuditLogger'] = \BlackCat\Core\Log\AuditLogger::class;
+                    break;
+                case 'LoggerPsrAdapter':
+                    if (class_exists(\BlackCat\Core\Adapter\LoggerPsrAdapter::class)) $mapped['LoggerPsrAdapter'] = \BlackCat\Core\Adapter\LoggerPsrAdapter::class;
                     break;
 
+                // Database / DB instance
+                case 'db':
+                case 'Database':
+                    if (!empty($trustedShared['db'])) {
+                        $mapped['db'] = $trustedShared['db'];
+                        $mapped['Database'] = $trustedShared['db'];
+                    } elseif (class_exists(\BlackCat\Core\Database::class)) {
+                        $mapped['Database'] = \BlackCat\Core\Database::class;
+                    }
+                    break;
+
+                // Cache
+                case 'cache':
+                case 'FileCache':
+                case 'Cache':
+                    if (!empty($trustedShared['cache'])) {
+                        $mapped['cache'] = $trustedShared['cache'];
+                    } elseif (class_exists(\BlackCat\Core\Cache\FileCache::class)) {
+                        $mapped['FileCache'] = \BlackCat\Core\Cache\FileCache::class;
+                    }
+                    break;
+
+                // Mail
                 case 'MailHelper':
-                    $mapped['MailHelper'] = \BlackCat\Core\Helpers\MailHelper::class;
+                    if (class_exists(\BlackCat\Core\Helpers\MailHelper::class)) $mapped['MailHelper'] = \BlackCat\Core\Helpers\MailHelper::class;
                     break;
-
                 case 'Mailer':
-                    $mapped['Mailer'] = \BlackCat\Core\Mail\Mailer::class;
+                    if (class_exists(\BlackCat\Core\Mail\Mailer::class)) $mapped['Mailer'] = \BlackCat\Core\Mail\Mailer::class;
                     break;
 
+                // Templates & helpers for rendering
+                case 'Templates':
+                    if (class_exists(\BlackCat\Core\Templates\Templates::class)) $mapped['Templates'] = \BlackCat\Core\Templates\Templates::class;
+                    break;
+                case 'EmailTemplates':
+                    if (class_exists(\BlackCat\Core\Templates\EmailTemplates::class)) $mapped['EmailTemplates'] = \BlackCat\Core\Templates\EmailTemplates::class;
+                    break;
+                case 'SafeHtml':
+                    if (class_exists(\BlackCat\Core\Templates\SafeHtml::class)) $mapped['SafeHtml'] = \BlackCat\Core\Templates\SafeHtml::class;
+                    break;
+
+                // Security / Crypto / Keys / CSRF
+                case 'KeyManager':
+                    if (class_exists(\BlackCat\Core\Security\KeyManager::class)) $mapped['KeyManager'] = \BlackCat\Core\Security\KeyManager::class;
+                    break;
+                case 'Crypto':
+                    if (class_exists(\BlackCat\Core\Security\Crypto::class)) $mapped['Crypto'] = \BlackCat\Core\Security\Crypto::class;
+                    break;
+                case 'FileVault':
+                    if (class_exists(\BlackCat\Core\Security\FileVault::class)) $mapped['FileVault'] = \BlackCat\Core\Security\FileVault::class;
+                    break;
+                case 'CSRF':
+                    if (class_exists(\BlackCat\Core\Security\CSRF::class)) $mapped['CSRF'] = \BlackCat\Core\Security\CSRF::class;
+                    break;
                 case 'Recaptcha':
-                    $mapped['Recaptcha'] = \BlackCat\Core\Security\Recaptcha::class;
+                    if (class_exists(\BlackCat\Core\Security\Recaptcha::class)) $mapped['Recaptcha'] = \BlackCat\Core\Security\Recaptcha::class;
+                    break;
+                case 'LoginLimiter':
+                    if (class_exists(\BlackCat\Core\Security\LoginLimiter::class)) $mapped['LoginLimiter'] = \BlackCat\Core\Security\LoginLimiter::class;
                     break;
 
+                // Session
+                case 'Session':
+                case 'SessionManager':
+                    if (!empty($trustedShared['session'])) {
+                        $mapped['session'] = $trustedShared['session'];
+                    } elseif (class_exists(\BlackCat\Core\Session\SessionManager::class)) {
+                        $mapped['SessionManager'] = \BlackCat\Core\Session\SessionManager::class;
+                    }
+                    break;
+
+                // Validation
+                case 'Validator':
+                    if (class_exists(\BlackCat\Core\Validation\Validator::class)) $mapped['Validator'] = \BlackCat\Core\Validation\Validator::class;
+                    break;
+
+                // Helpers namespace / specific helpers
+                case 'DeferredHelper':
+                    if (class_exists(\BlackCat\Core\Helpers\DeferredHelper::class)) $mapped['DeferredHelper'] = \BlackCat\Core\Helpers\DeferredHelper::class;
+                    break;
+                case 'EnforcePasswordChange':
+                    if (class_exists(\BlackCat\Core\Helpers\EnforcePasswordChange::class)) $mapped['EnforcePasswordChange'] = \BlackCat\Core\Helpers\EnforcePasswordChange::class;
+                    break;
+                case 'GoPayAdapter':
+                    if (!empty($trustedShared['gopayAdapter'])) {
+                        $mapped['gopayAdapter'] = $trustedShared['gopayAdapter'];
+                        $mapped['GoPayAdapter'] = $trustedShared['gopayAdapter'];
+                    } elseif (class_exists(\BlackCat\Core\Payment\GoPayAdapter::class)) {
+                        $mapped['GoPayAdapter'] = \BlackCat\Core\Payment\GoPayAdapter::class;
+                    }
+                    break;
+                case 'GoPaySdkWrapper':
+                    if (class_exists(\BlackCat\Core\Payment\GoPaySdkWrapper::class)) $mapped['GoPaySdkWrapper'] = \BlackCat\Core\Payment\GoPaySdkWrapper::class;
+                    break;
+                case 'PaymentGatewayInterface':
+                    if (interface_exists(\BlackCat\Core\Payment\PaymentGatewayInterface::class)) $mapped['PaymentGatewayInterface'] = \BlackCat\Core\Payment\PaymentGatewayInterface::class;
+                    break;
+                case 'GoPayStatus':
+                    if (class_exists(\BlackCat\Core\Payment\GoPayStatus::class)) $mapped['GoPayStatus'] = \BlackCat\Core\Payment\GoPayStatus::class;
+                    break;
+
+                // Exceptions (map class-strings so handlers can catch/type-hint)
+                case 'DatabaseException':
+                    if (class_exists(\BlackCat\Core\DatabaseException::class)) $mapped['DatabaseException'] = \BlackCat\Core\DatabaseException::class;
+                    break;
+                case 'KeyManagerException':
+                    if (class_exists(\BlackCat\Core\Security\KeyManagerException::class)) $mapped['KeyManagerException'] = \BlackCat\Core\Security\KeyManagerException::class;
+                    break;
+                case 'GoPayHttpException':
+                    if (class_exists(\BlackCat\Core\Payment\GoPayHttpException::class)) $mapped['GoPayHttpException'] = \BlackCat\Core\Payment\GoPayHttpException::class;
+                    break;
+                case 'GoPayPaymentException':
+                    if (class_exists(\BlackCat\Core\Payment\GoPayPaymentException::class)) $mapped['GoPayPaymentException'] = \BlackCat\Core\Payment\GoPayPaymentException::class;
+                    break;
+                case 'GoPayTokenException':
+                    if (class_exists(\BlackCat\Core\Payment\GoPayTokenException::class)) $mapped['GoPayTokenException'] = \BlackCat\Core\Payment\GoPayTokenException::class;
+                    break;
+
+                // TrustedShared itself if requested
+                case 'TrustedShared':
+                    $mapped['TrustedShared'] = $trustedShared;
+                    break;
+
+                // KEYS_DIR and csrf value (legacy)
                 case 'KEYS_DIR':
                     $mapped['KEYS_DIR'] = defined('KEYS_DIR') ? KEYS_DIR : ($trustedShared['config_min']['paths']['keys'] ?? null);
                     break;
-
                 case 'csrf':
                     $mapped['csrf'] = $trustedShared['csrf'] ?? $trustedShared['csrfToken'] ?? null;
                     break;
 
-                case 'CSRF':
-                    $mapped['CSRF'] = \BlackCat\Core\Security\CSRF::class;
-                    break;
-
+                // Generic passthrough: if key exists in trustedShared, forward it
                 default:
                     if (array_key_exists($key, $trustedShared)) {
                         $mapped[$key] = $trustedShared[$key];
@@ -291,6 +405,7 @@ final class TrustedShared
         }
 
         return $mapped;
+
     }
 
     /**
