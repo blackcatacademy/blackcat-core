@@ -324,6 +324,9 @@ final class TrustedShared
                 case 'LoginLimiter':
                     if (class_exists(\BlackCat\Core\Security\LoginLimiter::class)) $mapped['LoginLimiter'] = \BlackCat\Core\Security\LoginLimiter::class;
                     break;
+                case 'Auth':
+                    if (class_exists(\BlackCat\Core\Security\Auth::class)) $mapped['Auth'] = \BlackCat\Core\Security\Auth::class;
+                    break;
 
                 // Session
                 case 'Session':
