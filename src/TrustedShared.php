@@ -433,7 +433,15 @@ final class TrustedShared
      */
     private static function sanitizeUser(array $user): array
     {
-        $sensitive = ['password', 'password_hash', 'pwd', 'token', 'remember_token', 'ssn', 'secret'];
+        $sensitive = [
+        'password', 'password_hash', 'pwd', 'token', 'remember_token', 'ssn', 'secret',
+        // local / slovak/czech keys in your dump:
+        'heslo', 'heslo_hash', 'heslo_algo', 'heslo_key_version',
+        'email_enc', 'email_hash', 'email_hash_key_version',
+        'last_login_ip_hash', 'last_login_ip_key',
+        // other internal keys you don't want in templates
+        'failed_logins', 'must_change_password'
+        ];
         foreach ($sensitive as $k) {
             if (array_key_exists($k, $user)) unset($user[$k]);
         }
