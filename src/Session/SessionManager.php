@@ -787,10 +787,7 @@ final class SessionManager
             );
         }
 
-        // destroy PHP session
         $userId = $_SESSION['user_id'] ?? null;
-        $_SESSION = [];
-        @session_destroy();
 
         // Audit session destruction (pass token hash bin if available)
         if (class_exists(Logger::class, true)) {
@@ -802,5 +799,8 @@ final class SessionManager
                 }
             } catch (\Throwable $_) {}
         }
+        // destroy PHP session
+        $_SESSION = [];
+        @session_destroy();
     }
 }

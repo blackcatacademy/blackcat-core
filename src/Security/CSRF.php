@@ -164,7 +164,7 @@ final class CSRF
             $store = [];
         }
 
-        self::$requestStores[$cacheKey] = ['store' => $store, 'dirty' => false];
+        self::$requestStores[$cacheKey] = ['store' => $store, 'dirty' => false, 'userId' => $userId];
         return $store;
     }
 
@@ -297,7 +297,7 @@ final class CSRF
             // mark dirty and persist
             $fp = self::getSessionFingerprint();
             $cacheKey = self::buildCacheKeyForUser($userId, $fp);
-            self::$requestStores[$cacheKey] = ['store' => $store, 'dirty' => true];
+            self::$requestStores[$cacheKey] = ['store' => $store, 'dirty' => true, 'userId' => $userId];
             self::saveTokenStoreForUserIfNeeded($userId);
 
             $mac = bin2hex(Crypto::hmac($id . ':' . $val, 'CSRF_KEY', 'csrf_key'));
@@ -407,7 +407,7 @@ final class CSRF
             $stored = $store[$id];
             // consume immediately
             unset($store[$id]);
-            self::$requestStores[$cacheKey] = ['store' => $store, 'dirty' => true];
+            self::$requestStores[$cacheKey] = ['store' => $store, 'dirty' => true, 'userId' => $userId];
             self::saveTokenStoreForUserIfNeeded($userId);
 
             if (!isset($stored['v']) || !hash_equals($stored['v'], (string)$val)) {
@@ -469,17 +469,26 @@ final class CSRF
         foreach (self::$requestStores as $cacheKey => $entry) {
             $store = $entry['store'];
             $store = self::cleanupStore($store);
-            // mark dirty and save: derive userId from cacheKey (simple parse)
+
             self::$requestStores[$cacheKey]['store'] = $store;
             self::$requestStores[$cacheKey]['dirty'] = true;
-            // try to extract userId (cache key format: csrf:user:{userId}:{fp})
-            $parts = explode(':', $cacheKey);
-            if (isset($parts[2]) && is_numeric($parts[2])) {
-                $uid = (int)$parts[2];
+
+            // Prefer stored userId if present
+            $uid = null;
+            if (isset($entry['userId'])) {
+                $uid = (int)$entry['userId'];
+            } else {
+                // fallback: extract userId from cacheKey using regex that matches buildCacheKeyForUser()
+                if (preg_match('/^csrf_user_(\d+)_/', $cacheKey, $m)) {
+                    $uid = (int)$m[1];
+                }
+            }
+
+            if ($uid !== null) {
                 self::saveTokenStoreForUserIfNeeded($uid);
             } else {
-                // fallback: try saving generically (best effort)
-                // we can't reliably save without userId in this branch
+                // nelze uložit bez userId — best-effort (log)
+                if (self::$logger) self::$logger->warning('CSRF cleanup: cannot determine userId from cacheKey', ['cacheKey' => $cacheKey]);
             }
         }
     }
