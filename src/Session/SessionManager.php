@@ -9,12 +9,46 @@ use BlackCat\Core\Security\KeyManager;
 use BlackCat\Core\Security\Crypto;
 use BlackCat\Core\Security\CSRF;
 use BlackCat\Core\Log\Logger;
+use Psr\SimpleCache\CacheInterface;
+use BlackCat\Core\Cache\LockingCacheInterface;
 
 final class SessionManager
 {
     private const TOKEN_BYTES = 32; // raw bytes
     private const COOKIE_NAME = 'session_token';
     private function __construct() {}
+
+    /** @var CacheInterface|null */
+    private static $cache = null;
+    /** @var int cache TTL in seconds */
+    private static $cacheTtl = 120;
+
+    /* -------------------------
+     * Cache init
+     * ------------------------- */
+
+    /**
+     * Initialize SessionManager cache.
+     * $cache should implement PSR-16 CacheInterface; if it also implements
+     * LockingCacheInterface, locking will be used during writes.
+     *
+     * @param CacheInterface $cache
+     * @param int $ttlSeconds
+     * @return void
+     */
+    public static function initCache(CacheInterface $cache, int $ttlSeconds = 120): void
+    {
+        self::$cache = $cache;
+        self::$cacheTtl = max(0, (int)$ttlSeconds);
+    }
+
+    /**
+     * Optional helper to produce cache key for token hash hex.
+     */
+    private static function cacheKeyForTokenHex(string $hex): string
+    {
+        return 'session_blob_' . $hex;
+    }
 
     /* -------------------------
      * Helpers
@@ -184,9 +218,7 @@ final class SessionManager
      */
     private static function persistSessionBlob($db, string $tokenHashBin): void
     {
-        // gather session snapshot (exclude internal/ephemeral data if you want)
         $sess = $_SESSION ?? [];
-        // ensure we don't accidentally store enormous resources or objects - keep scalars/arrays only
         $filtered = self::sanitizeSessionForStorage($sess);
 
         try {
@@ -200,8 +232,69 @@ final class SessionManager
 
             $sql = 'UPDATE sessions SET session_blob = :blob WHERE token_hash = :token_hash';
             self::executeDb($db, $sql, [':blob' => $blob, ':token_hash' => $tokenHashBin]);
+        
+        // update cache (write-through)
+        try {
+            if (self::$cache instanceof CacheInterface) {
+                $key = self::cacheKeyForTokenHex(bin2hex($tokenHashBin));
+
+                // try to fetch expires_at from DB row if possible
+                $expiresAt = null;
+                try {
+                    $row = self::fetchOne($db, 'SELECT expires_at FROM sessions WHERE token_hash = :token_hash LIMIT 1', [':token_hash' => $tokenHashBin]);
+                    $expiresAt = $row['expires_at'] ?? null;
+                } catch (\Throwable $_) {
+                    $expiresAt = null;
+                }
+
+                $meta = [
+                    'user_id' => $_SESSION['user_id'] ?? null,
+                    'revoked' => 0,
+                    'expires_at' => $expiresAt,
+                    'last_seen_at' => (new \DateTimeImmutable('now', new \DateTimeZone('UTC')))->format('Y-m-d H:i:s.u')
+                ];
+
+                // compute a conservative TTL: if DB expiration is known, use min(cacheTtl, seconds_until_db_expiry)
+                $ttlToUse = self::$cacheTtl ?: null;
+                if ($expiresAt !== null) {
+                    try {
+                        $exp = new \DateTimeImmutable($expiresAt, new \DateTimeZone('UTC'));
+                        $secs = $exp->getTimestamp() - time();
+                        if ($secs <= 0) {
+                            // already expired in DB -> ensure cache entry not stored
+                            $ttlToUse = 0;
+                        } else {
+                            if ($ttlToUse === null) $ttlToUse = $secs;
+                            else $ttlToUse = min($ttlToUse, $secs);
+                        }
+                    } catch (\Throwable $_) {
+                        // ignore parse error -> keep original TTL
+                    }
+                }
+
+                if ($ttlToUse === 0) {
+                    // do not cache expired session
+                } else {
+                    if (self::$cache instanceof LockingCacheInterface) {
+                        $lockToken = null;
+                        try {
+                            $lockToken = self::$cache->acquireLock('session_blob_lock_' . bin2hex($tokenHashBin), 5);
+                            self::$cache->set($key, ['blob' => $blob, 'meta' => $meta], $ttlToUse ?: null);
+                        } finally {
+                            if ($lockToken !== null) {
+                                try { self::$cache->releaseLock('session_blob_lock_' . bin2hex($tokenHashBin), $lockToken); } catch (\Throwable $_) {}
+                            }
+                        }
+                    } else {
+                        self::$cache->set($key, ['blob' => $blob, 'meta' => $meta], $ttlToUse ?: null);
+                    }
+                }
+            }
+        } catch (\Throwable $_) {
+            // ignore cache errors
+        }
+
         } catch (\Throwable $e) {
-            // log and fail silently (do not break app flow)
             if (class_exists(Logger::class, true)) {
                 try { Logger::systemError($e, $_SESSION['user_id'] ?? null); } catch (\Throwable $_) {}
             }
@@ -371,6 +464,7 @@ final class SessionManager
         $cookieDomain = $_ENV['SESSION_DOMAIN'] ?? ($_SERVER['HTTP_HOST'] ?? null);
         if (!empty($cookieDomain)) $cookieOpts['domain'] = $cookieDomain;
 
+        // set cookie AFTER DB write
         if (PHP_VERSION_ID >= 70300) {
             setcookie(self::COOKIE_NAME, $cookieToken, $cookieOpts);
         } else {
@@ -385,8 +479,35 @@ final class SessionManager
             );
         }
 
-        // set user_id in session and persist encrypted session blob
+        // make cookie visible inside this request so CSRF fingerprint uses the new value
+        $_COOKIE[self::COOKIE_NAME] = $cookieToken;
+
+        // set user_id in session
         $_SESSION['user_id'] = $userId;
+
+        // Ensure CSRF has the cache instance attached (defensive; app bootstrap still preferred)
+        try {
+            if (method_exists(CSRF::class, 'init')) {
+                // Do not override existing session ref; init accepts $_SESSION by reference.
+                // Only attach cache so migrate writes to cache-backed store.
+                CSRF::init($_SESSION, null, null, self::$cache ?? null);
+            }
+        } catch (\Throwable $e) {
+            if (class_exists(Logger::class, true)) {
+                try { Logger::systemMessage('warning', 'CSRF init failed during createSession', null, ['exception' => $e]); } catch (\Throwable $_) {}
+            }
+        }
+
+        // Migrate guest CSRF tokens into the user's cache-backed store so they are
+        // available after login and persisted into the session blob (DB).
+        try {
+            CSRF::migrateGuestTokensToUser($userId);
+        } catch (\Throwable $e) {
+            if (class_exists(Logger::class, true)) {
+                try { Logger::systemError($e, $userId); } catch (\Throwable $_) {}
+            }
+        }
+
         try {
             self::persistSessionBlob($db, $tokenHashBin);
         } catch (\Throwable $_) {}
@@ -404,26 +525,21 @@ final class SessionManager
         $rawToken = self::base64url_decode($cookie);
         if ($rawToken === null || strlen($rawToken) !== self::TOKEN_BYTES) return null;
 
-        // per-request cache (vyřeší opakované volání v rámci jednoho requestu)
         static $validateCache = [];
         $cacheKey = bin2hex($rawToken);
         if (array_key_exists($cacheKey, $validateCache)) {
-            return $validateCache[$cacheKey]; // může být int userId nebo null
+            return $validateCache[$cacheKey];
         }
 
         $keysDir = self::getKeysDir();
-
-        // nastavení: limit kandidátů (newest->oldest) — uprav dle potřeby
         $maxCandidates = 10;
 
-        // 1) derive candidates (ordered newest -> oldest)
         try {
             $candidates = KeyManager::deriveHmacCandidates('SESSION_KEY', $keysDir, 'session_key', $rawToken);
             if (empty($candidates)) {
                 $validateCache[$cacheKey] = null;
                 return null;
             }
-            // oříznout na maxCandidates (nejnovější první)
             if (count($candidates) > $maxCandidates) {
                 $candidates = array_slice($candidates, 0, $maxCandidates);
             }
@@ -433,7 +549,56 @@ final class SessionManager
             return null;
         }
 
-        // připravíme seznam hashů pro jediný SELECT
+        // --- Fast path: check cache for each candidate (newest -> oldest) ---
+        if (self::$cache instanceof CacheInterface) {
+            foreach ($candidates as $c) {
+                $candidate = $c['hash'] ?? null;
+                if ($candidate === null) continue;
+                $candidateHex = bin2hex($candidate);
+                $key = self::cacheKeyForTokenHex($candidateHex);
+                try {
+                    $cached = self::$cache->get($key);
+                } catch (\Throwable $_) {
+                    $cached = null;
+                }
+                if (empty($cached)) continue;
+                // expect ['blob' => encryptedBinary, 'meta' => [...]]
+                $blob = is_array($cached) && isset($cached['blob']) ? $cached['blob'] : (is_string($cached) ? $cached : null);
+                $meta = is_array($cached) && isset($cached['meta']) ? $cached['meta'] : null;
+                if ($blob === null) continue;
+                $revoked = $meta['revoked'] ?? 0;
+                $expiresAt = $meta['expires_at'] ?? null;
+                if (!empty($revoked)) continue;
+                if ($expiresAt !== null) {
+                    try {
+                        $exp = new \DateTimeImmutable($expiresAt, new \DateTimeZone('UTC'));
+                        if ($exp < new \DateTimeImmutable('now', new \DateTimeZone('UTC'))) {
+                            continue;
+                        }
+                    } catch (\Throwable $_) {
+                        continue;
+                    }
+                }
+                // decrypt and populate
+                try {
+                    self::ensureCryptoInitialized();
+                    $plain = Crypto::decrypt($blob);
+                    if ($plain === null) {
+                        continue;
+                    }
+                    $data = json_decode($plain, true);
+                    if (!is_array($data)) continue;
+                    $_SESSION = $data;
+                    if (isset($meta['user_id'])) $_SESSION['user_id'] = $meta['user_id'];
+                    $validateCache[$cacheKey] = $_SESSION['user_id'] ?? null;
+                    return $validateCache[$cacheKey];
+                } catch (\Throwable $_) {
+                    continue;
+                }
+            }
+        }
+
+        // --- DB fallback: existing logic (load rows and validate) ---
         $hashes = [];
         foreach ($candidates as $c) {
             if (!empty($c['hash'])) $hashes[] = $c['hash'];
@@ -443,7 +608,6 @@ final class SessionManager
             return null;
         }
 
-        // vytvoříme placeholdery a parametry (PDO)
         $placeholders = [];
         $params = [];
         foreach ($hashes as $i => $h) {
@@ -452,14 +616,12 @@ final class SessionManager
             $params[$ph] = $h;
         }
 
-        // 2) Načteme všechny odpovídající řádky jedním dotazem
         try {
             $sql = 'SELECT id, token_hash, user_id, ip_hash, ip_hash_key, user_agent, expires_at, revoked, session_blob, failed_decrypt_count
                     FROM sessions
                     WHERE token_hash IN (' . implode(',', $placeholders) . ')';
             $stmt = $db->prepare($sql);
             foreach ($params as $ph => $val) {
-                // binární data (PDO driver může vyžadovat PARAM_STR u některých driverů)
                 $stmt->bindValue($ph, $val, \PDO::PARAM_LOB);
             }
             $stmt->execute();
@@ -470,7 +632,6 @@ final class SessionManager
             return null;
         }
 
-        // mapujeme výsledky podle hex(token_hash) pro rychlé vyhledání
         $rowsMap = [];
         foreach ($rows as $r) {
             if (!isset($r['token_hash'])) continue;
@@ -480,8 +641,6 @@ final class SessionManager
         $validRow = null;
         $usedCandidate = null;
         $usedCandidateVersion = null;
-
-        // práh pro revokaci po opakovaných chybách
         $failThreshold = 3;
 
         foreach ($candidates as $c) {
@@ -489,32 +648,24 @@ final class SessionManager
             $candidateVersion = $c['version'] ?? null;
             $candidateHex = bin2hex($candidate);
 
-            if (!isset($rowsMap[$candidateHex])) {
-                // není v DB — pokračovat
-                continue;
-            }
-
+            if (!isset($rowsMap[$candidateHex])) continue;
             $row = $rowsMap[$candidateHex];
 
-            if ((int)($row['revoked'] ?? 0) === 1) {
-                continue;
-            }
+            if ((int)($row['revoked'] ?? 0) === 1) continue;
 
-            // pokus o dešifrování / naplnění session
             $decryptedOk = false;
             try {
-                $decryptedOk = self::loadSessionBlobAndPopulate($db, $row, $candidate, $candidateVersion);
+                $decryptedOk = self::loadSessionBlobAndPopulate($db, $row, $candidate);
             } catch (\Throwable $e) {
                 if (class_exists(Logger::class, true)) { try { Logger::systemError($e); } catch (\Throwable $_) {} }
                 $decryptedOk = false;
             }
 
             if ($decryptedOk === false) {
-                // Bezpečná transakční inkrementace + audit + případná revokace
+                // failed decrypt => audit & possible revoke (existing code)
                 try {
                     $db->beginTransaction();
 
-                    // 1) zamknout řádek pro update
                     $sqlSel = 'SELECT id, failed_decrypt_count FROM sessions WHERE token_hash = :token_hash FOR UPDATE';
                     $stmtSel = $db->prepare($sqlSel);
                     $stmtSel->bindValue(':token_hash', $candidate, \PDO::PARAM_LOB);
@@ -525,7 +676,6 @@ final class SessionManager
                     $cnt = isset($sel['failed_decrypt_count']) ? (int)$sel['failed_decrypt_count'] : 0;
                     $cnt++;
 
-                    // 2) aktualizovat counter + last_failed_decrypt_at
                     $nowUtc = (new \DateTimeImmutable('now', new \DateTimeZone('UTC')))->format('Y-m-d H:i:s.u');
                     $sqlUpd = 'UPDATE sessions
                             SET failed_decrypt_count = :cnt,
@@ -537,12 +687,10 @@ final class SessionManager
                     $stmtUpd->bindValue(':token_hash', $candidate, \PDO::PARAM_LOB);
                     $stmtUpd->execute();
 
-                    // připravíme hodnoty pro audit (dbIpHash definujeme z $row)
                     $dbIpHash = $row['ip_hash'] ?? null;
                     $ipHashKey = $row['ip_hash_key'] ?? null;
                     $uaForAudit = $row['user_agent'] ?? null;
 
-                    // 3) audit záznam (použijeme stejné sloupce jako schema)
                     try {
                         $sqlAudit = 'INSERT INTO session_audit (
                                         session_token, session_token_key_version, csrf_key_version, session_id,
@@ -565,19 +713,14 @@ final class SessionManager
                         $stmtAudit->bindValue(':outcome', null, \PDO::PARAM_NULL);
                         $stmtAudit->bindValue(':created_at', $nowUtc);
                         $stmtAudit->execute();
-                    } catch (\Throwable $_) {
-                        // audit není kritický — ignorujeme chybu v auditu
-                    }
+                    } catch (\Throwable $_) {}
 
-                    // 4) pokud přesáhnut práh, revokuj a zapiš audit revokace (stejný sloupcový rozvrh)
                     if ($cnt >= $failThreshold) {
-                        // 1) označit session jako revoked
                         $sqlRev = 'UPDATE sessions SET revoked = 1 WHERE token_hash = :token_hash';
                         $stmtRev = $db->prepare($sqlRev);
-                        $stmtRev->bindValue(':token_hash', $candidate, \PDO::PARAM_STR); // oprava zde
+                        $stmtRev->bindValue(':token_hash', $candidate, \PDO::PARAM_STR);
                         $stmtRev->execute();
 
-                        // 2) zapsat audit
                         $stmtAudit = $db->prepare($sqlAudit);
                         $stmtAudit->bindValue(':session_token', $candidate, \PDO::PARAM_STR);
                         $stmtAudit->bindValue(':session_token_key_version', $candidateVersion);
@@ -606,16 +749,14 @@ final class SessionManager
                         }
                     }
 
-                    $db->commit(); // commit až po všem
+                    $db->commit();
                 } catch (\Throwable $e) {
                     try { $db->rollBack(); } catch (\Throwable $_) {}
                     if (class_exists(Logger::class, true)) { try { Logger::systemError($e); } catch (\Throwable $_) {} }
                 }
-                // pokračuj na dalšího kandidáta
                 continue;
             }
 
-            // IP check (explicitní verze z DB -> fallback na derive candidates)
             $ipRaw = $_SERVER['REMOTE_ADDR'] ?? null;
             $ipMismatch = true;
             if ($ipRaw !== null && isset($row['ip_hash']) && $row['ip_hash'] !== null) {
@@ -660,16 +801,14 @@ final class SessionManager
                     $ipMismatch = true;
                 }
             } else {
-                // pokud v DB není uložen ip_hash, považujeme to za match (podle vaší politiky)
                 $ipMismatch = false;
             }
 
             if ($ipMismatch) {
-                self::destroySession($db); // tady se provede revoke+audit centralizovaně
+                self::destroySession($db);
                 return null;
             }
 
-            // User-agent check
             $ua = $_SERVER['HTTP_USER_AGENT'] ?? null;
             $normalizedUa = self::truncateUserAgent($ua);
             if (($row['user_agent'] ?? null) !== null && $row['user_agent'] !== $normalizedUa) {
@@ -679,7 +818,6 @@ final class SessionManager
                 continue;
             }
 
-            // vše OK -> použijeme tento kandidát
             $validRow = $row;
             $usedCandidate = $candidate;
             $usedCandidateVersion = $candidateVersion;
@@ -691,7 +829,6 @@ final class SessionManager
             return null;
         }
 
-        // expiration
         try {
             $expiresAt = new \DateTimeImmutable($validRow['expires_at'], new \DateTimeZone('UTC'));
             if ($expiresAt < new \DateTimeImmutable('now', new \DateTimeZone('UTC'))) {
@@ -709,7 +846,6 @@ final class SessionManager
         $userId = (int)$validRow['user_id'];
         $_SESSION['user_id'] = $userId;
 
-        // update last_seen + reset failed_decrypt_count po úspěchu
         try {
             $nowUtc = (new \DateTimeImmutable('now', new \DateTimeZone('UTC')))->format('Y-m-d H:i:s.u');
             $sql = 'UPDATE sessions
@@ -726,7 +862,39 @@ final class SessionManager
             if (class_exists(Logger::class, true)) { try { Logger::systemError($e); } catch (\Throwable $_) {} }
         }
 
-        // uložit do per-request cache a vrátit
+        // store encrypted blob in cache for next requests (if available)
+        try {
+            $blobFromDb = $validRow['session_blob'] ?? null;
+            if ($blobFromDb === null) {
+                $r = self::fetchOne($db, 'SELECT session_blob FROM sessions WHERE token_hash = :token_hash LIMIT 1', [':token_hash' => $usedCandidate]);
+                $blobFromDb = $r['session_blob'] ?? null;
+            }
+            if ($blobFromDb !== null && self::$cache instanceof CacheInterface && $usedCandidate !== null) {
+                $key = self::cacheKeyForTokenHex(bin2hex($usedCandidate));
+                $meta = [
+                    'user_id' => $userId,
+                    'revoked' => (int)($validRow['revoked'] ?? 0),
+                    'expires_at' => $validRow['expires_at'] ?? null,
+                    'last_seen_at' => $nowUtc
+                ];
+                if (self::$cache instanceof LockingCacheInterface) {
+                    $token = null;
+                    try {
+                        $token = self::$cache->acquireLock('sess_' . $key, 5);
+                        self::$cache->set($key, ['blob' => $blobFromDb, 'meta' => $meta], self::$cacheTtl ?: null);
+                    } finally {
+                        if ($token !== null) {
+                            try { self::$cache->releaseLock('sess_' . $key, $token); } catch (\Throwable $_) {}
+                        }
+                    }
+                } else {
+                    self::$cache->set($key, ['blob' => $blobFromDb, 'meta' => $meta], self::$cacheTtl ?: null);
+                }
+            }
+        } catch (\Throwable $_) {
+            // ignore cache errors
+        }
+
         $validateCache[$cacheKey] = $userId;
         return $userId;
     }
@@ -752,11 +920,39 @@ final class SessionManager
                             } catch (\Throwable $e) {
                                 if (class_exists(Logger::class, true)) { try { Logger::systemError($e, $userId); } catch (\Throwable $_) {} }
                             }
+
+                            // invalidate cache for this candidate
+                            try {
+                                if (self::$cache instanceof CacheInterface && is_string($candidate)) {
+                                    $key = self::cacheKeyForTokenHex(bin2hex($candidate));
+                                    try { self::$cache->delete($key); } catch (\Throwable $_) {}
+                                }
+                            } catch (\Throwable $_) {}
                         }
                     } catch (\Throwable $_) {
                         // ignore
                     }
             }
+        }
+
+        // Try to invalidate CSRF cache store for this user (best-effort)
+        try {
+            $userIdForCsrf = $_SESSION['user_id'] ?? $userId ?? null;
+            $cookieValue = $_COOKIE[self::COOKIE_NAME] ?? null;
+            if ($userIdForCsrf !== null && $cookieValue !== null && self::$cache instanceof CacheInterface) {
+                $fpBin = hash('sha256', $cookieValue, true);
+                if ($fpBin !== false) {
+                    $cacheKey = 'csrf_user_' . (int)$userIdForCsrf . '_' . bin2hex($fpBin);
+                    try { self::$cache->delete($cacheKey); } catch (\Throwable $_) {}
+                }
+                // also clear per-request CSRF state
+                try { CSRF::reset(); } catch (\Throwable $_) {}
+            } else {
+                // clear session-local CSRF state anyway
+                try { CSRF::reset(); } catch (\Throwable $_) {}
+            }
+        } catch (\Throwable $_) {
+            // swallow - best-effort invalidation
         }
 
         // ensure candidate exists for later logging

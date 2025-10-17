@@ -248,11 +248,25 @@ class FileCache implements LockingCacheInterface
     }
 
     private function safeAtomicWrite(string $file, string $data): bool {
-        $tmp = @tempnam($this->cacheDirReal, 'fc_');
-        if ($tmp === false) {
-            $this->log('warning', 'tempnam failed for atomic write');
-            return false;
+        $destDir = dirname($file);
+        // Ensure destination dir exists (best-effort)
+        if (!is_dir($destDir)) {
+            @mkdir($destDir, 0700, true);
+            @chmod($destDir, 0700);
         }
+
+        // Create temp file in same directory as destination to ensure atomic rename
+        $tmp = @tempnam($destDir, 'fc_');
+        if ($tmp === false) {
+            $this->log('warning', 'tempnam failed for atomic write in dest dir, falling back to cacheDirReal');
+            // fallback to base cacheDirReal if destDir isn't writable for temp files
+            $tmp = @tempnam($this->cacheDirReal, 'fc_');
+            if ($tmp === false) {
+                $this->log('warning', 'tempnam fallback also failed for atomic write');
+                return false;
+            }
+        }
+
         $fp = @fopen($tmp, 'wb');
         if ($fp === false) { @unlink($tmp); $this->log('warning', 'fopen(tmp) failed'); return false; }
         if (!flock($fp, LOCK_EX)) { fclose($fp); @unlink($tmp); $this->log('warning', 'flock(tmp) failed'); return false; }
@@ -261,13 +275,6 @@ class FileCache implements LockingCacheInterface
         flock($fp, LOCK_UN);
         fclose($fp);
         if ($written === false) { @unlink($tmp); $this->log('warning', 'fwrite failed'); return false; }
-
-        // Attempt to ensure destination dir exists
-        $destDir = dirname($file);
-        if (!is_dir($destDir)) {
-            @mkdir($destDir, 0700, true);
-            @chmod($destDir, 0700);
-        }
 
         if (!@rename($tmp, $file)) { @unlink($tmp); $this->log('warning', 'rename tmp->file failed'); return false; }
 
@@ -826,7 +833,7 @@ class FileCache implements LockingCacheInterface
             $fp = @fopen($path, 'rb');
             if ($fp === false) continue;
             if (!flock($fp, LOCK_SH)) { fclose($fp); continue; }
-            $raw = stream_get_contents($fp, 8192, 0);
+            $raw = $raw = stream_get_contents($fp, 32768, 0);
             flock($fp, LOCK_UN);
             fclose($fp);
             $data = @unserialize($raw, ['allowed_classes' => false]);

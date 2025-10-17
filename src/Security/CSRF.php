@@ -144,33 +144,61 @@ final class CSRF
     /**
      * Load token store for a given user (from per-request cache or PSR-16 cache).
      * Returns associative array id => ['v'=>val,'exp'=>int]
+     *
+     * Behavior:
+     *  - Try primary key (with session fingerprint if present).
+     *  - If primary is empty and fingerprint present, try fallback key without fingerprint and merge.
      */
     private static function loadTokenStoreForUser(int $userId): array
     {
-        if (self::$cache === null) return [];
-
-        $fp = self::getSessionFingerprint();
-        $cacheKey = self::buildCacheKeyForUser($userId, $fp);
-
-        if (isset(self::$requestStores[$cacheKey])) {
-            return self::$requestStores[$cacheKey]['store'];
+        if (self::$cache === null) {
+            // ensure requestStores entry exists so other code can rely on userId
+            $fallbackKey = self::buildCacheKeyForUser($userId, null);
+            if (!isset(self::$requestStores[$fallbackKey])) {
+                self::$requestStores[$fallbackKey] = ['store' => [], 'dirty' => false, 'userId' => $userId];
+            }
+            return [];
         }
 
+        $fp = self::getSessionFingerprint();
+        $primaryKey = self::buildCacheKeyForUser($userId, $fp);
+
+        if (isset(self::$requestStores[$primaryKey])) {
+            return self::$requestStores[$primaryKey]['store'];
+        }
+
+        $store = [];
         try {
-            $store = self::$cache->get($cacheKey, []);
+            $store = self::$cache->get($primaryKey, []);
             if (!is_array($store)) $store = [];
         } catch (\Throwable $e) {
-            if (self::$logger) self::$logger->warning('CSRF cache get failed', ['exception' => $e, 'key' => $cacheKey]);
+            if (self::$logger) self::$logger->warning('CSRF cache get failed (primary)', ['exception' => $e, 'key' => $primaryKey]);
             $store = [];
         }
 
-        self::$requestStores[$cacheKey] = ['store' => $store, 'dirty' => false, 'userId' => $userId];
+        // If fingerprint present and primary is empty, try fallback (no fingerprint)
+        if (empty($store) && $fp !== null) {
+            $fallbackKey = self::buildCacheKeyForUser($userId, null);
+            try {
+                $fallbackStore = self::$cache->get($fallbackKey, []);
+                if (is_array($fallbackStore) && !empty($fallbackStore)) {
+                    // merge fallback entries into store (do not mark dirty here)
+                    $store = $fallbackStore + $store;
+                }
+            } catch (\Throwable $e) {
+                if (self::$logger) self::$logger->warning('CSRF cache get failed (fallback)', ['exception' => $e, 'key' => $fallbackKey]);
+            }
+        }
+
+        // ensure requestStores entry includes userId for later cleanup/save
+        self::$requestStores[$primaryKey] = ['store' => $store, 'dirty' => false, 'userId' => $userId];
         return $store;
     }
 
     /**
      * Save token store for a given user if marked dirty.
-     * Will attempt to acquire lock if cache supports it (FileCache provides acquireLock/releaseLock).
+     * Uses LockingCacheInterface when available and computes TTL conservatively
+     * based on earliest token expiration present in the store.
      */
     private static function saveTokenStoreForUserIfNeeded(int $userId): void
     {
@@ -183,19 +211,30 @@ final class CSRF
         if (empty(self::$requestStores[$cacheKey]['dirty'])) return;
 
         $store = self::$requestStores[$cacheKey]['store'];
-        $cacheTtl = self::$ttl + 60;
+
+        // compute conservative TTL: until earliest token expiry (min seconds)
+        $now = time();
+        $minTtl = null;
+        foreach ($store as $m) {
+            if (isset($m['exp'])) {
+                $secs = (int)$m['exp'] - $now;
+                if ($secs <= 0) continue;
+                if ($minTtl === null || $secs < $minTtl) $minTtl = $secs;
+            }
+        }
+        $cacheTtl = $minTtl !== null ? max(1, $minTtl) : (self::$ttl + 60);
 
         $locked = false;
         $token = null;
+        $lockKey = 'csrf_lock_' . $cacheKey;
 
-        // try acquire lock if available
         try {
-            if (method_exists(self::$cache, 'acquireLock')) {
-                $token = self::$cache->acquireLock($cacheKey, 5); // 5s lock
+            if (self::$cache instanceof LockingCacheInterface) {
+                $token = self::$cache->acquireLock($lockKey, 5);
                 $locked = ($token !== null);
             }
         } catch (\Throwable $e) {
-            if (self::$logger) self::$logger->warning('CSRF: lock acquire failed', ['exception' => $e, 'key' => $cacheKey]);
+            if (self::$logger) self::$logger->warning('CSRF: lock acquire failed', ['exception' => $e, 'key' => $lockKey]);
             $locked = false;
         }
 
@@ -209,11 +248,11 @@ final class CSRF
         } finally {
             if ($locked && $token !== null) {
                 try {
-                    if (method_exists(self::$cache, 'releaseLock')) {
-                        self::$cache->releaseLock($cacheKey, $token);
+                    if (self::$cache instanceof LockingCacheInterface) {
+                        self::$cache->releaseLock($lockKey, $token);
                     }
                 } catch (\Throwable $e) {
-                    if (self::$logger) self::$logger->warning('CSRF: lock release failed', ['exception' => $e, 'key' => $cacheKey]);
+                    if (self::$logger) self::$logger->warning('CSRF: lock release failed', ['exception' => $e, 'key' => $lockKey]);
                 }
             }
         }
@@ -282,23 +321,33 @@ final class CSRF
         self::ensureInitialized();
 
         $now = time();
-
         $userId = isset(self::$session['user_id']) ? (int)self::$session['user_id'] : null;
 
-        // if user logged-in and cache provided -> cache-backed flow
+        // if user logged-in and cache provided -> cache-backed flow (but also persist to session)
         if ($userId !== null && self::$cache !== null) {
             $store = self::loadTokenStoreForUser($userId);
             $store = self::cleanupStore($store);
 
             $id = bin2hex(random_bytes(16)); // 32 hex chars
             $val = bin2hex(random_bytes(32)); // 64 hex chars
-            $store[$id] = ['v' => $val, 'exp' => $now + self::$ttl];
+            $meta = ['v' => $val, 'exp' => $now + self::$ttl];
 
-            // mark dirty and persist
+            $store[$id] = $meta;
+
+            // write to requestStores and persist to cache
             $fp = self::getSessionFingerprint();
             $cacheKey = self::buildCacheKeyForUser($userId, $fp);
             self::$requestStores[$cacheKey] = ['store' => $store, 'dirty' => true, 'userId' => $userId];
             self::saveTokenStoreForUserIfNeeded($userId);
+
+            // ALSO write authoritative copy into session (server-side persistence)
+            if (is_array(self::$session)) {
+                if (!isset(self::$session['csrf_tokens']) || !is_array(self::$session['csrf_tokens'])) {
+                    self::$session['csrf_tokens'] = [];
+                }
+                self::$session['csrf_tokens'][$id] = $meta;
+                // Note: session persistence to DB will be handled by SessionManager / session handler
+            }
 
             $mac = bin2hex(Crypto::hmac($id . ':' . $val, 'CSRF_KEY', 'csrf_key'));
             return $id . ':' . $val . ':' . $mac;
@@ -338,7 +387,8 @@ final class CSRF
 
         $id = bin2hex(random_bytes(16)); // 32 hex chars
         $val = bin2hex(random_bytes(32)); // 64 hex chars
-        self::$session['csrf_tokens'][$id] = ['v' => $val, 'exp' => $now + self::$ttl];
+        $meta = ['v' => $val, 'exp' => $now + self::$ttl];
+        self::$session['csrf_tokens'][$id] = $meta;
 
         $mac = bin2hex(Crypto::hmac($id . ':' . $val, 'CSRF_KEY', 'csrf_key'));
         return $id . ':' . $val . ':' . $mac;
@@ -369,7 +419,8 @@ final class CSRF
         $candidates = Crypto::hmac($id . ':' . $val, 'CSRF_KEY', 'csrf_key', null, true);
 
         $macBin = hex2bin($mac);
-        if ($macBin === false || strlen($macBin) < 16) {
+        // HMAC-SHA256 expected => 32 bytes
+        if ($macBin === false || strlen($macBin) !== 32) {
             return false;
         }
 
@@ -397,29 +448,67 @@ final class CSRF
 
         if ($userId !== null && self::$cache !== null) {
             $fp = self::getSessionFingerprint();
-            $cacheKey = self::buildCacheKeyForUser($userId, $fp);
+            $primaryKey = self::buildCacheKeyForUser($userId, $fp);
             $store = self::loadTokenStoreForUser($userId);
 
-            if (!isset($store[$id])) {
-                return false;
+            // try primary
+            if (isset($store[$id])) {
+                $stored = $store[$id];
+                unset($store[$id]);
+                self::$requestStores[$primaryKey] = ['store' => $store, 'dirty' => true, 'userId' => $userId];
+                self::saveTokenStoreForUserIfNeeded($userId);
+
+                if (!isset($stored['v']) || !hash_equals($stored['v'], (string)$val)) return false;
+                if (!isset($stored['exp']) || $stored['exp'] < $now) return false;
+
+                // also remove from session authoritative copy if present
+                if (isset(self::$session['csrf_tokens'][$id])) {
+                    unset(self::$session['csrf_tokens'][$id]);
+                }
+
+                return true;
             }
 
-            $stored = $store[$id];
-            // consume immediately
-            unset($store[$id]);
-            self::$requestStores[$cacheKey] = ['store' => $store, 'dirty' => true, 'userId' => $userId];
-            self::saveTokenStoreForUserIfNeeded($userId);
+            // try fallback (no fingerprint) if primary didn't have it
+            if ($fp !== null) {
+                $fallbackKey = self::buildCacheKeyForUser($userId, null);
+                try {
+                    $fallbackStore = self::$cache->get($fallbackKey, []);
+                    if (is_array($fallbackStore) && isset($fallbackStore[$id])) {
+                        $stored = $fallbackStore[$id];
+                        // consume in fallback store: write back without this id
+                        unset($fallbackStore[$id]);
+                        // save fallback store back
+                        self::$requestStores[$fallbackKey] = ['store' => $fallbackStore, 'dirty' => true, 'userId' => $userId];
+                        self::saveTokenStoreForUserIfNeeded($userId);
 
-            if (!isset($stored['v']) || !hash_equals($stored['v'], (string)$val)) {
-                return false;
+                        if (!isset($stored['v']) || !hash_equals($stored['v'], (string)$val)) return false;
+                        if (!isset($stored['exp']) || $stored['exp'] < $now) return false;
+
+                        if (isset(self::$session['csrf_tokens'][$id])) {
+                            unset(self::$session['csrf_tokens'][$id]);
+                        }
+
+                        return true;
+                    }
+                } catch (\Throwable $e) {
+                    if (self::$logger) self::$logger->warning('CSRF validate fallback get failed', ['exception' => $e, 'key' => $fallbackKey]);
+                }
             }
-            if (!isset($stored['exp']) || $stored['exp'] < $now) {
-                return false;
+
+            // not found in cache-backed stores -> try authoritative session copy (DB)
+            if (isset(self::$session['csrf_tokens'][$id])) {
+                $stored = self::$session['csrf_tokens'][$id];
+                unset(self::$session['csrf_tokens'][$id]);
+                if (!isset($stored['v']) || !hash_equals($stored['v'], (string)$val)) return false;
+                if (!isset($stored['exp']) || $stored['exp'] < $now) return false;
+                return true;
             }
-            return true;
+
+            return false;
         }
 
-        // session-backed validation
+        // session-backed validation for anonymous
         if (!isset(self::$session['csrf_tokens'][$id])) {
             return false;
         }
@@ -431,7 +520,7 @@ final class CSRF
         if (!isset($stored['v']) || !hash_equals($stored['v'], (string)$val)) {
             return false;
         }
-        if (!isset($stored['exp']) || $stored['exp'] < time()) {
+        if (!isset($stored['exp']) || $stored['exp'] < $now) {
             return false;
         }
         return true;
@@ -448,6 +537,43 @@ final class CSRF
             '" value="' .
             htmlspecialchars($token, ENT_QUOTES | ENT_SUBSTITUTE, 'utf-8') .
             '">';
+    }
+
+    /**
+     * Migrate tokens from anonymous session into user's cache-backed store.
+     * Call this right after successful login (after $_SESSION['user_id'] is set).
+     */
+    public static function migrateGuestTokensToUser(int $userId): void
+    {
+        self::ensureInitialized();
+
+        if (empty(self::$session['csrf_tokens']) || !is_array(self::$session['csrf_tokens'])) {
+            return;
+        }
+
+        $guestTokens = self::$session['csrf_tokens'];
+        if (empty($guestTokens)) return;
+
+        // load primary user store and merge
+        $fp = self::getSessionFingerprint();
+        $primaryKey = self::buildCacheKeyForUser($userId, $fp);
+        $store = self::loadTokenStoreForUser($userId);
+        $store = self::cleanupStore($store);
+
+        foreach ($guestTokens as $id => $meta) {
+            // prefer keep existing user store entry if present
+            if (!isset($store[$id])) {
+                $store[$id] = $meta;
+            }
+        }
+
+        // write back to requestStores so save will persist
+        self::$requestStores[$primaryKey] = ['store' => $store, 'dirty' => true, 'userId' => $userId];
+        self::saveTokenStoreForUserIfNeeded($userId);
+
+        // keep authoritative session copy as well (optional: can clear guest tokens)
+        // keep them in session to ensure DB persistence; optionally clear if you want
+        unset(self::$session['csrf_tokens']);
     }
 
     /**
@@ -474,21 +600,12 @@ final class CSRF
             self::$requestStores[$cacheKey]['dirty'] = true;
 
             // Prefer stored userId if present
-            $uid = null;
-            if (isset($entry['userId'])) {
-                $uid = (int)$entry['userId'];
-            } else {
-                // fallback: extract userId from cacheKey using regex that matches buildCacheKeyForUser()
-                if (preg_match('/^csrf_user_(\d+)_/', $cacheKey, $m)) {
-                    $uid = (int)$m[1];
-                }
-            }
+            $uid = $entry['userId'] ?? null;
 
             if ($uid !== null) {
-                self::saveTokenStoreForUserIfNeeded($uid);
+                self::saveTokenStoreForUserIfNeeded((int)$uid);
             } else {
-                // nelze uložit bez userId — best-effort (log)
-                if (self::$logger) self::$logger->warning('CSRF cleanup: cannot determine userId from cacheKey', ['cacheKey' => $cacheKey]);
+                if (self::$logger) self::$logger->warning('CSRF cleanup: cannot determine userId for requestStore', ['cacheKey' => $cacheKey]);
             }
         }
     }
