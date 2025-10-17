@@ -457,19 +457,23 @@ final class DbCachedSessionHandler implements \SessionHandlerInterface
         }
 
         // best-effort: delete CSRF cache store for user or guest
+        // replace the fingerprint resolution + CSRF key deletion block with:
         try {
             if ($this->cache !== null) {
-                // fingerprint: z cookie, jinak fallback na session_id()
                 $cookieVal = $_COOKIE[self::COOKIE_NAME] ?? null;
-                $fpBin = $foundFpBin ?? (is_string($cookieVal) ? hash('sha256', $cookieVal, true) : hash('sha256', session_id(), true));
+                $fpBin = $foundFpBin ?? (is_string($cookieVal) ? hash('sha256', $cookieVal, true) : null);
 
-                // user key: pokud přihlášený -> user_id, jinak 'anon'
-                $userKey = (session_status() === PHP_SESSION_ACTIVE && isset($_SESSION['user_id'])) ? $_SESSION['user_id'] : 'anon';
+                $userKey = (session_status() === PHP_SESSION_ACTIVE && isset($_SESSION['user_id'])) ? (int)$_SESSION['user_id'] : 'anon';
 
+                // delete both: fingerprinted key (if we have fingerprint) and fallback key without fingerprint
                 if ($fpBin !== null) {
                     $csrfKey = 'csrf_user_' . $userKey . '_' . bin2hex($fpBin);
                     try { $this->cache->delete($csrfKey); } catch (\Throwable $_) {}
                 }
+
+                // always also try to delete fallback key without fingerprint
+                $csrfFallback = 'csrf_user_' . $userKey . '_nofp';
+                try { $this->cache->delete($csrfFallback); } catch (\Throwable $_) {}
             }
         } catch (\Throwable $_) {
             // swallow

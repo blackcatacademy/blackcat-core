@@ -74,8 +74,18 @@ final class CSRF
             self::$maxTokens = $maxTokens;
         }
 
+        // only attach provided cache if CSRF has no cache yet; do not override an existing cache instance
         if ($cache !== null) {
-            self::setCache($cache);
+            if (self::$cache === null) {
+                self::setCache($cache);
+            } else {
+                // do not silently override an already attached cache instance - log the mismatch for debug
+                if (self::$logger) {
+                    try {
+                        self::$logger->warning('CSRF::init() called with a cache but CSRF already has a cache attached — ignoring new cache instance.');
+                    } catch (\Throwable $_) {}
+                }
+            }
         }
 
         if (!isset(self::$session['csrf_tokens']) || !is_array(self::$session['csrf_tokens'])) {
@@ -196,63 +206,78 @@ final class CSRF
     }
 
     /**
-     * Save token store for a given user if marked dirty.
-     * Uses LockingCacheInterface when available and computes TTL conservatively
-     * based on earliest token expiration present in the store.
+     * Save token store(s) for a given user if marked dirty.
+     * Iterates over all requestStores entries for this user (handles primary + fallback keys).
      */
     private static function saveTokenStoreForUserIfNeeded(int $userId): void
     {
         if (self::$cache === null) return;
 
-        $fp = self::getSessionFingerprint();
-        $cacheKey = self::buildCacheKeyForUser($userId, $fp);
-
-        if (!isset(self::$requestStores[$cacheKey])) return;
-        if (empty(self::$requestStores[$cacheKey]['dirty'])) return;
-
-        $store = self::$requestStores[$cacheKey]['store'];
-
-        // compute conservative TTL: until earliest token expiry (min seconds)
         $now = time();
-        $minTtl = null;
-        foreach ($store as $m) {
-            if (isset($m['exp'])) {
-                $secs = (int)$m['exp'] - $now;
-                if ($secs <= 0) continue;
-                if ($minTtl === null || $secs < $minTtl) $minTtl = $secs;
-            }
-        }
-        $cacheTtl = $minTtl !== null ? max(1, $minTtl) : (self::$ttl + 60);
 
-        $locked = false;
-        $token = null;
-        $lockKey = 'csrf_lock_' . $cacheKey;
-
-        try {
-            if (self::$cache instanceof LockingCacheInterface) {
-                $token = self::$cache->acquireLock($lockKey, 5);
-                $locked = ($token !== null);
+        // find all requestStores entries for this user
+        foreach (self::$requestStores as $cacheKey => $entry) {
+            if (!isset($entry['userId']) || (int)$entry['userId'] !== $userId) {
+                continue;
             }
-        } catch (\Throwable $e) {
-            if (self::$logger) self::$logger->warning('CSRF: lock acquire failed', ['exception' => $e, 'key' => $lockKey]);
+            if (empty($entry['dirty'])) {
+                continue;
+            }
+
+            $store = $entry['store'] ?? [];
+
+            // compute conservative TTL for this store: minimum token expiry (if any)
+            $minTtl = null;
+            foreach ($store as $m) {
+                if (isset($m['exp'])) {
+                    $secs = (int)$m['exp'] - $now;
+                    if ($secs <= 0) continue;
+                    if ($minTtl === null || $secs < $minTtl) $minTtl = $secs;
+                }
+            }
+            $cacheTtl = $minTtl !== null ? max(1, $minTtl) : (self::$ttl + 60);
+
             $locked = false;
-        }
+            $token = null;
+            $lockKey = 'csrf_lock_' . $cacheKey;
 
-        try {
             try {
-                self::$cache->set($cacheKey, $store, $cacheTtl);
-                self::$requestStores[$cacheKey]['dirty'] = false;
+                if (self::$cache instanceof LockingCacheInterface) {
+                    $token = self::$cache->acquireLock($lockKey, 5);
+                    $locked = ($token !== null);
+                }
             } catch (\Throwable $e) {
-                if (self::$logger) self::$logger->error('CSRF cache set failed', ['exception' => $e, 'key' => $cacheKey]);
+                if (self::$logger) self::$logger->warning('CSRF: lock acquire failed', ['exception' => $e, 'key' => $lockKey]);
+                $locked = false;
             }
-        } finally {
-            if ($locked && $token !== null) {
+
+            try {
                 try {
-                    if (self::$cache instanceof LockingCacheInterface) {
-                        self::$cache->releaseLock($lockKey, $token);
+                    // If store is empty, prefer deleting cache key (remove stale file).
+                    if (empty($store)) {
+                        try {
+                            self::$cache->delete($cacheKey);
+                        } catch (\Throwable $e) {
+                            if (self::$logger) self::$logger->warning('CSRF cache delete failed', ['exception' => $e, 'key' => $cacheKey]);
+                        }
+                    } else {
+                        // write store with computed TTL (best-effort)
+                        self::$cache->set($cacheKey, $store, $cacheTtl);
                     }
+                    // mark persisted
+                    self::$requestStores[$cacheKey]['dirty'] = false;
                 } catch (\Throwable $e) {
-                    if (self::$logger) self::$logger->warning('CSRF: lock release failed', ['exception' => $e, 'key' => $lockKey]);
+                    if (self::$logger) self::$logger->error('CSRF cache set/delete failed', ['exception' => $e, 'key' => $cacheKey]);
+                }
+            } finally {
+                if ($locked && $token !== null) {
+                    try {
+                        if (self::$cache instanceof LockingCacheInterface) {
+                            self::$cache->releaseLock($lockKey, $token);
+                        }
+                    } catch (\Throwable $e) {
+                        if (self::$logger) self::$logger->warning('CSRF: lock release failed', ['exception' => $e, 'key' => $lockKey]);
+                    }
                 }
             }
         }

@@ -485,12 +485,10 @@ final class SessionManager
         // set user_id in session
         $_SESSION['user_id'] = $userId;
 
-        // Ensure CSRF has the cache instance attached (defensive; app bootstrap still preferred)
+        // Only ensure CSRF knows about $_SESSION reference, but do not try to attach our cache instance
         try {
             if (method_exists(CSRF::class, 'init')) {
-                // Do not override existing session ref; init accepts $_SESSION by reference.
-                // Only attach cache so migrate writes to cache-backed store.
-                CSRF::init($_SESSION, null, null, self::$cache ?? null);
+                CSRF::init($_SESSION); // do not pass self::$cache to avoid overwriting
             }
         } catch (\Throwable $e) {
             if (class_exists(Logger::class, true)) {
