@@ -78,8 +78,15 @@ final class Database
         }
 
         try {
+			// Pokud je DSN MySQL, vypni bufferování (šetří RAM u velkých výsledků)
+			if (is_string($dsn) && str_starts_with($dsn, 'mysql:') && defined('PDO::MYSQL_ATTR_USE_BUFFERED_QUERY')) {
+			    $options[\PDO::MYSQL_ATTR_USE_BUFFERED_QUERY] = false;
+			}
             $pdo = new \PDO($dsn, $user, $pass, $options);
-
+			// Enforce i po inicializaci (pro případ, že options to nepřevzaly)
+			if ($pdo->getAttribute(\PDO::ATTR_DRIVER_NAME) === 'mysql' && defined('PDO::MYSQL_ATTR_USE_BUFFERED_QUERY')) {
+			    $pdo->setAttribute(\PDO::MYSQL_ATTR_USE_BUFFERED_QUERY, false);
+			}
             // Run optional initialization commands (best-effort)
             if (!empty($initCommands) && is_array($initCommands)) {
                 foreach ($initCommands as $cmd) {
@@ -289,11 +296,15 @@ final class Database
     }
 
     /** Execute raw SQL with params — convenient wrapper */
-    public function executeRaw(string $sql, array $params = []): int
-    {
-        $stmt = $this->prepareAndRun($sql, $params);
-        return $stmt->rowCount();
-    }
+	public function executeRaw(string $sql, array $params = []): int
+	{
+	    $stmt = $this->prepareAndRun($sql, $params);
+	    try {
+	        return $stmt->rowCount();
+	    } finally {
+	        $stmt->closeCursor();
+	    }
+	}
 
     /**
      * transaction wrapper with support for savepoints (nested transactions).
@@ -341,27 +352,46 @@ final class Database
         }
     }
 
-    public function fetch(string $sql, array $params = []): ?array
-    {
-        $stmt = $this->prepareAndRun($sql, $params);
-        $row = $stmt->fetch();
-        return $row === false ? null : $row;
-    }
+	public function fetch(string $sql, array $params = []): ?array
+	{
+	    $stmt = $this->prepareAndRun($sql, $params);
+	    try {
+	        $row = $stmt->fetch();
+	        return $row === false ? null : $row;
+	    } finally {
+	        // Důležité pro unbuffered MySQL – uvolní serverové zdroje
+	        $stmt->closeCursor();
+	    }
+	}
 
-    public function fetchAll(string $sql, array $params = []): array
-    {
-        $stmt = $this->prepareAndRun($sql, $params);
-        return $stmt->fetchAll();
-    }
+	public function fetchAll(string $sql, array $params = []): array
+	{
+	    $stmt = $this->prepareAndRun($sql, $params);
+	    try {
+	        $rows = [];
+	        while (true) {
+	            $row = $stmt->fetch(\PDO::FETCH_ASSOC);
+	            if ($row === false) break;
+	            $rows[] = $row;
+	        }
+	        return $rows;
+	    } finally {
+	        $stmt->closeCursor();
+	    }
+	}
 
     /**
      * Execute an INSERT/UPDATE/DELETE and return affected rows.
      */
-    public function execute(string $sql, array $params = []): int
-    {
-        $stmt = $this->prepareAndRun($sql, $params);
-        return $stmt->rowCount();
-    }
+	public function execute(string $sql, array $params = []): int
+	{
+	    $stmt = $this->prepareAndRun($sql, $params);
+	    try {
+	        return $stmt->rowCount();
+	    } finally {
+	        $stmt->closeCursor();
+	    }
+	}
 
     /* transactions */
     public function beginTransaction(): bool
@@ -464,26 +494,33 @@ final class Database
     /**
      * Vrátí první sloupec z prvního řádku (scalar), nebo $default když nic.
      */
-    public function fetchValue(string $sql, array $params = [], $default = null): mixed
-    {
-        $row = $this->fetch($sql, $params);
-        if ($row === null) return $default;
-        foreach ($row as $v) { return $v; }
-        return $default;
-    }
+	public function fetchValue(string $sql, array $params = [], $default = null): mixed
+	{
+	    $stmt = $this->prepareAndRun($sql, $params);
+	    try {
+	        $val = $stmt->fetchColumn(0);
+	        return ($val === false) ? $default : $val;
+	    } finally {
+	        $stmt->closeCursor();
+	    }
+	}
 
     /**
      * Vrátí pole hodnot z jedné kolony (první sloupec každého řádku).
      */
-    public function fetchColumn(string $sql, array $params = []): array
-    {
-        $stmt = $this->prepareAndRun($sql, $params);
-        $out = [];
-        while (($val = $stmt->fetchColumn(0)) !== false) {
-            $out[] = $val;
-        }
-        return $out;
-    }
+	public function fetchColumn(string $sql, array $params = []): array
+	{
+	    $stmt = $this->prepareAndRun($sql, $params);
+	    try {
+	        $out = [];
+	        while (($val = $stmt->fetchColumn(0)) !== false) {
+	            $out[] = $val;
+	        }
+	        return $out;
+	    } finally {
+	        $stmt->closeCursor();
+	    }
+	}
 
     /**
      * Vrátí asociativní pole párově key=>value podle první a druhé kolony.
@@ -505,12 +542,16 @@ final class Database
     /**
      * Zjistí, zda existuje nějaký záznam (bool).
      */
-    public function exists(string $sql, array $params = []): bool
-    {
-        $stmt = $this->prepareAndRun($sql, $params);
-        $row = $stmt->fetch();
-        return $row !== false && $row !== null;
-    }
+	public function exists(string $sql, array $params = []): bool
+	{
+	    $stmt = $this->prepareAndRun($sql, $params);
+	    try {
+	        $row = $stmt->fetch();
+	        return $row !== false && $row !== null;
+	    } finally {
+	        $stmt->closeCursor();
+	    }
+	}
 
     /**
      * Jednoduchý per-request cache pro časté read-only dotazy.
