@@ -44,16 +44,7 @@ final class Database
             throw new DatabaseException('Database already initialized');
         }
 
-        // pokud nebyl předán PSR logger, vytvoříme náš adaptér (safe, obalené try/catch)
-        if ($logger === null) {
-            try {
-                $logger = new LoggerPsrAdapter();
-            } catch (\Throwable $_) {
-                // pokud adaptér z nějakého důvodu nelze vytvořit, necháme $logger jako null
-                $logger = null;
-            }
-        }
-
+		$logger = $logger ?? null;
         $dsn = $config['dsn'] ?? null;
         $user = $config['user'] ?? null;
         $pass = $config['pass'] ?? null;
