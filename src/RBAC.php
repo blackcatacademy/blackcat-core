@@ -1,4 +1,3 @@
-// File: libs/RBAC.php
 <?php
 declare(strict_types=1);
 
