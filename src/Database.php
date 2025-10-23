@@ -174,6 +174,34 @@ final class Database
         $this->debug = $on;
     }
 
+	public function exec(string $sql): int
+	{
+		try {
+			return $this->getPdo()->exec($sql);
+		} catch (\PDOException $e) {
+			if ($this->logger !== null) {
+				try { $this->logger->error('Exec failed', ['exception' => $e, 'sql_preview' => $this->sanitizeSqlPreview($sql)]); } catch (\Throwable $_) {}
+			}
+			throw new DatabaseException('Exec failed', 0, $e);
+		}
+	}
+
+	/** Alias na první hodnotu prvního řádku – kompatibilita se šablonami */
+	public function fetchOne(string $sql, array $params = []): mixed
+	{
+		return $this->fetchValue($sql, $params, null);
+	}
+
+	/** Driver name helper (mysql|pgsql|sqlite|...) */
+	public function driver(): ?string
+	{
+		try { return (string)$this->getPdo()->getAttribute(\PDO::ATTR_DRIVER_NAME); }
+		catch (\Throwable $_) { return null; }
+	}
+
+	public function isMysql(): bool { return $this->driver() === 'mysql'; }
+	public function isPg(): bool    { return $this->driver() === 'pgsql'; }
+
     /**
      * Prepare and execute statement with smart binding.
      */
