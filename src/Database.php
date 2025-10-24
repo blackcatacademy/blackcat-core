@@ -402,13 +402,60 @@ final class Database
         return $this->transaction($fn);
     }
 
-    public function paginateKeyset(string $sqlBase, array $params, string $pkCol, ?string $afterPk, int $limit=50): array {
-        $cond = $afterPk !== null ? " AND $pkCol < :__after" : "";
-        $p = $params; if ($afterPk !== null) $p['__after'] = $afterPk;
-        $items = $this->fetchAll("$sqlBase WHERE 1=1 $cond ORDER BY $pkCol DESC LIMIT :__limit",
-                                $p + ['__limit'=>$limit]);
-        $next = $items ? end($items)[$pkCol] : null;
-        return ['items'=>$items,'nextAfter'=>$next,'limit'=>$limit];
+    /**
+     * Keyset pagination (seek) přes primární klíč/unikátní sloupec.
+     *
+     * @param string            $sqlBase   SELECT ... FROM ... [JOIN ...] [WHERE ...]  (bez ORDER/LIMIT)
+     * @param array             $params    pojmenované nebo poziční parametry pro $sqlBase
+     * @param string            $pkCol     název sloupce/aliasu v resultsetu (např. "t.id")
+     * @param string|int|null   $afterPk   poslední hodnota z předchozí stránky (cursor), nebo null pro první stránku
+     * @param int               $limit     velikost stránky (>=1)
+     * @param 'ASC'|'DESC'      $direction směr stránkování (default 'DESC')
+     * @param bool              $inclusive zda použít >=/<= (true) nebo >/< (false)
+     */
+    public function paginateKeyset(
+        string $sqlBase,
+        array $params,
+        string $pkCol,
+        string|int|null $afterPk,
+        int $limit = 50,
+        string $direction = 'DESC',
+        bool $inclusive = false
+    ): array {
+        $limit = max(1, (int)$limit);
+        $dir   = strtoupper($direction) === 'ASC' ? 'ASC' : 'DESC';
+        $cmp   = $inclusive
+            ? ($dir === 'ASC' ? '>=' : '<=')
+            : ($dir === 'ASC' ? '>'  : '<');
+
+        // Bezpečné quote identifikátoru (podporuje i "t.id")
+        $idExpr = $this->quoteIdent($pkCol);
+
+        // Správně vložit WHERE/AND podle toho, zda $sqlBase už obsahuje WHERE
+        $hasWhere = (bool)preg_match('/\bwhere\b/i', $sqlBase);
+        $condSql  = '';
+        $p        = $params;
+
+        if ($afterPk !== null) {
+            $condSql = ($hasWhere ? ' AND ' : ' WHERE ') . "$idExpr $cmp :__after";
+            $p['__after'] = $afterPk;
+        } elseif (!$hasWhere) {
+            // sjednoťme pattern kvůli pozdějšímu rozšiřování
+            $condSql = ' WHERE 1=1';
+        }
+
+        $sql = $sqlBase . $condSql . " ORDER BY $idExpr $dir LIMIT :__limit";
+        $p['__limit'] = $limit;
+
+        $items = $this->fetchAll($sql, $p);
+        $next  = $items ? end($items)[$pkCol] ?? null : null;
+
+        return [
+            'items'     => $items,
+            'nextAfter' => $next,
+            'limit'     => $limit,
+            'direction' => $dir,
+        ];
     }
 
     public function executeWithRetry(string $sql, array $params = [], int $attempts = 3, int $baseDelayMs = 50): int {
