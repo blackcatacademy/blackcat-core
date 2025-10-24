@@ -4,7 +4,6 @@ declare(strict_types=1);
 namespace BlackCat\Core;
 
 use Psr\Log\LoggerInterface;
-use BlackCat\Core\Adapter\LoggerPsrAdapter;
 
 class DatabaseException extends \RuntimeException {}
 
@@ -14,6 +13,7 @@ final class Database
     private ?\PDO $pdo = null;
     private array $config = [];
     private ?LoggerInterface $logger = null;
+    private string $dsnId = 'unknown';
 
     /**
      * Soukromý konstruktor — singleton
@@ -23,6 +23,17 @@ final class Database
         $this->config = $config;
         $this->pdo = $pdo;
         $this->logger = $logger;
+    }
+
+    private static function dsnFingerprint(string $dsn): string {
+        // mysql:host=127.0.0.1;port=3306;dbname=test;charset=utf8mb4
+        // pgsql:host=127.0.0.1;port=5432;dbname=test
+        $m = [];
+        if (preg_match('~^(mysql|pgsql):.*?host=([^;]+)(?:;port=([0-9]+))?.*?(?:;dbname=([^;]+))?~i', $dsn, $m)) {
+            $drv = strtolower($m[1]); $host = $m[2] ?? 'localhost'; $port = $m[3] ?? ($drv==='mysql'?'3306':'5432'); $db = $m[4] ?? '';
+            return "{$drv}://{$host}:{$port}/{$db}";
+        }
+        return substr(hash('sha256', $dsn), 0, 16);
     }
 
     /**
@@ -44,7 +55,6 @@ final class Database
             throw new DatabaseException('Database already initialized');
         }
 
-		$logger = $logger ?? null;
         $dsn = $config['dsn'] ?? null;
         $user = $config['user'] ?? null;
         $pass = $config['pass'] ?? null;
@@ -116,6 +126,7 @@ final class Database
         }
 
         self::$instance = new self($config, $pdo, $logger);
+        self::$instance->dsnId = is_string($dsn) ? self::dsnFingerprint($dsn) : 'unknown';
     }
 
     /**
@@ -161,6 +172,11 @@ final class Database
         return self::$instance !== null;
     }
 
+    public function close(): void
+    {
+        $this->pdo = null; // necháš GC uzavřít spojení
+    }
+
     /* ----------------- Helper metody ----------------- */
 
     /** @var bool */
@@ -184,11 +200,232 @@ final class Database
 		}
 	}
 
+    public function id(): string { return $this->dsnId; }
+
+    public function serverVersion(): ?string {
+        try { return (string)$this->getPdo()->getAttribute(\PDO::ATTR_SERVER_VERSION); }
+        catch (\Throwable $_) { return null; }
+    }
+
+    public function quote(string $value): string {
+        $q = $this->getPdo()->quote($value);
+        return $q === false ? "'" . str_replace("'", "''", $value) . "'" : $q;
+    }
+
+    public function withStatement(string $sql, callable $cb): mixed {
+        $stmt = $this->query($sql);
+        try { return $cb($stmt); }
+        finally { $stmt->closeCursor(); }
+    }
+
 	/** Alias na první hodnotu prvního řádku – kompatibilita se šablonami */
 	public function fetchOne(string $sql, array $params = []): mixed
 	{
 		return $this->fetchValue($sql, $params, null);
 	}
+
+    public function iterateColumn(string $sql, array $params = []): \Generator {
+        $stmt = $this->prepareAndRun($sql, $params);
+        try {
+            while (($val = $stmt->fetchColumn(0)) !== false) {
+                yield $val;
+            }
+        } finally {
+            $stmt->closeCursor();
+        }
+    }
+
+    private function isTransient(\PDOException $e): bool {
+        $sqlstate = $e->errorInfo[0] ?? (string)$e->getCode();
+        $code     = (int)($e->errorInfo[1] ?? 0);
+        // PG: deadlock/serialization
+        if (in_array($sqlstate, ['40P01','40001'], true)) return true;
+        // MySQL: deadlock (1213), lock timeout (1205)
+        if ($code === 1213 || $code === 1205 || $sqlstate === '40001') return true;
+        return false;
+    }
+
+    public function withAdvisoryLock(string $name, int $timeoutSec, callable $fn): mixed {
+        if ($this->isMysql()) {
+            $ok = (bool)$this->fetchValue('SELECT GET_LOCK(:n, :t)', [':n'=>$name, ':t'=>$timeoutSec], 0);
+            if (!$ok) throw new DatabaseException("GET_LOCK timeout: $name");
+            try { return $fn($this); }
+            finally { $this->execute('SELECT RELEASE_LOCK(:n)', [':n'=>$name]); }
+        }
+        if ($this->isPg()) {
+            // bigint forma; hash se řeší na serveru (méně kolizí, čisté odemykání)
+            $ok = (bool)$this->fetchValue('SELECT pg_try_advisory_lock(hashtextextended(:n, 0))', [':n'=>$name], 0);
+            if (!$ok) throw new DatabaseException("pg_try_advisory_lock busy: $name");
+            try { return $fn($this); }
+            finally { $this->execute('SELECT pg_advisory_unlock(hashtextextended(:n, 0))', [':n'=>$name]); }
+        }
+        return $fn($this);
+    }
+
+    public function withStatementTimeout(int $ms, callable $fn): mixed {
+        if ($this->isPg()) {
+            return $this->transaction(function() use($ms,$fn){
+                $this->exec('SET LOCAL statement_timeout = '.(int)$ms);
+                return $fn($this);
+            });
+        }
+        if ($this->isMysql()) {
+            $ms = max(0,$ms);
+            $old = (int)$this->fetchValue('SELECT @@SESSION.max_execution_time', [], 0);
+            try {
+                $this->exec('SET SESSION max_execution_time = '.(int)$ms);
+                return $fn($this);
+            } finally {
+                $this->exec('SET SESSION max_execution_time = '.$old);
+            }
+        }
+        return $fn($this);
+    }
+
+    public function withIsolationLevel(string $level, callable $fn): mixed
+    {
+        $map = [
+            'read uncommitted' => 'READ UNCOMMITTED',
+            'read committed'   => 'READ COMMITTED',
+            'repeatable read'  => 'REPEATABLE READ',
+            'serializable'     => 'SERIALIZABLE',
+        ];
+        $lvl = strtoupper($level);
+        $lvl = $map[strtolower($level)] ?? $lvl;
+        if (!in_array($lvl, $map, true) && !in_array($lvl, array_values($map), true)) {
+            throw new DatabaseException("Unsupported isolation level: {$level}");
+        }
+
+        if ($this->isPg()) {
+            return $this->transaction(function () use ($fn, $lvl) {
+                $this->exec("SET LOCAL TRANSACTION ISOLATION LEVEL {$lvl}");
+                return $fn($this);
+            });
+        }
+
+        if ($this->isMysql()) {
+            // musí se nastavit pro NÁSLEDUJÍCÍ transakci → sami ji otevřeme
+            $pdo = $this->getPdo();
+            if ($pdo->inTransaction()) {
+                // v probíhající transakci MySQL level nezmění → fallback
+                return $fn($this);
+            }
+            $this->exec("SET TRANSACTION ISOLATION LEVEL {$lvl}");
+            $this->exec('START TRANSACTION');
+            try {
+                $res = $fn($this);
+                $this->commit();
+                return $res;
+            } catch (\Throwable $e) {
+                try { $this->rollback(); } catch (\Throwable $_) {}
+                throw $e;
+            }
+        }
+
+        return $this->transaction($fn);
+    }
+
+    public function explainPlan(string $sql, array $params = [], bool $analyze = false): array
+    {
+        if ($this->isMysql()) {
+            // v MySQL nedáváme ANALYZE by default (spouští se dotaz)
+            return $this->fetchAll('EXPLAIN ' . $sql, $params);
+        }
+
+        if ($this->isPg()) {
+            if ($analyze) {
+                // JSON je praktické pro nástroje
+                $rows = $this->fetchAll('EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ' . $sql, $params);
+                return $rows;
+            }
+            return $this->fetchAll('EXPLAIN ' . $sql, $params);
+        }
+
+        return $this->fetchAll('EXPLAIN ' . $sql, $params);
+    }
+
+    public function quoteIdent(string $name): string {
+        $parts = explode('.', $name);
+        if ($this->isMysql()) return implode('.', array_map(fn($p)=>'`'.str_replace('`','``',$p).'`', $parts));
+        return implode('.', array_map(fn($p)=>'"'.str_replace('"','""',$p).'"', $parts));
+    }
+
+    public function inClause(string $col, array $values, string $prefix='p', int $chunk=0): array {
+        if (!$values) return ['1=0', []];
+        if ($chunk > 0 && count($values) > $chunk) {
+            // složí OR s více IN bloky (IN (...) OR IN (...))
+            $parts = []; $params = []; $i=0; $g=0;
+            foreach (array_chunk($values, $chunk) as $grp) {
+                $ph = [];
+                foreach ($grp as $v) {
+                    $k = ":{$prefix}_{$g}_".$i++;
+                    $ph[] = $k; $params[$k] = $v;
+                }
+                $parts[] = "$col IN (".implode(',', $ph).")";
+                $i = 0; $g++;
+            }
+            return ['('.implode(' OR ', $parts).')', $params];
+        }
+        $i=0; $ph=[]; $params=[];
+        foreach ($values as $v) { $k=":{$prefix}_".$i++; $ph[]=$k; $params[$k]=$v; }
+        return ["$col IN (".implode(',', $ph).")", $params];
+    }
+
+    public function transactionReadOnly(callable $fn): mixed
+    {
+        $pdo = $this->getPdo();
+
+        if ($this->isPg()) {
+            return $this->transaction(function() use($fn) {
+                $this->exec('SET TRANSACTION READ ONLY');
+                return $fn($this);
+            });
+        }
+
+        if ($this->isMysql()) {
+            if ($pdo->inTransaction()) {
+                // MySQL neumí změnit aktuální transakci na RO → fallback: prostě to spusť
+                return $fn($this);
+            }
+            // explicitně zahájíme READ ONLY transakci
+            $this->exec('START TRANSACTION READ ONLY');
+            try {
+                $res = $fn($this);
+                $this->commit();
+                return $res;
+            } catch (\Throwable $e) {
+                try { $this->rollback(); } catch (\Throwable $_) {}
+                throw $e;
+            }
+        }
+
+        return $this->transaction($fn);
+    }
+
+    public function paginateKeyset(string $sqlBase, array $params, string $pkCol, ?string $afterPk, int $limit=50): array {
+        $cond = $afterPk !== null ? " AND $pkCol < :__after" : "";
+        $p = $params; if ($afterPk !== null) $p['__after'] = $afterPk;
+        $items = $this->fetchAll("$sqlBase WHERE 1=1 $cond ORDER BY $pkCol DESC LIMIT :__limit",
+                                $p + ['__limit'=>$limit]);
+        $next = $items ? end($items)[$pkCol] : null;
+        return ['items'=>$items,'nextAfter'=>$next,'limit'=>$limit];
+    }
+
+    public function executeWithRetry(string $sql, array $params = [], int $attempts = 3, int $baseDelayMs = 50): int {
+        $try = 0; $delay = $baseDelayMs;
+        while (true) {
+            try { return $this->execute($sql, $params); }
+            catch (\PDOException $e) {
+                if (++$try >= $attempts || !$this->isTransient($e)) throw $e;
+                usleep($delay * 1000); $delay = (int)min($delay * 2, 1000);
+            }
+        }
+    }
+
+    public function executeOne(string $sql, array $params = []): void {
+        $n = $this->execute($sql, $params);
+        if ($n !== 1) throw new DatabaseException("Expected to affect 1 row, affected={$n}");
+    }
 
 	/** Driver name helper (mysql|pgsql|sqlite|...) */
 	public function driver(): ?string
@@ -200,12 +437,49 @@ final class Database
 	public function isMysql(): bool { return $this->driver() === 'mysql'; }
 	public function isPg(): bool    { return $this->driver() === 'pgsql'; }
 
-    /**
-     * Prepare and execute statement with smart binding.
-     */
+    private function isServerGone(\PDOException $e): bool
+    {
+        $m = strtolower($e->getMessage() ?? '');
+        return str_contains($m, 'server has gone away')
+            || str_contains($m, 'lost connection')
+            || str_contains($m, 'connection refused')
+            || str_contains($m, 'closed the connection unexpectedly');
+    }
+
+    /** Rebuildne PDO v rámci instance – BEZ změny singletonu */
+    private function reconnect(): void
+    {
+        $cfg = $this->config;
+        $dsn = $cfg['dsn'] ?? null;
+        $user = $cfg['user'] ?? null;
+        $pass = $cfg['pass'] ?? null;
+        $givenOptions = $cfg['options'] ?? [];
+
+        $enforced = [
+            \PDO::ATTR_ERRMODE            => \PDO::ERRMODE_EXCEPTION,
+            \PDO::ATTR_EMULATE_PREPARES   => false,
+            \PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC,
+            \PDO::ATTR_STRINGIFY_FETCHES  => false,
+        ];
+        $opt = $givenOptions + $enforced;
+
+        if (is_string($dsn) && str_starts_with($dsn, 'mysql:') && defined('PDO::MYSQL_ATTR_USE_BUFFERED_QUERY')) {
+            $opt[\PDO::MYSQL_ATTR_USE_BUFFERED_QUERY] = false;
+        }
+
+        $pdo = new \PDO((string)$dsn, $user, $pass, $opt);
+        if ($pdo->getAttribute(\PDO::ATTR_DRIVER_NAME) === 'mysql' && defined('PDO::MYSQL_ATTR_USE_BUFFERED_QUERY')) {
+            $pdo->setAttribute(\PDO::MYSQL_ATTR_USE_BUFFERED_QUERY, false);
+        }
+        $this->pdo = $pdo; // ← aktualizace aktuální instance
+    }
+
     public function prepareAndRun(string $sql, array $params = []): \PDOStatement
     {
         $start = microtime(true);
+        $attempt = 0;
+
+        RETRY:
         try {
             $pdo = $this->getPdo();
             $stmt = $pdo->prepare($sql);
@@ -213,27 +487,30 @@ final class Database
                 throw new DatabaseException('Failed to prepare statement.');
             }
 
+            // numericky indexované vs. pojmenované
             $isSequential = array_values($params) === $params;
 
             if ($isSequential) {
+                // Pozn.: u sekvenčních neřešíme typy, PDO si poradí
                 $stmt->execute($params);
             } else {
                 foreach ($params as $key => $value) {
-                    $paramName = (strpos((string)$key, ':') === 0) ? $key : ':' . $key;
+                    $paramName = (strpos((string)$key, ':') === 0) ? (string)$key : ':' . (string)$key;
 
-                    if ($value === null) {
+                    // typy
+                    if (is_resource($value)) {
+                        $stmt->bindValue($paramName, $value, \PDO::PARAM_LOB);
+                    } elseif ($value === null) {
                         $stmt->bindValue($paramName, null, \PDO::PARAM_NULL);
                     } elseif (is_int($value)) {
                         $stmt->bindValue($paramName, $value, \PDO::PARAM_INT);
                     } elseif (is_bool($value)) {
                         $stmt->bindValue($paramName, $value, \PDO::PARAM_BOOL);
                     } elseif (is_string($value)) {
-                        // pokud string obsahuje NUL, považujeme ho za LOB (binární)
-                        if (strpos($value, "\0") !== false) {
-                            $stmt->bindValue($paramName, $value, \PDO::PARAM_LOB);
-                        } else {
-                            $stmt->bindValue($paramName, $value, \PDO::PARAM_STR);
-                        }
+                        // NUL byte → binární
+                        $stmt->bindValue($paramName, $value, str_contains($value, "\0") ? \PDO::PARAM_LOB : \PDO::PARAM_STR);
+                    } elseif ($value instanceof \Stringable) {
+                        $stmt->bindValue($paramName, (string)$value, \PDO::PARAM_STR);
                     } else {
                         $stmt->bindValue($paramName, (string)$value, \PDO::PARAM_STR);
                     }
@@ -243,7 +520,7 @@ final class Database
 
             $durationMs = (microtime(true) - $start) * 1000.0;
 
-            // debug / slow query logging via injected PSR logger (pokud existuje)
+            // logování
             try {
                 if ($this->debug && $this->logger !== null) {
                     $this->logger->info('Database query executed', [
@@ -256,15 +533,23 @@ final class Database
                         'duration_ms' => round($durationMs, 2),
                     ]);
                 }
-            } catch (\Throwable $_) {
-                // never bubble logger errors
-            }
+            } catch (\Throwable $_) {}
 
             return $stmt;
+
         } catch (\PDOException $e) {
+            // 1× reconnect & retry, ale jen mimo aktivní transakci
+            if (!$this->getPdo()->inTransaction() && $this->isServerGone($e) && $attempt === 0) {
+                $attempt = 1;
+                try { $this->reconnect(); } catch (\Throwable $_) {}
+                goto RETRY;
+            }
             if ($this->logger !== null) {
                 try {
-                    $this->logger->error('Database query failed', ['exception' => $e, 'sql_preview' => $this->sanitizeSqlPreview($sql)]);
+                    $this->logger->error('Database query failed', [
+                        'exception' => $e,
+                        'sql_preview' => $this->sanitizeSqlPreview($sql)
+                    ]);
                 } catch (\Throwable $_) {}
             }
             throw new DatabaseException('Database query failed', 0, $e);
@@ -370,6 +655,17 @@ final class Database
 	        $stmt->closeCursor();
 	    }
 	}
+
+    public function iterate(string $sql, array $params = []): \Generator {
+        $stmt = $this->prepareAndRun($sql, $params);
+        try {
+            while (($row = $stmt->fetch(\PDO::FETCH_ASSOC)) !== false) {
+                yield $row;
+            }
+        } finally {
+            $stmt->closeCursor();
+        }
+    }
 
     /**
      * Execute an INSERT/UPDATE/DELETE and return affected rows.
@@ -547,22 +843,17 @@ final class Database
     /**
      * Jednoduchý per-request cache pro časté read-only dotazy.
      */
-    public function cachedFetchAll(string $sql, array $params = [], int $ttl = 2): array
-    {
-        static $cache = [];
-        $key = md5($sql . '|' . serialize($params));
-        $now = time();
-        if (isset($cache[$key]) && ($cache[$key]['expires'] === 0 || $cache[$key]['expires'] > $now)) {
-            return $cache[$key]['data'];
+    public function withEmulation(bool $on, callable $fn): mixed {
+        $pdo = $this->getPdo();
+        $orig = $pdo->getAttribute(\PDO::ATTR_EMULATE_PREPARES);
+        try {
+            $pdo->setAttribute(\PDO::ATTR_EMULATE_PREPARES, $on);
+            return $fn($this);
+        } finally {
+            $pdo->setAttribute(\PDO::ATTR_EMULATE_PREPARES, $orig);
         }
-        $data = $this->fetchAll($sql, $params);
-        $cache[$key] = [
-            'expires' => $ttl > 0 ? $now + $ttl : 0,
-            'data' => $data,
-        ];
-        return $data;
     }
-
+    
     /**
      * Paginate helper ...
      */
