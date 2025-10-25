@@ -235,6 +235,14 @@ final class Database
         }
     }
 
+    private function hasNamedPlaceholders(string $sql): bool {
+        return (bool)preg_match('/:[A-Za-z_][A-Za-z0-9_]*/', $sql);
+    }
+
+    private function hasPositionalPlaceholders(string $sql): bool {
+        return strpos($sql, '?') !== false;
+    }
+
     private function isTransient(\PDOException $e): bool {
         $sqlstate = $e->errorInfo[0] ?? (string)$e->getCode();
         $code     = (int)($e->errorInfo[1] ?? 0);
@@ -526,25 +534,24 @@ final class Database
         $start = microtime(true);
         $attempt = 0;
 
-        RETRY:
         try {
-            $pdo = $this->getPdo();
+            $pdo  = $this->getPdo();
             $stmt = $pdo->prepare($sql);
             if ($stmt === false) {
                 throw new DatabaseException('Failed to prepare statement.');
             }
 
-            // numericky indexované vs. pojmenované
-            $isSequential = array_values($params) === $params;
+            $usePositional = $this->hasPositionalPlaceholders($sql) && !$this->hasNamedPlaceholders($sql);
 
-            if ($isSequential) {
-                // Pozn.: u sekvenčních neřešíme typy, PDO si poradí
-                $stmt->execute($params);
+            if ($usePositional) {
+                // SQL používá "?" → předej čistě sekvenční pole
+                // (nehádáme se s tvarem vstupu – prostě vezmeme values v pořadí)
+                $stmt->execute(array_values($params));
             } else {
+                // SQL používá ":name" → pojmenované bindy (s jednotným prefixem ":")
                 foreach ($params as $key => $value) {
-                    $paramName = (strpos((string)$key, ':') === 0) ? (string)$key : ':' . (string)$key;
+                    $paramName = (is_string($key) && $key !== '' && $key[0] === ':') ? $key : ':' . (string)$key;
 
-                    // typy
                     if (is_resource($value)) {
                         $stmt->bindValue($paramName, $value, \PDO::PARAM_LOB);
                     } elseif ($value === null) {
@@ -554,7 +561,6 @@ final class Database
                     } elseif (is_bool($value)) {
                         $stmt->bindValue($paramName, $value, \PDO::PARAM_BOOL);
                     } elseif (is_string($value)) {
-                        // NUL byte → binární
                         $stmt->bindValue($paramName, $value, str_contains($value, "\0") ? \PDO::PARAM_LOB : \PDO::PARAM_STR);
                     } elseif ($value instanceof \Stringable) {
                         $stmt->bindValue($paramName, (string)$value, \PDO::PARAM_STR);
