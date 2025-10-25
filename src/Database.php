@@ -675,6 +675,12 @@ final class Database
         }
     }
 
+    public function inTransaction(): bool
+    {
+        try { return $this->getPdo()->inTransaction(); }
+        catch (\Throwable $_) { return false; }
+    }
+    
 	public function fetch(string $sql, array $params = []): ?array
 	{
 	    $stmt = $this->prepareAndRun($sql, $params);
