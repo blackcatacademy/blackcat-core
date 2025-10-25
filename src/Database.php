@@ -541,34 +541,19 @@ final class Database
                 throw new DatabaseException('Failed to prepare statement.');
             }
 
-            $usePositional = $this->hasPositionalPlaceholders($sql) && !$this->hasNamedPlaceholders($sql);
+            $isSequential = array_values($params) === $params;
 
-            if ($usePositional) {
-                // SQL používá "?" → předej čistě sekvenční pole
-                // (nehádáme se s tvarem vstupu – prostě vezmeme values v pořadí)
-                $stmt->execute(array_values($params));
+            if ($isSequential) {
+                // poziční placeholdery
+                $stmt->execute($params);
             } else {
-                // SQL používá ":name" → pojmenované bindy (s jednotným prefixem ":")
-                foreach ($params as $key => $value) {
-                    $paramName = (is_string($key) && $key !== '' && $key[0] === ':') ? $key : ':' . (string)$key;
-
-                    if (is_resource($value)) {
-                        $stmt->bindValue($paramName, $value, \PDO::PARAM_LOB);
-                    } elseif ($value === null) {
-                        $stmt->bindValue($paramName, null, \PDO::PARAM_NULL);
-                    } elseif (is_int($value)) {
-                        $stmt->bindValue($paramName, $value, \PDO::PARAM_INT);
-                    } elseif (is_bool($value)) {
-                        $stmt->bindValue($paramName, $value, \PDO::PARAM_BOOL);
-                    } elseif (is_string($value)) {
-                        $stmt->bindValue($paramName, $value, str_contains($value, "\0") ? \PDO::PARAM_LOB : \PDO::PARAM_STR);
-                    } elseif ($value instanceof \Stringable) {
-                        $stmt->bindValue($paramName, (string)$value, \PDO::PARAM_STR);
-                    } else {
-                        $stmt->bindValue($paramName, (string)$value, \PDO::PARAM_STR);
-                    }
+                // named placeholdery – znormalizuj klíče na ":" + name a pošli rovnou do execute()
+                $norm = [];
+                foreach ($params as $k => $v) {
+                    $kk = is_string($k) && $k !== '' && $k[0] !== ':' ? ':'.$k : (string)$k;
+                    $norm[$kk] = $v;
                 }
-                $stmt->execute();
+                $stmt->execute($norm);
             }
 
             $durationMs = (microtime(true) - $start) * 1000.0;
