@@ -72,4 +72,16 @@ final class QueryCache
 
     /** Invalidace “namespaced” klíčů bez ne-standardních metod: otočíme namespace. */
     public function newNamespace(string $ns): void { $this->namespace = $ns; }
+
+    public function cache(): CacheInterface
+    {
+        return $this->cache;
+    }
+
+    public function locks(): ?LockingCacheInterface
+    {
+        return $this->locks;
+    }
+
+    public function delete(string $key): void { $this->cache->delete($key); }
 }
