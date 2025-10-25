@@ -533,7 +533,7 @@ final class Database
     {
         $start = microtime(true);
         $attempt = 0;
-
+        RETRY:
         try {
             $pdo  = $this->getPdo();
             $stmt = $pdo->prepare($sql);
