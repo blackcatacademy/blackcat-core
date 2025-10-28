@@ -188,17 +188,32 @@ final class Database
         $this->debug = $on;
     }
 
-	public function exec(string $sql): int
-	{
-		try {
-			return $this->getPdo()->exec($sql);
-		} catch (\PDOException $e) {
-			if ($this->logger !== null) {
-				try { $this->logger->error('Exec failed', ['exception' => $e, 'sql_preview' => $this->sanitizeSqlPreview($sql)]); } catch (\Throwable $_) {}
-			}
-			throw new DatabaseException('Exec failed', 0, $e);
-		}
-	}
+    /** 
+     * Exec s volitelnými parametry.
+     * Bez parametrů pošle SQL přímo do PDO::exec(), s parametry použije prepared statement.
+     */
+    public function exec(string $sql, array $params = []): int
+    {
+        // Rychlá cesta bez parametrů – přenecháme PDO::exec
+        if (empty($params)) {
+            try {
+                return $this->getPdo()->exec($sql);
+            } catch (\PDOException $e) {
+                if ($this->logger !== null) {
+                    try { $this->logger->error('Exec failed', ['exception' => $e, 'sql_preview' => $this->sanitizeSqlPreview($sql)]); } catch (\Throwable $_) {}
+                }
+                throw new DatabaseException('Exec failed', 0, $e);
+            }
+        }
+
+        // S parametry – přes prepareAndRun (funguje pro ? i :named)
+        $stmt = $this->prepareAndRun($sql, $params);
+        try {
+            return $stmt->rowCount();
+        } finally {
+            $stmt->closeCursor();
+        }
+    }
 
     public function id(): string { return $this->dsnId; }
 
