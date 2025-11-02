@@ -258,6 +258,11 @@ final class Database
         return strpos($sql, '?') !== false;
     }
 
+    private function usesPositionalOnly(string $sql): bool {
+        // TRUE, pokud dotaz používá výhradně poziční placeholdery (?) a žádné pojmenované
+        return $this->hasPositionalPlaceholders($sql) && !$this->hasNamedPlaceholders($sql);
+    }
+
     private function isTransient(\PDOException $e): bool {
         $sqlstate = $e->errorInfo[0] ?? (string)$e->getCode();
         $code     = (int)($e->errorInfo[1] ?? 0);
@@ -428,18 +433,20 @@ final class Database
     /**
      * Keyset pagination (seek) přes primární klíč/unikátní sloupec.
      *
-     * @param string            $sqlBase   SELECT ... FROM ... [JOIN ...] [WHERE ...]  (bez ORDER/LIMIT)
-     * @param array             $params    pojmenované nebo poziční parametry pro $sqlBase
-     * @param string            $pkCol     název sloupce/aliasu v resultsetu (např. "t.id")
-     * @param string|int|null   $afterPk   poslední hodnota z předchozí stránky (cursor), nebo null pro první stránku
-     * @param int               $limit     velikost stránky (>=1)
-     * @param 'ASC'|'DESC'      $direction směr stránkování (default 'DESC')
-     * @param bool              $inclusive zda použít >=/<= (true) nebo >/< (false)
+     * @param string            $sqlBase      SELECT ... FROM ... [JOIN ...] [WHERE ...]  (bez ORDER/LIMIT)
+     * @param array             $params       pojmenované nebo poziční parametry pro $sqlBase
+     * @param string            $pkIdent      identifikátor do ORDER BY (např. "t.id" nebo "id")
+     * @param string            $pkResultKey  klíč ve výsledném řádku, ze kterého se čte kurzor (např. "id")
+     * @param string|int|null   $afterPk      poslední hodnota z předchozí stránky (cursor), nebo null pro první stránku
+     * @param int               $limit        velikost stránky (>=1)
+     * @param 'ASC'|'DESC'      $direction    směr stránkování (default 'DESC')
+     * @param bool              $inclusive    zda použít >=/<= (true) nebo >/< (false)
      */
     public function paginateKeyset(
         string $sqlBase,
         array $params,
-        string $pkCol,
+        string $pkIdent,              // např. "t.id" – jde do ORDER BY
+        string $pkResultKey,          // např. "id"   – klíč v PDO řádku
         string|int|null $afterPk,
         int $limit = 50,
         string $direction = 'DESC',
@@ -447,31 +454,47 @@ final class Database
     ): array {
         $limit = max(1, (int)$limit);
         $dir   = strtoupper($direction) === 'ASC' ? 'ASC' : 'DESC';
-        $cmp   = $inclusive
-            ? ($dir === 'ASC' ? '>=' : '<=')
-            : ($dir === 'ASC' ? '>'  : '<');
+        $cmp   = $inclusive ? ($dir === 'ASC' ? '>=' : '<=') : ($dir === 'ASC' ? '>' : '<');
 
-        // Bezpečné quote identifikátoru (podporuje i "t.id")
-        $idExpr = $this->quoteIdent($pkCol);
+        // Guard: dovol jen čistý identifikátor (id nebo t.id), žádné výrazy
+        if (!preg_match('~^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)?$~', $pkIdent)) {
+            throw new DatabaseException('pkIdent must be a plain identifier (e.g., "t.id")');
+        }
 
-        // Správně vložit WHERE/AND podle toho, zda $sqlBase už obsahuje WHERE
-        $hasWhere = (bool)preg_match('/\bwhere\b/i', $sqlBase);
-        $condSql  = '';
-        $p        = $params;
+        $idExpr     = $this->quoteIdent($pkIdent);
+        $hasWhere   = (bool)preg_match('/\bwhere\b/i', $sqlBase);
+        $usePos     = $this->usesPositionalOnly($sqlBase);
 
+        $condSql = '';
         if ($afterPk !== null) {
-            $condSql = ($hasWhere ? ' AND ' : ' WHERE ') . "$idExpr $cmp :__after";
-            $p['__after'] = $afterPk;
+            if ($usePos) {
+                $condSql = ($hasWhere ? ' AND ' : ' WHERE ') . "$idExpr $cmp ?";
+            } else {
+                $condSql = ($hasWhere ? ' AND ' : ' WHERE ') . "$idExpr $cmp :__after";
+            }
         } elseif (!$hasWhere) {
-            // sjednoťme pattern kvůli pozdějšímu rozšiřování
             $condSql = ' WHERE 1=1';
         }
 
-        $sql = $sqlBase . $condSql . " ORDER BY $idExpr $dir LIMIT :__limit";
-        $p['__limit'] = $limit;
+        if ($usePos) {
+            $sql = $sqlBase . $condSql . " ORDER BY $idExpr $dir LIMIT ?";
+            $p = array_values($params);
+            if ($afterPk !== null) { $p[] = $afterPk; }
+            $p[] = $limit;
+        } else {
+            $sql = $sqlBase . $condSql . " ORDER BY $idExpr $dir LIMIT :__limit";
+            $p = $params;
+            if ($afterPk !== null) { $p['__after'] = $afterPk; }
+            $p['__limit'] = $limit;
+        }
 
         $items = $this->fetchAll($sql, $p);
-        $next  = $items ? end($items)[$pkCol] ?? null : null;
+
+        $next = null;
+        if ($items) {
+            $last = end($items);
+            $next = $last[$pkResultKey] ?? null;
+        }
 
         return [
             'items'     => $items,
@@ -484,10 +507,16 @@ final class Database
     public function executeWithRetry(string $sql, array $params = [], int $attempts = 3, int $baseDelayMs = 50): int {
         $try = 0; $delay = $baseDelayMs;
         while (true) {
-            try { return $this->execute($sql, $params); }
-            catch (\PDOException $e) {
-                if (++$try >= $attempts || !$this->isTransient($e)) throw $e;
-                usleep($delay * 1000); $delay = (int)min($delay * 2, 1000);
+            try {
+                return $this->execute($sql, $params);
+            } catch (DatabaseException $e) {
+                $prev = $e->getPrevious();
+                $isTransient = $prev instanceof \PDOException && $this->isTransient($prev);
+                if (++$try >= $attempts || !$isTransient) {
+                    throw $e;
+                }
+                usleep($delay * 1000);
+                $delay = (int)min($delay * 2, 1000);
             }
         }
     }
@@ -524,6 +553,7 @@ final class Database
         $user = $cfg['user'] ?? null;
         $pass = $cfg['pass'] ?? null;
         $givenOptions = $cfg['options'] ?? [];
+        $initCommands = $cfg['init_commands'] ?? [];
 
         $enforced = [
             \PDO::ATTR_ERRMODE            => \PDO::ERRMODE_EXCEPTION,
@@ -531,7 +561,10 @@ final class Database
             \PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC,
             \PDO::ATTR_STRINGIFY_FETCHES  => false,
         ];
-        $opt = $givenOptions + $enforced;
+
+        // user options + enforced overwrite
+        $opt = $givenOptions;
+        foreach ($enforced as $k => $v) { $opt[$k] = $v; }
 
         if (is_string($dsn) && str_starts_with($dsn, 'mysql:') && defined('PDO::MYSQL_ATTR_USE_BUFFERED_QUERY')) {
             $opt[\PDO::MYSQL_ATTR_USE_BUFFERED_QUERY] = false;
@@ -541,7 +574,13 @@ final class Database
         if ($pdo->getAttribute(\PDO::ATTR_DRIVER_NAME) === 'mysql' && defined('PDO::MYSQL_ATTR_USE_BUFFERED_QUERY')) {
             $pdo->setAttribute(\PDO::MYSQL_ATTR_USE_BUFFERED_QUERY, false);
         }
-        $this->pdo = $pdo; // ← aktualizace aktuální instance
+
+        // zopakuj init_commands (best-effort)
+        foreach ((array)$initCommands as $cmd) {
+            if (is_string($cmd)) { try { $pdo->exec($cmd); } catch (\Throwable $_) {} }
+        }
+
+        $this->pdo = $pdo;
     }
 
     public function prepareAndRun(string $sql, array $params = []): \PDOStatement
@@ -551,6 +590,36 @@ final class Database
         RETRY:
         try {
             $pdo  = $this->getPdo();
+            if (getenv('BC_ORDER_GUARD') === '1') {
+                // A) původní kontrola "ORDER bez BY"
+                if (preg_match('~\bORDER\s+(?!BY\b)~i', $sql)) {
+                    $bt = array_slice(debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS), 0, 8);
+                    $where = array_map(fn($f)=>($f['file'] ?? '?').':'.($f['line'] ?? '?'), $bt);
+                    throw new DatabaseException(
+                        'ORDER without BY detected: '.$this->sanitizeSqlPreview($sql)
+                        .' @ '.implode(' <- ', $where)
+                    );
+                }
+
+                // B) NOVÁ kontrola "holý <ident> ASC|DESC bez ORDER BY" (typický bug z repo šablony)
+                $s = $sql;
+                // zjednodušeně maskneme string literály, ať nevadí 'DESC' uvnitř textu
+                $s = preg_replace("/'([^'\\\\]|\\\\.)*'/", "''", $s);
+
+                $hasOrderBy = (bool)preg_match('~\bORDER\s+BY\b~i', $s);
+                if (!$hasOrderBy) {
+                    // hledej tail typu:  col DESC[, col2 ASC]...  (a pak LIMIT|OFFSET|konec)
+                    if (preg_match('~((?:[\w`".]+\s+(?:ASC|DESC))(?:\s*,\s*[\w`".]+\s+(?:ASC|DESC))*)\s*(?:LIMIT|OFFSET|$)~i', $s, $m)) {
+                        $offending = $m[1] ?? '(n/a)';
+                        $bt = array_slice(debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS), 0, 8);
+                        $where = array_map(fn($f)=>($f['file'] ?? '?').':'.($f['line'] ?? '?'), $bt);
+                        throw new DatabaseException(
+                            "ORDER BY is missing; bare order clause detected: [{$offending}] in SQL: "
+                            .$this->sanitizeSqlPreview($sql)." @ ".implode(' <- ', $where)
+                        );
+                    }
+                }
+            }
             $stmt = $pdo->prepare($sql);
             if ($stmt === false) {
                 throw new DatabaseException('Failed to prepare statement.');
@@ -591,21 +660,52 @@ final class Database
             return $stmt;
 
         } catch (\PDOException $e) {
-            // 1× reconnect & retry, ale jen mimo aktivní transakci
+            // 1× reconnect & retry ...
             if (!$this->getPdo()->inTransaction() && $this->isServerGone($e) && $attempt === 0) {
                 $attempt = 1;
                 try { $this->reconnect(); } catch (\Throwable $_) {}
                 goto RETRY;
             }
+
             if ($this->logger !== null) {
                 try {
                     $this->logger->error('Database query failed', [
-                        'exception' => $e,
-                        'sql_preview' => $this->sanitizeSqlPreview($sql)
+                        'exception'   => $e,
+                        'sql_preview' => $this->sanitizeSqlPreview($sql),
+                        // BONUS: ulož i origin (mimo Database.php)
+                        'origin'      => (function() {
+                            foreach (debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS) as $f) {
+                                $file = $f['file'] ?? '';
+                                if ($file !== '' && !str_ends_with($file, DIRECTORY_SEPARATOR.'Database.php')) {
+                                    return $file.':'.($f['line'] ?? '?');
+                                }
+                            }
+                            return '(unknown)';
+                        })(),
                     ]);
                 } catch (\Throwable $_) {}
             }
-            throw new DatabaseException('Database query failed', 0, $e);
+
+            // Přidej do message to podstatné (SQLSTATE/kód/PDO text + origin frame)
+            $err  = $e->errorInfo[2] ?? $e->getMessage();
+            $sqls = (string)($e->errorInfo[0] ?? '');
+            $code = (string)($e->errorInfo[1] ?? $e->getCode());
+            $origin = '(unknown)';
+            foreach (debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS) as $f) {
+                $file = $f['file'] ?? '';
+                if ($file !== '' && !str_ends_with($file, DIRECTORY_SEPARATOR.'Database.php')) {
+                    $origin = $file.':'.($f['line'] ?? '?');
+                    break;
+                }
+            }
+
+            $msg = 'Database query failed'
+                . ($sqls!=='' ? " [SQLSTATE {$sqls}" . ($code!=='' ? "/{$code}" : '') . ']' : '')
+                . ': ' . $this->sanitizeSqlPreview($err)
+                . ' | SQL=' . $this->sanitizeSqlPreview($sql)
+                . ' @ ' . $origin;
+
+            throw new DatabaseException($msg, 0, $e);
         }
     }
 
@@ -922,12 +1022,23 @@ final class Database
         $perPage = max(1, (int)$perPage);
         $offset = ($page - 1) * $perPage;
 
-        $pagedSql = $sql . " LIMIT :__limit OFFSET :__offset";
-        $paramsWithLimit = $params;
-        $paramsWithLimit['__limit'] = $perPage;
-        $paramsWithLimit['__offset'] = $offset;
+        $usePositional = $this->usesPositionalOnly($sql);
+
+        if ($usePositional) {
+            $pagedSql = $sql . " LIMIT ? OFFSET ?";
+            $paramsWithLimit = array_values($params);
+            $paramsWithLimit[] = $perPage;
+            $paramsWithLimit[] = $offset;
+        } else {
+            $pagedSql = $sql . " LIMIT :__limit OFFSET :__offset";
+            $paramsWithLimit = $params;
+            $paramsWithLimit['__limit']  = $perPage;
+            $paramsWithLimit['__offset'] = $offset;
+        }
+
         $items = $this->fetchAll($pagedSql, $paramsWithLimit);
 
+        $total = 0;
         if ($countSql !== null) {
             $total = (int)$this->fetchValue($countSql, $params, 0);
         } else {
@@ -939,9 +1050,9 @@ final class Database
         }
 
         return [
-            'items' => $items,
-            'total' => $total,
-            'page'  => $page,
+            'items'   => $items,
+            'total'   => $total,
+            'page'    => $page,
             'perPage' => $perPage,
         ];
     }
