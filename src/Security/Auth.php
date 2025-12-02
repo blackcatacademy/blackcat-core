@@ -4,28 +4,84 @@ declare(strict_types=1);
 
 namespace BlackCat\Core\Security;
 
+use BlackCat\Auth\AuthManager as AuthSdkManager;
+use BlackCat\Auth\Config\AuthConfig;
+use BlackCat\Auth\Identity\DatabaseUserProvider;
+use BlackCat\Auth\Password\PasswordHasher;
+use BlackCat\Auth\Token\TokenPair;
+use BlackCat\Core\Database;
 use BlackCat\Core\Log\Logger;
+use BlackCat\Core\Security\EmailHasher\KeyManagerEmailHasher;
+use BlackCat\Core\Security\Pepper\KeyManagerPepperProvider;
 
 final class Auth
 {
+    private static ?PasswordHasher $passwordHasher = null;
+    private static ?DatabaseUserProvider $userProvider = null;
+    private static ?AuthSdkManager $authManager = null;
+
+    private static function passwordHasher(): PasswordHasher
+    {
+        if (self::$passwordHasher === null) {
+            $keysDir = defined('KEYS_DIR') ? KEYS_DIR : null;
+            self::$passwordHasher = new PasswordHasher(new KeyManagerPepperProvider($keysDir));
+        }
+        return self::$passwordHasher;
+    }
+
+    private static function emailHasher(): KeyManagerEmailHasher
+    {
+        $keysDir = defined('KEYS_DIR') ? KEYS_DIR : null;
+        return new KeyManagerEmailHasher($keysDir);
+    }
+
+    private static function userProvider(): DatabaseUserProvider
+    {
+        if (self::$userProvider === null) {
+            $pdo = Database::getInstance()->getPdo();
+            $options = [
+                'table' => $_ENV['BLACKCAT_AUTH_USERS_TABLE'] ?? 'pouzivatelia',
+                'id_column' => $_ENV['BLACKCAT_AUTH_ID_COLUMN'] ?? 'id',
+                'email_column' => $_ENV['BLACKCAT_AUTH_EMAIL_COLUMN'] ?? 'email',
+                'email_hash_column' => $_ENV['BLACKCAT_AUTH_EMAIL_HASH_COLUMN'] ?? 'email_hash',
+                'password_column' => $_ENV['BLACKCAT_AUTH_PASSWORD_COLUMN'] ?? 'heslo_hash',
+                'pepper_version_column' => $_ENV['BLACKCAT_AUTH_PEPPER_VERSION_COLUMN'] ?? 'heslo_key_version',
+                'roles_column' => $_ENV['BLACKCAT_AUTH_ROLES_COLUMN'] ?? 'role',
+                'status_column' => $_ENV['BLACKCAT_AUTH_STATUS_COLUMN'] ?? 'is_active',
+                'status_active_value' => $_ENV['BLACKCAT_AUTH_STATUS_ACTIVE_VALUE'] ?? 1,
+            ];
+            self::$userProvider = new DatabaseUserProvider($pdo, self::passwordHasher(), self::emailHasher(), $options);
+        }
+        return self::$userProvider;
+    }
+
+    private static function authManager(): AuthSdkManager
+    {
+        if (self::$authManager === null) {
+            $config = AuthConfig::fromEnv();
+            $logger = Database::isInitialized() ? Database::getInstance()->getLogger() : null;
+            self::$authManager = AuthSdkManager::boot($config, self::userProvider(), $logger);
+        }
+        return self::$authManager;
+    }
     private static function getDummyHash(): string {
         static $dh = null;
         if ($dh === null) {
-            // Použijeme hex string, aby vstup neobsahoval null bytes (bcrypt některé NUL nechce)
+            // Use hex string so the input never contains null bytes (bcrypt dislikes NUL)
             try {
-                $seed = bin2hex(random_bytes(16)); // 32 ASCII hex znaků, žádné NUL
+                $seed = bin2hex(random_bytes(16)); // 32 ASCII hex chars, no NUL
             } catch (\Throwable $_) {
-                // pokud random_bytes nejde, fallback na časově závislý seed (mírně méně ideální, ale bezpečný pro dummy)
+                // fallback when random_bytes fails: time-based seed (slightly less ideal but safe for dummy)
                 $seed = bin2hex(uniqid((string)mt_rand(), true));
             }
 
             $dh = password_hash($seed, PASSWORD_DEFAULT);
-            // extra fallback pokud password_hash selže (vrátí false)
+            // extra fallback when password_hash itself fails (returns false)
             if ($dh === false) {
                 $dh = password_hash('dummy_fallback_seed', PASSWORD_DEFAULT);
                 if ($dh === false) {
-                    // nouzově vytvoříme nějaký pevný (nezbytné jen v extrémních chybách)
-                    $dh = '$2y$10$usesomesillystringforsalt$'; // platný bcrypt-like string pro bezpečné porovnání
+                    // emergency fixed hash (only for extreme failure scenarios)
+                    $dh = '$2y$10$usesomesillystringforsalt$'; // valid bcrypt-like string for safe comparison
                 }
             }
         }
@@ -160,55 +216,9 @@ final class Auth
      * Return: ['raw'=>binary32, 'version'=>'vN']
      * Throws RuntimeException on any missing/invalid key.
      */
-    private static function getPepperInfo(): array
-    {
-        // Do not cache raw pepper bytes in static scope to minimize time they exist in memory.
-        if (!class_exists(KeyManager::class, true) || !method_exists(KeyManager::class, 'getPasswordPepperInfo')) {
-            throw new \RuntimeException('KeyManager::getPasswordPepperInfo required but not available');
-        }
-
-        $keysDir = self::requireKeysDir();
-
-        try {
-            $info = KeyManager::getPasswordPepperInfo($keysDir);
-        } catch (\Throwable $e) {
-            throw new \RuntimeException('KeyManager error while fetching PASSWORD_PEPPER: ' . $e->getMessage());
-        }
-
-        if (empty($info['raw']) || !is_string($info['raw']) || strlen($info['raw']) !== 32) {
-            throw new \RuntimeException('PASSWORD_PEPPER not available or invalid (expected 32 raw bytes)');
-        }
-
-        $version = $info['version'] ?? 'v1';
-        return ['raw' => $info['raw'], 'version' => $version];
-    }
-
-    /**
-     * Return pepper version string suitable for storing in DB (heslo_key_version).
-     * This function will throw if KeyManager or key is unavailable.
-     *
-     * @return string  e.g. 'v1', 'v2'
-     * @throws \RuntimeException if pepper is unavailable/invalid
-     */
     public static function getPepperVersionForStorage(): string
     {
-        $pep = self::getPepperInfo();
-        return $pep['version'];
-    }
-
-    /**
-     * Preprocess password using pepper (HMAC-SHA256).
-     * Returns binary string (raw) suitable for password_hash/verify.
-     * Assumes KeyManager is present (getPepperInfo() will throw otherwise).
-     */
-    private static function preprocessPassword(string $password): string
-    {
-        $pep = self::getPepperInfo();
-        // Use raw binary pepper; produce binary HMAC to pass to password_hash.
-        $h = hash_hmac('sha256', $password, $pep['raw'], true);
-        // memzero pepper raw asap
-        try { KeyManager::memzero($pep['raw']); } catch (\Throwable $_) {}
-        return $h;
+        return 'v1';
     }
 
     /**
@@ -217,14 +227,7 @@ final class Auth
      */
     public static function hashPassword(string $password): string
     {
-        $inp = self::preprocessPassword($password);
-        $hash = password_hash($inp, PASSWORD_ARGON2ID, self::getArgon2Options());
-        // wipe input HMAC ASAP
-        try { KeyManager::memzero($inp); } catch (\Throwable $_) {}
-        if ($hash === false) {
-            throw new \RuntimeException('password_hash failed');
-        }
-        return $hash;
+        return self::passwordHasher()->hash($password);
     }
 
     /**
@@ -233,109 +236,13 @@ final class Auth
      */
     public static function buildHesloAlgoMetadata(string $hash): string
     {
-        $info = password_get_info($hash);
-        $algoName = $info['algoName'] ?? 'unknown';
-        return $algoName;
+        return self::passwordHasher()->algorithmName($hash);
     }
     
     public static function verifyPasswordWithVersion(string $password, string $storedHash, ?string $hesloKeyVersion = null): array
     {
-        static $cache = []; // per-request cache
-        $cacheKey = md5($storedHash . '|' . ($hesloKeyVersion ?? ''));
-        if (isset($cache[$cacheKey])) return $cache[$cacheKey];
-
-        $result = ['ok' => false, 'matched_version' => null];
-        $dummyHash = self::getDummyHash();
-
-        $keysDir = defined('KEYS_DIR') ? KEYS_DIR : null;
-
-        // 1) Pokud je explicitní verze uložená v DB, vyzkoušíme ji první (fail-fast)
-        if (!empty($hesloKeyVersion)) {
-            try {
-                $info = KeyManager::getRawKeyBytesByVersion('PASSWORD_PEPPER', $keysDir, 'password_pepper', $hesloKeyVersion, 32);
-                $raw = $info['raw'] ?? null;
-                if (is_string($raw) && strlen($raw) === 32) {
-                    $pre = hash_hmac('sha256', $password, $raw, true);
-                    $ok = password_verify($pre, $storedHash);
-                    try { KeyManager::memzero($pre); } catch (\Throwable $_) {}
-                    try { KeyManager::memzero($raw); } catch (\Throwable $_) {}
-                    unset($pre, $raw, $info);
-                    if ($ok) {
-                        $result = ['ok' => true, 'matched_version' => $hesloKeyVersion];
-                        $cache[$cacheKey] = $result;
-                        return $result;
-                    } else {
-                        password_verify($pre ?? random_bytes(16), $dummyHash); // timing defense (pre may be unset)
-                    }
-                }
-            } catch (\Throwable $_) {
-                // ignore and continue to full candidate probing
-            }
-        }
-
-        // 2) Fallback: iteruj přes dostupné verze newest -> oldest, ale streamuj každou (nenashromažďuj raw)
-        try {
-            $versions = [];
-            if ($keysDir !== null) {
-                try { $versions = KeyManager::listKeyVersions($keysDir, 'password_pepper'); } catch (\Throwable $_) { $versions = []; }
-            }
-            // pokud máme verze souboru: newest -> oldest
-            $versList = !empty($versions) ? array_reverse(array_keys($versions)) : [];
-            // pokud žádné verze souborů, zkus getRawKeyBytes (který fallbackne na ENV)
-            if (empty($versList)) {
-                try {
-                    $infoLatest = KeyManager::getRawKeyBytes('PASSWORD_PEPPER', $keysDir, 'password_pepper', false, 32);
-                    if (!empty($infoLatest['raw']) && is_string($infoLatest['raw'])) {
-                        $versList = [$infoLatest['version'] ?? 'v1'];
-                        // uvolníme infoLatest.raw hned — přejdeme na getRawKeyBytesByVersion pro jednotné chování
-                        try { KeyManager::memzero($infoLatest['raw']); } catch (\Throwable $_) {}
-                        unset($infoLatest);
-                    }
-                } catch (\Throwable $_) { /* ignore */ }
-            }
-
-            foreach ($versList as $ver) {
-                try {
-                    $info = KeyManager::getRawKeyBytesByVersion('PASSWORD_PEPPER', $keysDir, 'password_pepper', $ver, 32);
-                    $raw = $info['raw'] ?? null;
-                    if (!is_string($raw) || strlen($raw) !== 32) { 
-                        try { KeyManager::memzero($raw); } catch (\Throwable $_) {}
-                        unset($raw, $info);
-                        continue;
-                    }
-                    $pre = hash_hmac('sha256', $password, $raw, true);
-                    $ok = password_verify($pre, $storedHash);
-                    try { KeyManager::memzero($pre); } catch (\Throwable $_) {}
-                    try { KeyManager::memzero($raw); } catch (\Throwable $_) {}
-                    unset($pre, $raw, $info);
-                    if ($ok) {
-                        $result = ['ok' => true, 'matched_version' => $ver];
-                        $cache[$cacheKey] = $result;
-                        return $result;
-                    } else {
-                        password_verify(random_bytes(16), $dummyHash);
-                    }
-                } catch (\Throwable $_) {
-                    // skip version
-                    continue;
-                }
-            }
-
-            // 3) legacy plain password fallback
-            if (password_verify($password, $storedHash)) {
-                $result = ['ok' => true, 'matched_version' => null];
-            } else {
-                password_verify(random_bytes(16), $dummyHash);
-            }
-        } catch (\Throwable $e) {
-            if (class_exists(Logger::class, true)) {
-                try { Logger::systemError($e); } catch (\Throwable $_) {}
-            }
-            $result = ['ok' => false, 'matched_version' => null];
-        }
-
-        $cache[$cacheKey] = $result;
-        return $result;
+        $result = self::passwordHasher()->verify($password, $storedHash, $hesloKeyVersion);
+        return ['ok' => $result->isValid(), 'matched_version' => $result->matchedVersion()];
     }
 
     /**
@@ -353,112 +260,7 @@ final class Auth
      */
     private static function lookupUserByEmail(\PDO $db, string $emailNormalized): array
     {
-        static $cache = []; // per-request cache: key => ['candidates'=>..., 'latest'=>...]
-        $cacheKey = 'email_lookup:' . $emailNormalized;
-
-        $result = [
-            'user' => null,
-            'usernameHashBinForAttempt' => null,
-            'matched_email_hash_version' => null,
-        ];
-
-        // quick cached path
-        if (isset($cache[$cacheKey])) {
-            $cached = $cache[$cacheKey];
-            $candidates = $cached['candidates'];
-            $result['usernameHashBinForAttempt'] = $cached['latest'] ?? null;
-        } else {
-            $candidates = [];
-            $latest = null;
-
-            try {
-                if (!class_exists(KeyManager::class, true)) {
-                    // no KeyManager -> cannot do HMAC lookup
-                    $cache[$cacheKey] = ['candidates' => [], 'latest' => null];
-                    return $result;
-                }
-
-                $keysDir = self::requireKeysDir();
-
-                // latest HMAC (for limiter recording) - best effort
-                try {
-                    $hinfoLatest = KeyManager::deriveHmacWithLatest('EMAIL_HASH_KEY', $keysDir, 'email_hash_key', $emailNormalized);
-                    $latest = $hinfoLatest['hash'] ?? null; // binary or null
-                } catch (\Throwable $_) {
-                    $latest = null;
-                }
-
-                // derive all candidate hashes (supports rotation). limit to reasonable number
-                try {
-                    $candidates = KeyManager::deriveHmacCandidates('EMAIL_HASH_KEY', $keysDir, 'email_hash_key', $emailNormalized);
-                    if (!is_array($candidates)) $candidates = [];
-                } catch (\Throwable $_) {
-                    $candidates = [];
-                }
-
-                // small safety cap
-                if (count($candidates) > 16) {
-                    $candidates = array_slice($candidates, 0, 16);
-                }
-
-                // cache for this request
-                $cache[$cacheKey] = ['candidates' => $candidates, 'latest' => $latest];
-                $result['usernameHashBinForAttempt'] = $latest;
-            } catch (\Throwable $e) {
-                if (class_exists(Logger::class, true)) {
-                    try { Logger::systemError($e); } catch (\Throwable $_) {}
-                }
-                // fail-safe: return no user
-                return $result;
-            }
-        }
-
-        // If we have candidate hashes, try them in order (newer -> older)
-        if (!empty($candidates)) {
-            try {
-                $q = $db->prepare('SELECT id, email_hash, email_hash_key_version, email_enc, email_key_version,
-                                        heslo_hash, heslo_algo, heslo_key_version, is_active, is_locked,
-                                        failed_logins, actor_type
-                                FROM pouzivatelia WHERE email_hash = :h LIMIT 1');
-
-                foreach ($candidates as $cand) {
-                    if (!isset($cand['hash'])) continue;
-                    // candidate 'hash' expected as binary string; 'version' may exist
-                    $candHash = $cand['hash'];
-                    $q->bindValue(':h', $candHash, \PDO::PARAM_LOB);
-                    $q->execute();
-                    $found = $q->fetch(\PDO::FETCH_ASSOC);
-                    if ($found) {
-                        $result['user'] = $found;
-                        $result['matched_email_hash_version'] = $cand['version'] ?? null;
-                        break;
-                    }
-                }
-            } catch (\Throwable $e) {
-                if (class_exists(Logger::class, true)) {
-                    try { Logger::systemError($e); } catch (\Throwable $_) {}
-                }
-                // On DB error return safe no-user
-                return $result;
-            }
-        }
-
-        // If still not found, do a single dummy DB probe to reduce timing differences
-        if ($result['user'] === null) {
-            try {
-                // prepare a statement similar to the real one and bind a random blob
-                $qDummy = $db->prepare('SELECT 1 FROM pouzivatelia WHERE email_hash = :h LIMIT 1');
-                $dummy = random_bytes(32);
-                $qDummy->bindValue(':h', $dummy, \PDO::PARAM_LOB);
-                // execute once to emulate DB cost of a real search
-                $qDummy->execute();
-                // ignore result
-            } catch (\Throwable $_) {
-                // ignore: we don't want logging here to create additional noise; failure is non-fatal
-            }
-        }
-
-        return $result;
+        return self::userProvider()->lookupByEmail($emailNormalized);
     }
 
     /**
@@ -470,13 +272,13 @@ final class Auth
      */
     public static function login(\PDO $db, string $email, string $password, int $maxFailed = 5): array
     {
-        // základní validace formátu (ale NELOGUJEME a NEUCHOVÁVÁME plain email)
+        // basic format validation (NEVER log or persist the plain email)
         if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
             if (class_exists(Logger::class, true)) {
                 Logger::auth('login_failure', null);
             }
             usleep(150_000);
-            return ['success' => false, 'user' => null, 'message' => 'Neplatné přihlášení'];
+            return ['success' => false, 'user' => null, 'message' => 'Invalid login'];
         }
 
         // Normalise email
@@ -522,11 +324,11 @@ final class Auth
                         Logger::auth('login_failure', null);
                     }
                 }
-                $msg = $secs > 0 ? "Příliš mnoho pokusů. Zkuste za {$secs} sekund." : "Příliš mnoho pokusů. Vyzkoušej později.";
+                $msg = $secs > 0 ? "Too many attempts. Try again in {$secs} seconds." : "Too many attempts. Try again later.";
                 return ['success' => false, 'user' => null, 'message' => $msg];
             }
         } catch (\Throwable $_) {
-            // fail-open: pokud limiter selže, pokračujeme v login flow
+            // fail-open: if the limiter fails, continue the login flow
         }
 
 // 1) HMAC-based lookup (supports rotation) via centralized helper
@@ -569,7 +371,7 @@ try {
                 throw new \RuntimeException('Logger required for auth logging');
             }
             usleep(150_000);
-            return ['success' => false, 'user' => null, 'message' => 'Neplatné přihlášení'];
+            return ['success' => false, 'user' => null, 'message' => 'Invalid login'];
         }
 
         // 3) Verify password (may require pepper)
@@ -579,7 +381,7 @@ try {
         try {
             $verif = self::verifyPasswordWithVersion($password, $storedHash, $hesloKeyVersion);
             $ok = $verif['ok'];
-            $matchedVersion = $verif['matched_version']; // můžeš použít pro rozhodnutí o rehash
+            $matchedVersion = $verif['matched_version']; // can be used when deciding on rehash
 
         } catch (\Throwable $e) {
             // critical error (pepper missing etc.)
@@ -613,7 +415,7 @@ try {
             // register IP limiter failure
             self::limiterRegisterAttempt($clientIp, false, (int)$u['id'], $usernameHashBinForAttempt);
 
-            return ['success' => false, 'user' => null, 'message' => 'Neplatné přihlášení'];
+            return ['success' => false, 'user' => null, 'message' => 'Invalid login'];
         }
 
         // 4) Successful login: reset failed counters, update last_login, and record success in limiter
@@ -653,7 +455,7 @@ try {
 
         // --- simplified automatic email migration (trusted input: re-encrypt directly) ---
             try {
-                $emailToMigrate = $emailNormalized; // už máš mb_strtolower(trim(...))
+                $emailToMigrate = $emailNormalized; // already normalized via mb_strtolower(trim(...))
                 $keysDir = self::requireKeysDir();
 
                 // 1) email_hash (HMAC) - derive latest and idempotently update
@@ -745,7 +547,7 @@ try {
             }
             // --- end simplified migration ---
 
-        // --- počítání rehash mimo transakci (pokud je potřeba) ---
+        // --- perform rehashing outside a transaction when necessary ---
         $needRehash = password_needs_rehash($storedHash, PASSWORD_ARGON2ID, self::getArgon2Options());
         try {
             $currentPepver = self::getPepperVersionForStorage();
@@ -762,7 +564,7 @@ try {
             $newPepver = $currentPepver;
         }
 
-        // --- atomická transakce: reset failed + last_login + optional password update ---
+        // --- atomic transaction: reset failed count + last_login + optional password update ---
         try {
             $db->beginTransaction();
 
@@ -827,5 +629,20 @@ try {
     public static function isAdmin(array $userData): bool
     {
         return isset($userData['actor_type']) && $userData['actor_type'] === 'admin';
+    }
+
+    public static function issueTokens(string $username, string $password): TokenPair
+    {
+        return self::authManager()->issueTokens($username, $password);
+    }
+
+    public static function verifyAccessToken(string $token): array
+    {
+        return self::authManager()->verifyAccessToken($token);
+    }
+
+    public static function refreshTokens(string $refreshToken): TokenPair
+    {
+        return self::authManager()->refresh($refreshToken);
     }
 }

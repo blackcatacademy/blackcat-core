@@ -64,7 +64,7 @@ final class LoginLimiter
             try {
                 Database::getInstance()->execute($sql, $params);
             } catch (\Throwable $_) {
-                // silent fail — limiter nesmí shodit aplikaci
+                // silent fail — limiter must never crash the application
             }
             return;
         }
@@ -79,7 +79,7 @@ final class LoginLimiter
     }
 
     /**
-     * Vrací true, pokud má IP příliš mnoho neúspěšných pokusů ve window (count >= maxAttempts).
+     * Returns true when the IP has too many failed attempts within the window (count >= maxAttempts).
      *
      * @param string|null $ip Plain IP or null
      */
@@ -113,13 +113,13 @@ final class LoginLimiter
             $cnt = $row && isset($row['cnt']) ? (int)$row['cnt'] : 0;
             return $cnt >= $maxAttempts;
         } catch (\Throwable $_) {
-            // fail-open: při chybě neblokujeme
+            // fail-open: do not block if the check fails
             return false;
         }
     }
 
     /**
-     * Vrací počet neúspěšných pokusů v daném window (pro IP).
+     * Returns the number of failed attempts in the window for the IP.
      */
     public static function getAttemptsCount(?string $ip = null, int $windowSec = self::DEFAULT_WINDOW_SEC): int
     {
@@ -142,7 +142,7 @@ final class LoginLimiter
     }
 
     /**
-     * Vrací, kolik pokusů ještě zbývá (>=0).
+     * Returns how many attempts remain (>=0).
      */
     public static function getRemainingAttempts(?string $ip = null, int $maxAttempts = self::DEFAULT_MAX_ATTEMPTS, int $windowSec = self::DEFAULT_WINDOW_SEC): int
     {
@@ -152,9 +152,9 @@ final class LoginLimiter
     }
 
     /**
-     * Vrací počet sekund do odblokování (0 = není blokováno).
-     * Pokud je IP blokována (count >= maxAttempts), vypočítá, kolik sekund zbývá do vypršení nejstaršího ze
-     * posledních $maxAttempts neúspěšných pokusů.
+     * Returns the number of seconds until unlock (0 = not blocked).
+     * If the IP is blocked (count >= maxAttempts), calculates how many seconds remain until the oldest of
+     * the last $maxAttempts failed attempts expires.
      */
     public static function getSecondsUntilUnblock(?string $ip = null, int $maxAttempts = self::DEFAULT_MAX_ATTEMPTS, int $windowSec = self::DEFAULT_WINDOW_SEC): int
     {
@@ -178,10 +178,10 @@ final class LoginLimiter
             $rows = Database::getInstance()->fetchAll($sql, [':ip_hash' => $ipHashBin, ':cutoff' => $cutoff]);
             $count = is_array($rows) ? count($rows) : 0;
             if ($count < $maxAttempts) {
-                return 0; // není blokováno
+                return 0; // not blocked
             }
 
-            // nejstarší z posledních N pokusů je poslední prvek v result setu (ORDER BY attempted_at DESC)
+            // the oldest of the last N attempts is the final row in the result set (ORDER BY attempted_at DESC)
             $oldest = $rows[$count - 1]['attempted_at'] ?? null;
             if (!$oldest) return 0;
 
@@ -197,9 +197,9 @@ final class LoginLimiter
     }
 
     /**
-     * Zaregistruje registrační pokus do tabulky register_events.
+     * Registers a sign-up attempt into register_events.
      *
-     * Poznámka: IP se bere přímo z Logger::getHashedIp() (tj. ze skutečného klienta).
+     * Note: IP is taken directly from Logger::getHashedIp() (the actual client).
      *
      * @param bool $success true = success, false = failure
      * @param int|null $userId optional user id (if known)
@@ -213,13 +213,13 @@ final class LoginLimiter
             return;
         }
 
-        // ZÍSKAT IP INFO PŘÍMO Z LOGGERU (nepoužíváme předaný $ip)
-        $ipResult = Logger::getHashedIp(); // getClientIp() inside Logger použije skutečnou klientskou IP
+        // Obtain IP info directly from Logger (ignore provided $ip)
+        $ipResult = Logger::getHashedIp(); // Logger resolves the real client IP
         $ipHashBin    = self::prepareBin32ForStorage($ipResult['hash'] ?? null);
         $ipHashKeyVer = $ipResult['key_id'] ?? null;
         $ipUsed       = $ipResult['used'] ?? 'none';
 
-        // pokud není k dispozici hash (např. KeyManager chybí), přerušujeme (tabulka může mít NOT NULL)
+        // abort if the hash is missing (e.g., KeyManager unavailable) because the table may enforce NOT NULL
         if ($ipHashBin === null) {
             return;
         }
@@ -227,13 +227,13 @@ final class LoginLimiter
         $type = $success ? 'register_success' : 'register_failure';
         $ua   = $userAgent ?? ($_SERVER['HTTP_USER_AGENT'] ?? null);
 
-        // základní meta obsahující informace o IP-hash
+        // base meta containing IP hash info
         $baseMeta = [
             '_ip_hash_used' => $ipUsed,
             '_ip_hash_key'  => $ipHashKeyVer,
         ];
 
-        // bezpečné sloučení volitelného $meta (povolit jen scalar, null nebo array)
+        // safely merge optional $meta (allow only scalar, null, or array)
         if (!empty($meta) && is_array($meta)) {
             $filtered = [];
             foreach ($meta as $k => $v) {
@@ -247,12 +247,12 @@ final class LoginLimiter
             $baseMeta = array_merge($baseMeta, $filtered);
         }
 
-        // přidat volitelnou chybovou hlášku
+        // add optional error message
         if (!empty($error) || $error === '0') {
             $baseMeta['error'] = (string)$error;
         }
 
-        // encode meta (pokud selže -> NULL)
+        // encode meta (falls back to NULL on failure)
         $metaJson = null;
         try {
             $metaJson = json_encode($baseMeta, JSON_UNESCAPED_UNICODE);
@@ -277,13 +277,13 @@ final class LoginLimiter
             DeferredHelper::flush();
             Database::getInstance()->execute($sql, $params);
         } catch (\Throwable $_) {
-            // silent fail (limiter nesmí shodit aplikaci)
+            // silent fail (limiter must never crash the application)
         }
     }
 
     /**
-     * Vrací true pokud je IP blokována z hlediska registrací (count >= maxAttempts v daném window).
-     * Stejná semantika jako isBlocked() - ale čte z register_events a pouze typ 'register_failure'.
+     * Returns true if the IP is blocked for registrations (count >= maxAttempts within the window).
+     * Semantics mirror isBlocked(), but it reads register_events and only the 'register_failure' type.
      *
      * @param string|null $ip Plain IP or null
      */
@@ -317,7 +317,7 @@ final class LoginLimiter
     }
 
     /**
-     * Vrací počet neúspěšných registračních pokusů v daném window (pro IP).
+     * Returns the number of failed registration attempts within the window for the IP.
      */
     public static function getRegisterAttemptsCount(?string $ip = null, int $windowSec = self::DEFAULT_WINDOW_SEC): int
     {
@@ -340,7 +340,7 @@ final class LoginLimiter
     }
 
     /**
-     * Vrací zbývající počet pokusů pro registraci (>=0).
+     * Returns how many registration attempts remain (>=0).
      */
     public static function getRegisterRemainingAttempts(?string $ip = null, int $maxAttempts = self::DEFAULT_MAX_ATTEMPTS, int $windowSec = self::DEFAULT_WINDOW_SEC): int
     {
@@ -350,7 +350,7 @@ final class LoginLimiter
     }
 
     /**
-     * Vrací počet sekund do odblokování (0 = není blokováno) pro registrace.
+     * Returns number of seconds until the IP is unblocked for registrations (0 = not blocked).
      */
     public static function getRegisterSecondsUntilUnblock(?string $ip = null, int $maxAttempts = self::DEFAULT_MAX_ATTEMPTS, int $windowSec = self::DEFAULT_WINDOW_SEC): int
     {
@@ -389,9 +389,9 @@ final class LoginLimiter
     }
 
     /**
-     * Úklid starých pokusů – doporučeno volat z CRONu.
+     * Cleanup for stale attempts — recommended to run from CRON.
      *
-     * @param int $olderThanSec smazat záznamy starší než tento počet sekund
+     * @param int $olderThanSec delete entries older than this number of seconds
      */
     public static function cleanup(int $olderThanSec = 86400): void
     {

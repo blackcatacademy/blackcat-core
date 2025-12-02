@@ -180,7 +180,7 @@ final class TrustedShared
             if (is_array($appConfig)) {
                 $configMin['capchav3'] = $appConfig['capchav3'] ?? [];
                 $configMin['paths'] = $appConfig['paths'] ?? [];
-                // další bezpečné klíče pokud potřebuješ (smtp, paths, app_url apod.)
+                // add other safe keys if necessary (smtp, paths, app_url etc.)
                 $configMin['smtp_from'] = $appConfig['smtp']['from'] ?? ($appConfig['smtp_from'] ?? null);
             }
         } catch (\Throwable $_) {

@@ -6,6 +6,7 @@ namespace BlackCat\Core\Cron;
 use BlackCat\Core\Log\Logger;
 use BlackCat\Core\Security\KeyManager;
 use BlackCat\Core\Mail\Mailer;
+use BlackCat\Core\Messaging\Outbox;
 
 /**
  * cron/Worker.php
@@ -27,6 +28,7 @@ final class Worker
     private static ?\PDO $pdo = null;
     private static bool $inited = false;
     private static array $jobs = [];
+    private static ?Outbox $outbox = null;
 
     /** @var mixed|null */
     private static $gopayWrapper = null;
@@ -37,15 +39,36 @@ final class Worker
     /** lock prefix to avoid colliding with other processes */
     private const LOCK_PREFIX = 'worker_lock_';
 
-    public static function init(\PDO $pdo, $gopayWrapper = null, $gopayAdapter = null): void
+    public static function init(\PDO $pdo, $gopayWrapper = null, $gopayAdapter = null, ?Outbox $outbox = null): void
     {
         self::$pdo        = $pdo;
         self::$gopayWrapper = $gopayWrapper;
         self::$gopayAdapter = $gopayAdapter;
+        self::$outbox       = $outbox;
         self::$inited     = true;
 
         if (class_exists(Logger::class, true)) {
             try { Logger::systemMessage('notice', 'Worker initialized'); } catch (\Throwable $_) {}
+        }
+    }
+
+    public static function flushOutbox(int $limit = 100): array
+    {
+        self::ensureInited();
+        if (!self::$outbox) {
+            throw new \RuntimeException('Outbox not configured.');
+        }
+
+        $lockName = self::LOCK_PREFIX . 'outbox';
+        if (!self::lock($lockName, 60)) {
+            return ['notice' => 'outbox locked'];
+        }
+
+        try {
+            $sent = self::$outbox->flush(fn(array $row) => true, $limit);
+            return ['sent' => $sent];
+        } finally {
+            self::unlock($lockName);
         }
     }
 

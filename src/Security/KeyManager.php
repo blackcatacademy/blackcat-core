@@ -166,7 +166,7 @@ final class KeyManager
             // zero raw in memory
             self::memzero($raw);
 
-            // purge cache pro daný basename (aby se další getRawKeyBytes načetl nový soubor)
+            // purge cache for the basename (so the next getRawKeyBytes loads the refreshed file)
             self::purgeCacheFor(strtoupper($basename));
 
             return ['path' => $target, 'version' => 'v' . $next, 'fingerprint' => $fingerprint];
@@ -312,7 +312,7 @@ final class KeyManager
             if ($keysDir === null || $basename === '') {
                 throw new KeyManagerException('generateIfMissing requires keysDir and basename');
             }
-            // použijeme rotateKey pro lock + audit
+            // use rotateKey to secure locking + auditing
             $res = self::rotateKey($basename, $keysDir, null, 5, false);
             $raw = @file_get_contents($res['path']);
             if ($raw === false || strlen($raw) !== $wantedLen) {
@@ -337,21 +337,21 @@ final class KeyManager
 
         $wantedLen = $expectedByteLen ?? self::keyByteLen();
 
-        // Získáme base64 reprezentaci (soubory/ENV) — getBase64Key je bezpečné
+        // Obtain base64 representation (files/ENV) — getBase64Key is safe
         $b64 = self::getBase64Key($envName, $keysDir, $basename, $generateIfMissing, $wantedLen);
         $raw = base64_decode($b64, true);
         if ($raw === false) {
             throw new KeyManagerException('Base64 decode failed in KeyManager for ' . $envName);
         }
 
-        // Zjistíme verzi (metadata) bez ukládání raw do cache
+        // Determine version (metadata) without caching raw bytes
         $ver = null;
         if ($keysDir !== null && $basename !== '') {
             $info = self::locateLatestKeyFile($keysDir, $basename);
             if ($info !== null) $ver = $info['version'];
         }
 
-        // VRATÍ raw — caller JE POVINEN memzero + unset po použití
+        // Returns raw bytes — caller MUST memzero + unset after use
         return ['raw' => $raw, 'version' => $ver ?? 'v1'];
     }
 
@@ -373,7 +373,7 @@ final class KeyManager
             throw new KeyManagerException('Key file invalid or wrong length: ' . $path);
         }
 
-        // NECACHEUJ raw v self::$cache ani v jiném statickém poli.
+        // NEVER cache raw bytes in self::$cache or any other static property.
         return ['raw' => $raw, 'version' => $verStr];
     }
 
@@ -403,7 +403,7 @@ final class KeyManager
             throw new \RuntimeException('Failed to atomically move key file to destination');
         }
 
-        // zajistíme správná práva i po rename
+        // ensure correct permissions even after rename
         @chmod($path, 0400);
 
         clearstatcache(true, $path);
@@ -521,14 +521,14 @@ final class KeyManager
                 if ($maxCandidates !== null && $count >= $maxCandidates) break;
                 $ver = $vers[$i];
                 try {
-                    // načteme raw přímo (NECACHEJME ho)
+                    // read raw directly (do NOT cache it)
                     $info = self::getRawKeyBytesByVersion($envName, $keysDir, $basename, $ver, $expectedLen);
                     $key = $info['raw'];
-                    // spočteme HMAC
+                    // compute HMAC
                     $h = hash_hmac('sha256', $data, $key, true);
                     $out[] = ['version' => $ver, 'hash' => $h];
                     $count++;
-                    // bezpečně vymažeme raw v paměti
+                    // securely wipe raw bytes from memory
                     try { self::memzero($key); } catch (\Throwable $_) {}
                     unset($key, $info);
                 } catch (\Throwable $_) {

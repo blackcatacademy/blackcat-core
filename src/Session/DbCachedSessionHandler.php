@@ -334,7 +334,7 @@ final class DbCachedSessionHandler implements \SessionHandlerInterface
                         token_hash_key = :token_hash_key_u,
                         revoked = 0";
 
-                // před tím, než voláš DB zápis, připrav tokenFingerprint:
+                // before writing to the DB, prepare tokenFingerprint:
                 $cookieVal = $_COOKIE[self::COOKIE_NAME] ?? null;
                 $tokenFingerprintBin = is_string($cookieVal) ? hash('sha256', $cookieVal, true) : null;
 
@@ -565,7 +565,7 @@ final class DbCachedSessionHandler implements \SessionHandlerInterface
     {
         $handler = ini_get('session.serialize_handler') ?: 'php';
         if ($handler !== 'php' && $handler !== 'php_binary') {
-            // loguj to pro debug, ale fallbackni na původní plain (bez konverze)
+            // log for debugging but fall back to the original plain string (no conversion)
             $this->log('warning', 'unexpected session.serialize_handler: ' . $handler, null, ['component' => 'DbCachedSessionHandler']);
             return $plain;
         }
@@ -581,8 +581,8 @@ final class DbCachedSessionHandler implements \SessionHandlerInterface
      * Parse PHP session-serialized string (format "k1|<serialized>k2|<serialized>...") into array.
      * Returns array on success, or null if parsing failed.
      *
-     * This is conservative: pokusí se rozpoznat jednotlivé páry jméno|serialized_value.
-     * Implementace postupně zkouší malé kusy inputu pro unserialize() (robustní, i když ne ultra-performantní).
+     * This is conservative: attempts to recognize individual name|serialized_value pairs.
+     * The implementation gradually tests small chunks of input via unserialize() (robust though not ultra-performant).
      */
     private function parsePhpSessionStringToArray(string $s): ?array
     {
@@ -673,7 +673,7 @@ final class DbCachedSessionHandler implements \SessionHandlerInterface
     {
         $ctx = [
             'component' => 'DbCachedSessionHandler',
-            // první 16 hex znaků SHA-256 = anonymní, korelovatelný identifikátor
+            // first 16 hex characters of SHA-256 = anonymous, correlatable identifier
             'session_id_hash' => substr(hash('sha256', (string)$sessionId), 0, 16),
         ];
         if (!empty($extra) && is_array($extra)) {
@@ -785,9 +785,9 @@ final class DbCachedSessionHandler implements \SessionHandlerInterface
             $this->ensureCryptoInitialized();
             $keysDir = self::getKeysDir();
 
-            // pokud máme raw token (cookie encoded) pokusíme se ho najít
+            // if we have a raw token (cookie encoded) attempt to find it
             $raw = $this->base64url_decode($rawTokenOrSessionId);
-            // pokud ne, necháme KeyManager pokusit se s tím, co má (někdy SessionManager volá s raw tokenem)
+            // otherwise let KeyManager try with whatever it has (SessionManager sometimes supplies a raw token)
             $tokenForDerive = $raw !== null ? $raw : $rawTokenOrSessionId;
 
             $candidates = [];
@@ -805,14 +805,14 @@ final class DbCachedSessionHandler implements \SessionHandlerInterface
             }
 
             if (!empty($candidates) && is_array($candidates)) {
-                // pokud byla požadována konkrétní verze, zúžíme kandidáty pouze na tu verzi
+                // if a specific version was requested, narrow candidates to that version only
                 if ($keyVersion !== null) {
                     $candidates = array_filter($candidates, function($c) use ($keyVersion) {
                         return isset($c['version']) && $c['version'] === $keyVersion;
                     });
-                    // pokud po filtrování nic nezbyde, povolíme fallback (zkusíme všechny kandidáty)
+                    // if filtering yields nothing, allow fallback (try all candidates)
                     if (empty($candidates)) {
-                        // necháme to prázdné -> následující smyčka nic neudělá a vrátí null
+                        // leave it empty -> the following loop does nothing and returns null
                     }
                 }
             }
@@ -831,17 +831,17 @@ final class DbCachedSessionHandler implements \SessionHandlerInterface
                 }
             }
 
-            // Fallback: pokud nemáme kandidáty nebo nic nepadlo, zkusíme volat Crypto::decrypt bez explicitního candidate (některé implementace to podporují)
+            // Fallback: if we have no candidates or none succeed, call Crypto::decrypt without explicit candidate (some implementations support this)
             try {
                 $plain = Crypto::decrypt($blob);
                 if ($plain !== null) {
-                    // pokud jsme neměli konkrétní verzi, necháme key_version null
+                    // if no specific version was requested, keep key_version null
                     return ['plain' => $plain, 'key_version' => $keyVersion ?? null];
                 }
             } catch (\Throwable $_) {
                 // swallow
             }
-            // pokud jsme sem došli, nepodařilo se dešifrovat — loguj pro debug rotace klíčů
+            // reaching this point means decryption failed — log for key rotation debugging
             try {
                 $this->log('info', 'decrypt candidates exhausted for session blob', null, [
                     'preferred_key_version' => $keyVersion ?? null,
@@ -861,8 +861,8 @@ final class DbCachedSessionHandler implements \SessionHandlerInterface
 
     /**
      * Helper pro PDO prepare s chybovou kontrolou.
-     * Vrací \PDOStatement nebo vyhodí \RuntimeException když prepare selže.
-     * Používej $this->pdoPrepare(...) místo $this->db->prepare(...) v PDO větvích.
+     * Returns \PDOStatement or throws \RuntimeException when prepare fails.
+     * Use $this->pdoPrepare(...) instead of $this->db->prepare(...) in PDO branches.
      */
     private function pdoPrepare(string $sql): \PDOStatement
     {
@@ -872,7 +872,7 @@ final class DbCachedSessionHandler implements \SessionHandlerInterface
 
         $stmt = $this->db->prepare($sql);
         if ($stmt === false) {
-            // Nebindujeme surový SQL do logu - pouze obecná chyba
+            // Do not log raw SQL - emit only a generic error
             throw new \RuntimeException('PDO prepare failed');
         }
         return $stmt;

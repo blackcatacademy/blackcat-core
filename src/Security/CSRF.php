@@ -142,10 +142,10 @@ final class CSRF
         // fingerprint already hex-safe when created via bin2hex
         $fpHex = $sessionFingerprintBin !== null ? bin2hex($sessionFingerprintBin) : 'nofp';
 
-        // nový bezpečný formát: csrf_user_<userId>_<fpHex>
+        // new safe format: csrf_user_<userId>_<fpHex>
         $raw = 'csrf_user_' . $userId . '_' . $fpHex;
 
-        // dodatečná sanitizace (pro jistotu) - povolit jen A-Z a 0-9 a _ a -
+        // extra sanitization (belt & suspenders) - allow only A-Z, 0-9, underscore and dash
         $safe = preg_replace('/[^A-Za-z0-9_\-]/', '_', $raw);
 
         return $safe;

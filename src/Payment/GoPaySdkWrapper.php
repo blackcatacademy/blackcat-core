@@ -53,7 +53,7 @@ final class GoPaySdkWrapper implements PaymentGatewayInterface
             throw new \InvalidArgumentException('GoPay config missing keys: ' . implode(',', $missing));
         }
 
-        // prefer robustní init SDK — pokus v try/catch bez spolehnutí na přesné class_exists checks
+        // prefer robust SDK init — wrap in try/catch instead of relying on class_exists
         try {
             if (class_exists(\GoPay\Api::class, true)) {
                 $this->client = \GoPay\Api::payments([
@@ -799,7 +799,7 @@ final class GoPaySdkWrapper implements PaymentGatewayInterface
      */
     private function sanitizeHeadersForLog(array $assoc): array
     {
-        // sanitize() v header_mode zachová assoc klíče a rediguje Authorization
+        // sanitize() in header_mode keeps associative keys and redacts Authorization
         return $this->sanitize($assoc, ['header_mode' => true, 'max_string' => 200, 'keep_throwable' => false]);
     }
 

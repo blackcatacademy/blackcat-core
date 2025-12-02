@@ -78,14 +78,14 @@ final class SessionManager
     {
         if ($ua === null) return null;
 
-        // 1) odstraníme kontrolní znaky (včetně NUL, CR, LF, DEL)
+        // 1) strip control characters (including NUL, CR, LF, DEL)
         $ua = preg_replace('/[\x00-\x1F\x7F]+/u', '', $ua);
 
-        // 2) nahradíme vícenásobné whitespace jednou mezerou a trim
+        // 2) collapse consecutive whitespace to a single space and trim
         $ua = preg_replace('/\s+/u', ' ', $ua);
         $ua = trim($ua);
 
-        // 3) ořežeme na max. 512 UTF-8 znaků (odpovídá VARCHAR(512))
+        // 3) limit to 512 UTF-8 characters (matches VARCHAR(512))
         return mb_substr($ua, 0, 512, 'UTF-8');
     }
 

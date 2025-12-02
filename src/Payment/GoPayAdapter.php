@@ -64,7 +64,7 @@ final class GoPayAdapter
     private function fetchOrderItemsForPayload(int $orderId): array
     {
         try {
-            // join na books pokud existuje pro hezčí název, fallback na order_items sloupce
+            // join books when possible for nicer titles; otherwise use order_items columns
             $sql = 'SELECT oi.*, b.title AS book_title
                     FROM order_items oi
                     LEFT JOIN books b ON b.id = oi.book_id
@@ -86,7 +86,7 @@ final class GoPayAdapter
 
             return $out;
         } catch (\Throwable $e) {
-            // non-fatal: loguj a vrať prázdné pole
+            // non-fatal: log and return an empty array
             $this->logSafe('error', 'fetchOrderItemsForPayload failed', ['phase' => 'fetchOrderItemsForPayload', 'order_id' => $orderId, 'exception'=>$e]);
             return [];
         }
@@ -129,8 +129,8 @@ final class GoPayAdapter
                 'return_url' => $this->returnUrl,
                 'notification_url' => $this->notificationUrl,
             ],
-            'order_description' => 'Objednávka ' . ($order['uuid'] ?? $order['id']),
-            // items nastavíme níže
+            'order_description' => 'Order ' . ($order['uuid'] ?? $order['id']),
+            // items set below
         ];
         $payload['items'] = array_map(function($it){
             return [
@@ -148,9 +148,9 @@ final class GoPayAdapter
             $sumItems += $it['amount'] * max(1, (int)($it['count'] ?? 1));
         }
         if ($sumItems !== $payload['amount']) {
-            // buď loguj a throw (STRICT), nebo jen warn
+            // log and throw (STRICT) or just warn
             $this->logSafe('warning', 'Payment amount mismatch between items and total', ['order_id'=>$orderId,'items_sum'=>$sumItems,'amount'=>$payload['amount']]);
-            // volitelně: throw new \RuntimeException('Payment amount mismatch');
+            // optionally: throw new \RuntimeException('Payment amount mismatch');
         }
         // ===== Idempotency reservation (prevents race) =====
         try {
@@ -173,7 +173,7 @@ final class GoPayAdapter
             $this->logSafe('info', 'Idempotency hit during createPaymentFromOrder second-check', ['order_id'=>$orderId]);
             return $existing;
         }
-        // 2) Provisionální payment row (with re-check & FOR UPDATE lock)
+        // 2) Provisional payment row (with re-check & FOR UPDATE lock)
         $provisionPaymentId = null;
         try {
             $this->db->transaction(function (Database $d) use ($orderId, $order, &$provisionPaymentId) {
@@ -229,8 +229,8 @@ final class GoPayAdapter
         $this->db->transaction(function (Database $d) use ($orderId, $gopayResponse, $provisionPaymentId, $idempHash) {
             $gwId = $this->extractGatewayPaymentId($gopayResponse);
 
-            // Do payments.details ukládáme JEN kratkou poznámku (ne celý gateway payload).
-            // Pokud je něco špatně, detail bude obsahovat chybovou poznámku — jinak malý fingerprint/timestamp.
+            // Store ONLY a short note in payments.details (never the entire gateway payload).
+            // On failure include the error note; otherwise a small fingerprint/timestamp.
             $note = [
                 'note' => 'gopay_payload_cached',
                 'cached_at' => (int)time(),
@@ -293,7 +293,7 @@ final class GoPayAdapter
         $paymentId = $this->findPaymentIdByGatewayId($gwId);
         $redirectUrl = $this->extractRedirectUrl($gopayResponse);
 
-        // fallback: pokud nelze najít row podle gateway id, vrať provision id (alespoň něco pro reconciliaci)
+        // fallback: if we cannot find a row via gateway id, return the provision id (still useful for reconciliation)
         if ($paymentId === null && isset($provisionPaymentId) && $provisionPaymentId !== null) {
             $this->logSafe('warning', 'Could not find payment by gateway id, returning provisional payment id as fallback', ['gw_id'=>$gwId,'provision_id'=>$provisionPaymentId]);
             $paymentId = $provisionPaymentId;
@@ -396,7 +396,7 @@ final class GoPayAdapter
         $jsonForHash = $this->jsonEncodeSafe($status) ?? '';
         $payloadHash = hash('sha256', $jsonForHash);
 
-        // dedupe check — kontrola existujícího webhooku v payment_webhooks
+        // dedupe check — verify if the webhook already exists in payment_webhooks
         try {
             $exists = $this->db->fetch(
                 'SELECT id FROM payment_webhooks WHERE payload_hash = :h LIMIT 1',
@@ -435,7 +435,7 @@ final class GoPayAdapter
 
         $this->logSafe('info', 'Processing GoPay notify for gateway id: ' . $gwId . ' with new payload hash: ' . $payloadHash);
 
-        // mapovaní statusu (tvoje handling branche nechávam na tebe)
+        // status mapping (leave downstream handling to caller)
         if ($statusEnum === null) {
             $this->logSafe('warning', 'Unhandled GoPay status', ['gw_state' => $gwState]);
         } else {
@@ -495,7 +495,7 @@ final class GoPayAdapter
             ];
         }
 
-        // zkus najít top-level state, nebo ve 'status'
+        // try to find the top-level state, otherwise check the 'status' field
         $state = $cached['state'] ?? ($cached['status']['state'] ?? 'CREATED');
 
         $out = $cached; // vezmi celou strukturu
@@ -634,11 +634,11 @@ final class GoPayAdapter
     }
 
     /**
-     * Safe cache key builder (PSR-16 safe: žádné ":" atd.)
+     * Safe cache key builder (PSR-16 friendly; avoids ":" etc.)
      */
     private function makeCacheKey(string $idempHash): string
     {
-        // používáme md5 pro krátký, PSR-16-safe prefix bez zakázaných znaků
+        // use md5 for a short PSR-16-safe prefix without forbidden characters
         return 'gopay_idemp_' . md5(($this->notificationUrl ?? '') . '|' . ($this->returnUrl ?? '') . '|' . $idempHash);
     }
 
@@ -801,7 +801,7 @@ final class GoPayAdapter
             return (string)$gopayResponse;
         }
 
-        // bezpečné čtení různých cest bez risku notice
+        // safely read various paths without risk of notices
         $candidates = [];
 
         if (isset($arr['id']) && $arr['id'] !== '') $candidates[] = $arr['id'];
@@ -836,7 +836,7 @@ final class GoPayAdapter
             return null;
         }
 
-        // bezpečné kontroly (bez notice)
+        // safe checks (no notices)
         if (isset($arr[0]) && is_array($arr[0]) && !empty($arr[0]['gw_url'])) {
             return (string)$arr[0]['gw_url'];
         }

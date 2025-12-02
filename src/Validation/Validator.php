@@ -8,10 +8,10 @@ use DateTime;
 /**
  * Class Validator
  *
- * Centralizovaný statický helper pro validaci vstupních dat.
- * - PSR-12 kompatibilní
- * - Nepoužívá globální funkce mimo bezpečné PHP filtry
- * - Žádné side effects (čistě deterministické)
+ * Centralized static helper for validating input data.
+ * - PSR-12 compliant
+ * - Avoids global functions except safe PHP filters
+ * - No side effects (purely deterministic)
  */
 final class Validator
 {
@@ -92,10 +92,10 @@ final class Validator
     }
 
     /**
-     * Validuje JSON payload pro notifikační systém.
+     * Validates JSON payload for the notification system.
      *
-     * @param string $json     JSON obsahující notifikaci
-     * @param string $template Očekávaný template (např. verify_email)
+     * @param string $json     JSON body containing the notification
+     * @param string $template Expected template (e.g., verify_email)
      */
     public static function notificationPayload(string $json, string $template): bool
     {
