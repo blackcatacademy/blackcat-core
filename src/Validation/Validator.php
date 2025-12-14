@@ -66,8 +66,9 @@ final class Validator
 
     public static function passwordStrong(string $pw, int $minLength = 12): bool
     {
+        $len = function_exists('mb_strlen') ? mb_strlen($pw) : strlen($pw);
         return (
-            mb_strlen($pw) >= $minLength &&
+            $len >= $minLength &&
             preg_match('/[a-z]/', $pw) &&
             preg_match('/[A-Z]/', $pw) &&
             preg_match('/[0-9]/', $pw) &&
@@ -78,7 +79,13 @@ final class Validator
     public static function stringSanitized(string $s, int $maxLen = 0): string
     {
         $out = preg_replace('/[\x00-\x1F\x7F]/u', '', trim($s));
-        return $maxLen > 0 ? mb_substr($out, 0, $maxLen) : $out;
+        if ($maxLen <= 0) {
+            return $out;
+        }
+        if (function_exists('mb_substr')) {
+            return mb_substr($out, 0, $maxLen);
+        }
+        return substr($out, 0, $maxLen);
     }
 
     public static function fileSize(int $sizeBytes, int $maxBytes): bool

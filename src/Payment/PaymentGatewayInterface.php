@@ -4,6 +4,17 @@ declare(strict_types=1);
 
 namespace BlackCat\Core\Payment;
 
+/**
+ * Compatibility facade for the legacy `BlackCat\Core\Payment\PaymentGatewayInterface` name.
+ *
+ * If `blackcatacademy/blackcat-gopay` is installed, this file aliases:
+ * `BlackCat\GoPay\PaymentGatewayInterface`.
+ */
+if (interface_exists(\BlackCat\GoPay\PaymentGatewayInterface::class)) {
+    class_alias(\BlackCat\GoPay\PaymentGatewayInterface::class, __NAMESPACE__ . '\\PaymentGatewayInterface');
+    return;
+}
+
 interface PaymentGatewayInterface
 {
     /**

@@ -96,7 +96,13 @@ final class KeyManager
         return SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_KEYBYTES;
     }
 
-    public static function rotateKey(string $basename, string $keysDir, ?\PDO $pdo = null, int $keepVersions = 5, bool $archiveOld = false, ?string $archiveDir = null): array
+    /**
+     * Rotate a key file and return metadata.
+     *
+     * Note: the optional $db parameter (historically a PDO) is ignored.
+     * DB logging and key-rotation job orchestration belong to `blackcat-database` and higher-level ops modules.
+     */
+    public static function rotateKey(string $basename, string $keysDir, mixed $db = null, int $keepVersions = 5, bool $archiveOld = false, ?string $archiveDir = null): array
     {
         self::requireSodium();
         $wantedLen = self::keyByteLen();
@@ -133,7 +139,7 @@ final class KeyManager
                 $next = $max + 1;
             }
 
-            $target = $dir . '/' . $basename . '_v' . $next . '.bin';
+            $target = $dir . '/' . $basename . '_v' . $next . '.key';
             $raw = random_bytes($wantedLen);
 
             // atomic write (uses existing method)
@@ -142,18 +148,8 @@ final class KeyManager
             // compute fingerprint for audit (sha256 hex)
             $fingerprint = hash('sha256', $raw);
 
-            // Log to DB key_events / key_rotation_jobs if \PDO provided (best-effort)
-            if ($pdo !== null) {
-                try {
-                    // insert key_events
-                    $stmt = $pdo->prepare("INSERT INTO key_events (key_id, basename, event_type, actor_id, note, meta, source) VALUES (NULL, :basename, 'rotated', NULL, :note, :meta, 'rotation')");
-                    $meta = json_encode(['filename' => basename($target), 'fingerprint' => $fingerprint]);
-                    $stmt->execute([':basename' => $basename, ':note' => 'Automatic rotation', ':meta' => $meta]);
-                } catch (\PDOException $e) {
-                    // log but continue — rotation already created file
-                    self::logError('[KeyManager::rotateKey] DB log failed', ['exception' => $e]);
-                }
-            }
+            // NOTE: DB logging removed (crypto engine must not use raw PDO/SQL). Keep $db only for BC.
+            unset($db);
 
             // optionally cleanup/archive old versions
             try {
@@ -218,7 +214,7 @@ final class KeyManager
 
     /**
      * List available versioned key files for a basename (e.g. password_pepper or app_salt).
-     * Returns array of versions => fullpath, e.g. ['v1'=>'/keys/app_salt_v1.bin','v2'=>...]
+     * Returns array of versions => fullpath, e.g. ['v1'=>'/keys/app_salt_v1.key','v2'=>...]
      *
      * @param string $keysDir
      * @param string $basename
@@ -226,11 +222,11 @@ final class KeyManager
      */
     public static function listKeyVersions(string $keysDir, string $basename): array
     {
-        $pattern = rtrim($keysDir, '/\\') . '/' . $basename . '_v*.bin';
+        $pattern = rtrim($keysDir, '/\\') . '/' . $basename . '_v*.key';
         $out = [];
         foreach (glob($pattern) as $p) {
             if (!is_file($p)) continue;
-            if (preg_match('/_v([0-9]+)\.bin$/', $p, $m)) {
+            if (preg_match('/_v([0-9]+)\.key$/', $p, $m)) {
                 $ver = 'v' . (string)(int)$m[1];
                 $out[$ver] = $p;
             }
@@ -245,7 +241,7 @@ final class KeyManager
     }
 
     /**
-     * Find latest key file or fallback exact basename.bin
+     * Find latest key file (must be versioned).
      *
      * @return array|null ['path'=>'/full/path','version'=>'v2'] or null
      */
@@ -263,11 +259,6 @@ final class KeyManager
             if ($sel !== null) {
                 return ['path' => $list[$sel], 'version' => $sel];
             }
-        }
-
-        $exact = rtrim($keysDir, '/\\') . '/' . $basename . '.bin';
-        if (is_file($exact)) {
-            return ['path' => $exact, 'version' => 'v1'];
         }
 
         return null;
@@ -363,7 +354,7 @@ final class KeyManager
     {
         $version = ltrim($version, 'v'); // accept 'v2' or '2'
         $verStr = 'v' . (string)(int)$version;
-        $path = rtrim($keysDir, '/\\') . '/' . $basename . '_' . $verStr . '.bin';
+        $path = rtrim($keysDir, '/\\') . '/' . $basename . '_' . $verStr . '.key';
         if (!is_file($path)) {
             throw new KeyManagerException('Requested key version not found: ' . $path);
         }

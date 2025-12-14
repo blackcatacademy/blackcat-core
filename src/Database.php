@@ -8,7 +8,7 @@ use BlackCat\Database\Support\Observability;
 use Psr\Log\LoggerInterface;
 
 class DatabaseException extends \RuntimeException {}
-/** Specifičtější výjimky pro jednodušší retry/alerting */
+/** More specific exceptions for simpler retry/alerting. */
 class DeadlockException extends DatabaseException {}
 class LockTimeoutException extends DatabaseException {}
 class SerializationFailureException extends DatabaseException {}
@@ -38,7 +38,7 @@ final class Database
     private int $stickAfterWriteMs = 500;
     private float $lastWriteAtMs = 0.0;
 
-    // replica cooldown při selhání + reconnect
+    // Replica cooldown on failure + reconnect
     private ?int $replicaDownUntil = null; // unix ts
     private int $replicaCooldownSec = 10;
 
@@ -49,29 +49,29 @@ final class Database
     private bool $debug = false;
     private int $slowQueryThresholdMs = 500;
 
-    // Auto-EXPLAIN sampling pro pomalé SELECTy
+    // Auto-EXPLAIN sampling for slow SELECTs
     private bool $autoExplain = false;
     private bool $autoExplainAnalyze = false;
-    // Guard: UPDATE/DELETE bez WHERE (MySQL alternativně toleruje LIMIT)
+    // Guard: UPDATE/DELETE without WHERE (MySQL may alternatively allow LIMIT)
     private bool $dangerousSqlGuard = false;
-    // Guard: placeholder mismatch (jen warn)
+    // Guard: placeholder mismatch (warn only)
     private bool $placeholderGuard = false;
-    // Observers + ring-buffer posledních dotazů
+    // Observers + ring buffer of recent queries
     /** @var array<\BlackCat\Database\Support\QueryObserver> */
     private array $observers = [];
     private int $lastQueriesMax = 200;
     /** @var array<int,array{ts:float,ms?:float,sql:string,route:string,err?:string}> */
     private array $lastQueries = [];
 
-    // Health-gate repliky (lag)
+    // Replica health-gate (lag)
     /** @var callable|null fn(PDO $replica): ?int lagMs */
     private $replicaHealthChecker = null;
-    private ?int $replicaMaxLagMs = null;           // pokud nastaveno a lag > max => primár
+    private ?int $replicaMaxLagMs = null;           // if set and lag > max -> route to primary
     private int $replicaHealthCheckSec = 2;         // throttle
     private ?int $replicaHealthCheckedAt = null;
     private ?int $replicaLagMs = null;
 
-    // Jednoduchý N+1 detektor
+    // Simple N+1 detector
     private bool $n1Enabled = false;
     private int $n1Threshold = 5;
     private int $n1MaxSamples = 3;
@@ -82,9 +82,7 @@ final class Database
     /** @var array<string,array<int,string>> fingerprint => sample origins */
     private array $n1Samples = [];
 
-    /**
-     * Soukromý konstruktor — singleton
-     */
+    /** Private constructor — singleton. */
     private function __construct(array $config, \PDO $pdo, ?LoggerInterface $logger = null, ?\PDO $pdoRead = null)
     {
         $this->config = $config;
@@ -113,9 +111,9 @@ final class Database
     }
 
     /**
-     * Inicializace (volej z bootstrapu) - eager connect
+     * Initialization (call from bootstrap) - eager connect.
      *
-     * Konfigurace: [
+     * Configuration: [
      *   'dsn' => 'mysql:host=...;dbname=...;charset=utf8mb4',
      *   'user' => 'dbuser',
      *   'pass' => 'secret',
@@ -129,13 +127,13 @@ final class Database
      *       'options' => [], 'init_commands' => []
      *   ],
      *   'replicaStickMs' => 500,
-     *   // Volitelné
+     *   // Optional:
      *   'sqlMode' => 'STRICT_TRANS_TABLES,...',   // MySQL/MariaDB
      *   'idleTxTimeoutMs' => 0,                   // PG: idle_in_transaction_session_timeout
      *   'statementTimeoutMs' => 5000,
      *   'lockWaitTimeoutSec' => 2,
-     *   // Health-gate repliky:
-     *   'replicaMaxLagMs' => 250,                 // např. 250 ms
+     *   // Replica health-gate:
+     *   'replicaMaxLagMs' => 250,                 // e.g. 250 ms
      *   'replicaHealthCheckSec' => 2
      * ]
      */
@@ -154,7 +152,7 @@ final class Database
         $requireSqlComment = (bool)($config['requireSqlComment'] ?? (getenv('BC_REQUIRE_SQL_COMMENT') === '1'));
         $replicaCfg = $config['replica'] ?? null;
         $stickMs = (int)($config['replicaStickMs'] ?? 500);
-        // Health-gate repliky (volitelné)
+        // Replica health-gate (optional)
         $replicaMaxLagMs = isset($config['replicaMaxLagMs']) ? (int)$config['replicaMaxLagMs'] : null;
         $replicaHealthCheckSec = isset($config['replicaHealthCheckSec']) ? (int)$config['replicaHealthCheckSec'] : 2;
 
@@ -192,6 +190,57 @@ final class Database
         self::$instance = $inst;
     }
 
+    /**
+     * Initialize Database singleton using an already-created PDO instance.
+     *
+     * Intended for legacy bridges where the application already owns PDO (e.g. old code paths
+     * calling APIs that now expect {@see \BlackCat\Core\Database}).
+     *
+     * If Database is already initialized, this is a no-op.
+     */
+    public static function initFromPdo(\PDO $pdo, array $config = [], ?LoggerInterface $logger = null, ?\PDO $pdoRead = null): void
+    {
+        if (self::$instance !== null) {
+            return;
+        }
+
+        // Enforce the same safety defaults as createPdo() (best-effort; some drivers may reject).
+        try { $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION); } catch (\Throwable) {}
+        try { $pdo->setAttribute(\PDO::ATTR_EMULATE_PREPARES, false); } catch (\Throwable) {}
+        try { $pdo->setAttribute(\PDO::ATTR_DEFAULT_FETCH_MODE, \PDO::FETCH_ASSOC); } catch (\Throwable) {}
+        try { $pdo->setAttribute(\PDO::ATTR_STRINGIFY_FETCHES, false); } catch (\Throwable) {}
+
+        if ($pdoRead instanceof \PDO) {
+            try { $pdoRead->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION); } catch (\Throwable) {}
+            try { $pdoRead->setAttribute(\PDO::ATTR_EMULATE_PREPARES, false); } catch (\Throwable) {}
+            try { $pdoRead->setAttribute(\PDO::ATTR_DEFAULT_FETCH_MODE, \PDO::FETCH_ASSOC); } catch (\Throwable) {}
+            try { $pdoRead->setAttribute(\PDO::ATTR_STRINGIFY_FETCHES, false); } catch (\Throwable) {}
+        }
+
+        $inst = new self($config, $pdo, $logger, $pdoRead);
+
+        $dsnId = 'pdo';
+        try {
+            $drv = (string)$pdo->getAttribute(\PDO::ATTR_DRIVER_NAME);
+            if ($drv !== '') {
+                $dsnId = 'pdo:' . $drv;
+            }
+        } catch (\Throwable) {
+        }
+        $inst->dsnId = $dsnId;
+
+        $inst->stickAfterWriteMs = max(0, (int)($config['replicaStickMs'] ?? 500));
+        $inst->replicaMaxLagMs = isset($config['replicaMaxLagMs']) ? (int)$config['replicaMaxLagMs'] : null;
+        $inst->replicaHealthCheckSec = max(1, (int)($config['replicaHealthCheckSec'] ?? 2));
+
+        $requireSqlComment = (bool)($config['requireSqlComment'] ?? (getenv('BC_REQUIRE_SQL_COMMENT') === '1'));
+        if ($requireSqlComment) {
+            $inst->requireSqlComment(true);
+        }
+
+        self::$instance = $inst;
+    }
+
     private static function createPdo(
         string $dsn, ?string $user, ?string $pass, array $givenOptions, array $initCommands,
         ?LoggerInterface $logger, string $appName, array $config
@@ -219,11 +268,11 @@ final class Database
             if ($driver === 'pgsql') {
                 $pdo->exec("SET TIME ZONE 'UTC'");
                 if ($appName !== '') {
-                    $pdo->exec("SET application_name = " . self::q($pdo, $appName));
+                $pdo->exec("SET application_name = " . self::q($pdo, $appName));
                 }
                 $stmMs = (int)($config['statementTimeoutMs'] ?? 5000);
                 if ($stmMs > 0) { $pdo->exec("SET statement_timeout = " . (int)$stmMs); }
-                // volitelný idle_in_transaction_session_timeout
+                // Optional: idle_in_transaction_session_timeout
                 $idleTxMs = (int)($config['idleTxTimeoutMs'] ?? 0);
                 if ($idleTxMs > 0) {
                     $pdo->exec("SET idle_in_transaction_session_timeout = " . (int)$idleTxMs);
@@ -238,7 +287,7 @@ final class Database
                     try { $pdo->exec("SET SESSION max_execution_time = " . $stmMs); }
                     catch (\Throwable $_) { $pdo->exec("SET SESSION max_statement_time = " . max(1, (int)ceil($stmMs / 1000.0))); }
                 }
-                // volitelně aplikuj sql_mode pouze pokud je explicitně zadán
+                // Only apply sql_mode if explicitly configured.
                 if (!empty($config['sqlMode']) && is_string($config['sqlMode'])) {
                     $pdo->exec("SET SESSION sql_mode = " . self::q($pdo, $config['sqlMode']));
                 }
@@ -299,7 +348,7 @@ final class Database
             return $this->getPdo();
         }
 
-        // replica v cooldownu?
+        // Replica in cooldown?
         if ($this->replicaDownUntil && time() < $this->replicaDownUntil) {
             return $this->getPdo();
         }
@@ -319,7 +368,7 @@ final class Database
         if (!preg_match('~^([A-Z]+)~i', $s, $m)) return $this->getPdo();
         $verb = strtoupper($m[1]);
 
-        // „WITH“ může být SELECT nebo DML; pro bezpečí na primáru (pokud nejde jasně o SELECT bez locků)
+        // "WITH" can be SELECT or DML; route to primary unless it is clearly a simple SELECT (no locks).
         if ($verb === 'WITH') {
             if ($this->isSimpleSelectForReplica($s) && $this->isReplicaHealthy()) {
                 return $this->pdoRead ?? $this->getPdo();
@@ -327,7 +376,7 @@ final class Database
             return $this->getPdo();
         }
 
-        // SELECT pro repliku jen pokud tam nejsou locky nebo SELECT ... INTO
+        // Route SELECT to replica only if there are no locks and no SELECT ... INTO.
         if ($verb === 'SELECT') {
             if ($this->isSelectNeedingPrimary($s)) {
                 return $this->getPdo();
@@ -336,12 +385,12 @@ final class Database
             return $this->pdoRead ?? $this->getPdo();
         }
 
-        // SHOW je read-only -> replika OK
+        // SHOW is read-only -> replica OK.
         if ($verb === 'SHOW') {
             return $this->pdoRead ?? $this->getPdo();
         }
 
-        // EXPLAIN – defaultně replika, ale na PG s ANALYZE + DML raději primár (EXPLAIN ANALYZE skutečně provede DML)
+        // EXPLAIN: default to replica, but for PG EXPLAIN ANALYZE with DML prefer primary (it actually executes the DML).
         if ($verb === 'EXPLAIN') {
             $uu = strtoupper($s);
             $hasAnalyze = (bool)preg_match('~\bANALYZE\b~', $uu);
@@ -357,17 +406,17 @@ final class Database
         return $this->getPdo();
     }
 
-    // SELECT vyžadující primáru (FOR UPDATE/SHARE, LOCK IN SHARE MODE, SELECT INTO)
+    // SELECT requiring primary (FOR UPDATE/SHARE, LOCK IN SHARE MODE, SELECT INTO).
     private function isSelectNeedingPrimary(string $sql): bool
     {
         $u = strtoupper($sql);
         if (preg_match('~\bFOR\s+UPDATE\b~', $u)) return true;
         if (preg_match('~\bFOR\s+SHARE\b~', $u)) return true; // PG
         if (preg_match('~\bLOCK\s+IN\s+SHARE\s+MODE\b~', $u)) return true; // MySQL
-        // SELECT ... INTO – rozlišení podle dialektu:
-        //  - PG: SELECT INTO vytváří tabulku => primár
-        //  - MySQL/MariaDB: INTO OUTFILE/DUMPFILE má side-effects => primár
-        //    ale "INTO @user_var" je read-only => replika OK
+        // SELECT ... INTO – dialect-specific behavior:
+        //  - PG: SELECT INTO creates a table -> primary
+        //  - MySQL/MariaDB: INTO OUTFILE/DUMPFILE has side effects -> primary
+        //    but "INTO @user_var" is read-only -> replica OK
         if ($this->isPg()) {
             if (preg_match('~\bSELECT\b.*\bINTO\b~s', $u)) return true;
         } else { // MySQL/MariaDB
@@ -377,7 +426,7 @@ final class Database
         return false;
     }
 
-    // jednoduchý heuristický test pro „WITH ... SELECT“ bez locků (jinak -> primár)
+    // Simple heuristic test for "WITH ... SELECT" without locks (otherwise -> primary).
     private function isSimpleSelectForReplica(string $sql): bool
     {
         $u = strtoupper($sql);
@@ -385,9 +434,7 @@ final class Database
         return !$this->isSelectNeedingPrimary($u);
     }
 
-    /**
-     * Vrátí singleton instanci Database.
-     */
+    /** Returns the Database singleton instance. */
     public static function getInstance(): self
     {
         if (self::$instance === null) {
@@ -436,19 +483,19 @@ final class Database
     }
 
     public function enableDebug(bool $on = true): void { $this->debug = $on; }
-    /** Zapne blokaci UPDATE/DELETE bez WHERE (MySQL alternativně toleruje LIMIT). */
+    /** Enable blocking UPDATE/DELETE without WHERE (MySQL may alternatively allow LIMIT). */
     public function enableDangerousSqlGuard(bool $on = true): void { $this->dangerousSqlGuard = $on; }
-    /** Zapne EXPLAIN sampling pro pomalé SELECTy (threshold viz setSlowQueryThresholdMs()). */
+    /** Enable EXPLAIN sampling for slow SELECTs (threshold via setSlowQueryThresholdMs()). */
     public function enableAutoExplain(bool $on = true, bool $analyze = false): void { $this->autoExplain = $on; $this->autoExplainAnalyze = $analyze; }
-    /** Zapne kontrolu nesouladu placeholderů a parametrů (log-warning). */
+    /** Enable placeholder/parameter mismatch guard (warns via logger). */
     public function enablePlaceholderGuard(bool $on = true): void { $this->placeholderGuard = $on; }
-    /** Přidá pozorovatele (např. Prometheus/StatsD). */
+    /** Adds a query observer (e.g. Prometheus/StatsD). */
     public function addObserver(\BlackCat\Database\Support\QueryObserver $obs): void { $this->observers[] = $obs; }
-    /** Maximální velikost ring-bufferu posledních dotazů. */
+    /** Maximum size of the recent-queries ring buffer. */
     public function setLastQueriesMax(int $n): void { $this->lastQueriesMax = max(10, $n); }
-    /** Vrátí poslední dotazy (nejnovější poslední). */
+    /** Returns recent queries (newest last). */
     public function getLastQueries(): array { return $this->lastQueries; }
-    /** Zapnout jednoduchou N+1 detekci. */
+    /** Enable the simple N+1 detector. */
     public function enableNPlusOneDetector(bool $on = true, int $threshold = 5, int $maxSamples = 3): void {
         $this->n1Enabled = $on; $this->n1Threshold = max(2, $threshold); $this->n1MaxSamples = max(1, $maxSamples);
     }
@@ -744,7 +791,7 @@ final class Database
         $code     = (int)($e->errorInfo[1] ?? 0);
         if (in_array($sqlstate, ['40P01','40001','55P03'], true)) return true; // PG
         if ($code === 1213 || $code === 1205 || $sqlstate === '40001') return true; // MySQL/MariaDB
-        // přidej „communication errors“ jako transient (heuristicky)
+        // Heuristic: treat common "communication errors" as transient.
         $msg = strtolower($e->getMessage() ?? '');
         if (str_contains($msg, 'server has gone away') || str_contains($msg, 'lost connection') || str_contains($msg, 'closed the connection unexpectedly')) {
             return true;
@@ -761,7 +808,7 @@ final class Database
             finally { $this->execute('SELECT RELEASE_LOCK(:n)', [':n'=>$n]); }
         }
         if ($this->isPg()) {
-            // Použij 2× int32 API – funguje napříč verzemi PG
+            // Use the 2× int32 API – works across PG versions.
             [$a,$b] = $this->advisoryHashParts($name);
             $ok = (bool)$this->fetchValue('SELECT pg_try_advisory_lock(:a, :b)', [':a'=>$a, ':b'=>$b], 0);
             if (!$ok) throw new DatabaseException("pg_try_advisory_lock busy: $name");
@@ -845,9 +892,9 @@ final class Database
     }
 
     /**
-     * Varianta, která vynutí správné použití izolace na MySQL:
-     * - pokud už běží transakce, vyhodí výjimku (zamezí tichému no-op).
-     * - jinak použije standardní withIsolationLevel().
+     * Variant that enforces correct isolation usage on MySQL:
+     * - if a transaction is already active, throws (prevents a silent no-op).
+     * - otherwise uses the standard withIsolationLevel().
      */
     public function withIsolationLevelStrict(string $level, callable $fn): mixed
     {
@@ -960,7 +1007,7 @@ final class Database
             $condSql = ' WHERE 1=1';
         }
 
-        // FIX: odstraněn chybný „+“ konkatenátor
+        // FIX: removed an incorrect "+" concatenator.
 
         if ($usePos) {
             $sql = $sqlBase . $condSql . " ORDER BY $idExpr $dir LIMIT ?";
@@ -1040,7 +1087,7 @@ final class Database
         }
     }
 
-    // --- EXPLAIN jako JSON (pokud možno) ---
+    // --- EXPLAIN as JSON (when possible) ---
     public function explainJson(string $sql, array $params = [], bool $analyze = false): array {
         if ($this->isPg()) {
             $opts = $analyze ? '(ANALYZE, BUFFERS, FORMAT JSON)' : '(FORMAT JSON)';
@@ -1063,7 +1110,7 @@ final class Database
         return [['plan'=>$this->fetchAll('EXPLAIN '.$sql, $params)]];
     }
 
-    // --- Bezpečnější fetchPairs s politikou duplicit ---
+    // --- Safer fetchPairs with duplicate policy ---
     /**
      * @param 'first'|'last'|'error' $onDuplicate
      */
@@ -1089,7 +1136,7 @@ final class Database
 
     // --- Bulk INSERT & UPSERT helpers ---
     /**
-     * Hromadný INSERT s chunkingem (vrací součet affected rows).
+     * Bulk INSERT with chunking (returns sum of affected rows).
      * @param list<array<string,mixed>> $rows
      */
     public function insertMany(string $table, array $rows, int $chunk = 500): int {
@@ -1097,7 +1144,7 @@ final class Database
         $cols = array_keys($rows[0]);
         foreach ($rows as $i=>$r) {
             if (array_keys($r) !== $cols) {
-                throw new DatabaseException("insertMany: row {$i} má jiné sloupce než první řádek");
+                throw new DatabaseException("insertMany: row {$i} has different columns than the first row");
             }
         }
         $colId = implode(',', array_map(fn($c)=>$this->quoteIdent($c), $cols));
@@ -1128,7 +1175,7 @@ final class Database
         $cols = array_keys($batch[0]);
         foreach ($batch as $i=>$r) {
             if (array_keys($r) !== $cols) {
-                throw new DatabaseException("upsert: row {$i} má jiné sloupce než první řádek");
+                throw new DatabaseException("upsert: row {$i} has different columns than the first row");
             }
         }
         if ($updateCols === null) {
@@ -1150,13 +1197,13 @@ final class Database
                      . " ON CONFLICT ({$ukId}) DO UPDATE SET {$set}";
             } else { // MySQL/MariaDB
                 if ($this->mysqlValuesDeprecated()) {
-                    // MySQL 8.0.19+: nepoužívat deprecovaný VALUES(), využij řádkový alias
+                    // MySQL 8.0.19+: avoid deprecated VALUES(); use a row alias.
                     $alias = '__ins';
                     $set = implode(',', array_map(fn($c)=> $this->quoteIdent($c).'='.$alias.'.'.$this->quoteIdent($c), $updateCols));
                     $sql = 'INSERT INTO '.$this->quoteIdent($table)." ({$colId}) VALUES ".implode(',', $values)
                          . " AS {$alias} ON DUPLICATE KEY UPDATE {$set}";
                 } else {
-                    // MariaDB (a starší MySQL): VALUES() je OK
+                    // MariaDB (and older MySQL): VALUES() is OK.
                     $set = implode(',', array_map(fn($c)=> $this->quoteIdent($c).'=VALUES('.$this->quoteIdent($c).')', $updateCols));
                     $sql = 'INSERT INTO '.$this->quoteIdent($table)." ({$colId}) VALUES ".implode(',', $values)
                          . " ON DUPLICATE KEY UPDATE {$set}";
@@ -1170,11 +1217,11 @@ final class Database
 
     private function sanitizeSqlPreview(string $sql): string
     {
-        // anonymizuj obsah všech string literálů (i krátkých)
+        // Anonymize the content of all string literals (even short ones).
         $s = preg_replace("/'(?:''|\\\\'|[^'])*'/", "'…'", $sql);
         $s = preg_replace('/\s+/', ' ', trim((string)$s));
         $max = 300;
-        if (function_exists('mb_strlen')) {
+        if (function_exists('mb_strlen') && function_exists('mb_substr')) {
             return mb_strlen($s) > $max ? mb_substr($s, 0, $max) . '...' : $s;
         }
         return strlen($s) > $max ? substr($s, 0, $max) . '...' : $s;
@@ -1189,12 +1236,12 @@ final class Database
         return in_array($verb, ['INSERT','UPDATE','DELETE','REPLACE','MERGE','TRUNCATE','ALTER','CREATE','DROP','RENAME','GRANT','REVOKE','VACUUM'], true);
     }
 
-    /** GET_LOCK name normalizace (MySQL/MariaDB limit 64 znaků). */
+    /** GET_LOCK name normalization (MySQL/MariaDB limit is 64 chars). */
     private function normalizeLockName(string $name): string {
         if (strlen($name) <= 64) return $name;
         return 'bc:' . substr(sha1($name), 0, 61); // 'bc:' (3) + 61 = 64
     }
-    /** Dvou-dílný hash pro PG advisory lock API (int4,int4). */
+    /** Two-part hash for PG advisory lock API (int4,int4). */
     private function advisoryHashParts(string $s): array {
         $a = crc32('pg1:'.$s);
         $b = crc32('pg2:'.$s);
@@ -1202,7 +1249,7 @@ final class Database
         if ($b & 0x80000000) { $b -= 0x100000000; }
         return [$a, $b];
     }
-    /** MySQL 8.0.19+ deprecates VALUES() v ON DUPLICATE KEY UPDATE. */
+    /** MySQL 8.0.19+ deprecates VALUES() in ON DUPLICATE KEY UPDATE. */
     private function mysqlValuesDeprecated(): bool {
         if (!$this->isMysql() || $this->isMariaDb()) return false;
         $v = $this->serverVersion() ?? '0';
@@ -1210,7 +1257,7 @@ final class Database
         return version_compare($v, '8.0.19', '>=');
     }
 
-    /** true pokud jde o UPDATE/DELETE bez WHERE (případně LIMIT u MySQL). */
+    /** True if this is UPDATE/DELETE without WHERE (and optionally LIMIT on MySQL). */
     private function isDangerousWriteWithoutWhere(string $sql): bool {
         $u = strtoupper($sql);
         if (!preg_match('~^\s*(UPDATE|DELETE)\b~', $u)) return false;
@@ -1218,7 +1265,7 @@ final class Database
         if ($this->isMysql() && preg_match('~\bLIMIT\s+\d+\b~', $u)) return false;
         return true;
     }
-    /** Placeholder guard – zaloguje mismatch :named vs params. */
+    /** Placeholder guard – logs mismatch between :named placeholders and provided params. */
     private function guardPlaceholders(string $sql, array $params): void {
         if ($params === [] || $this->usesPositionalOnly($sql)) return;
         preg_match_all('/:([A-Za-z_][A-Za-z0-9_]*)/', $sql, $m);
@@ -1230,7 +1277,7 @@ final class Database
             $this->logger?->warning('Placeholder mismatch', ['missing'=>$missing,'extra'=>$extra,'sql'=>$this->sanitizeSqlPreview($sql)]);
         }
     }
-    /** Ring-buffer pro poslední dotazy + observers */
+    /** Ring buffer for recent queries + observers. */
     private function pushLastQuery(string $sql, string $route, ?float $ms, ?string $err): void {
         $rec = ['ts'=>microtime(true), 'sql'=>$this->sanitizeSqlPreview($sql), 'route'=>$route];
         if ($ms !== null) { $rec['ms'] = round($ms, 2); }
@@ -1245,7 +1292,7 @@ final class Database
     private function notifyEnd(string $sql, array $params, ?float $ms, ?\Throwable $err, string $route): void {
         foreach ($this->observers as $o) { try { $o->onQueryEnd($sql, $params, $ms, $err, $route); } catch (\Throwable $_) {} }
     }
-    // N+1 detektor
+    // N+1 detector
     private function n1Record(string $sql): void
     {
         if (!$this->n1Enabled) return;
@@ -1284,7 +1331,7 @@ final class Database
         return hash('sha256', strtoupper($s));
     }
 
-    // Mapování PDO chyb na doménové výjimky
+    // Map PDO errors to domain exceptions.
     private function mapPdoToDomainException(\PDOException $e, string $fallbackMsg): DatabaseException {
         $sqlstate = $e->errorInfo[0] ?? (string)$e->getCode();
         $code     = (int)($e->errorInfo[1] ?? 0);
@@ -1305,7 +1352,7 @@ final class Database
         return new DatabaseException($fallbackMsg, 0, $e);
     }
 
-    // Introspekce repliky / stickiness
+    // Replica introspection / stickiness
     public function replicaStatus(): array {
         $cooldownUntil = $this->replicaDownUntil;
         $now = time();
@@ -1351,7 +1398,7 @@ final class Database
 
     public function isMysql(): bool { return $this->driver() === 'mysql'; }
     public function isPg(): bool    { return $this->driver() === 'pgsql'; }
-    // MariaDB detekce přes server version
+    // MariaDB detection via server version.
     public function isMariaDb(): bool {
         if (!$this->isMysql()) return false;
         $ver = $this->serverVersion();
@@ -1380,7 +1427,7 @@ final class Database
         $this->pdo = self::createPdo((string)$dsn, $user, $pass, $givenOptions, $initCommands, $this->logger, $appName, $cfg);
     }
 
-    // reconnect repliky
+    // Replica reconnect
     private function reconnectReplica(): void
     {
         $cfg = $this->config['replica'] ?? null;
@@ -1398,13 +1445,13 @@ final class Database
         );
     }
 
-    // Public knobs pro health-gate a routing
+    // Public knobs for health-gate and routing
     public function setReplicaHealthChecker(callable $fn): void { $this->replicaHealthChecker = $fn; }
     public function setReplicaMaxLagMs(?int $ms): void { $this->replicaMaxLagMs = $ms !== null ? max(0, $ms) : null; }
     public function setReplicaHealthCheckSec(int $sec): void { $this->replicaHealthCheckSec = max(1, $sec); }
     public function withPrimary(callable $fn): mixed { $prev=$this->routeOverride; $this->routeOverride='primary'; try { return $fn($this); } finally { $this->routeOverride=$prev; } }
     public function withReplica(callable $fn): mixed { $prev=$this->routeOverride; $this->routeOverride='replica';  try { return $fn($this); } finally { $this->routeOverride=$prev; } }
-    /** Blokující čekání na „dostiženou“ repliku (lag + stick okno) */
+    /** Blocking wait for a "caught up" replica (lag + stick window). */
     public function waitForReplica(int $timeoutMs = 1500): bool {
         if ($this->pdoRead === null) return true;
         $deadline = microtime(true) + ($timeoutMs / 1000.0);
@@ -1423,7 +1470,7 @@ final class Database
     private function isReplicaHealthy(): bool
     {
         if ($this->pdoRead === null) return false;
-        if ($this->replicaMaxLagMs === null) return true; // gating vypnutý
+        if ($this->replicaMaxLagMs === null) return true; // gating disabled
 
         $now = time();
         if ($this->replicaHealthCheckedAt !== null && ($now - $this->replicaHealthCheckedAt) < $this->replicaHealthCheckSec) {
@@ -1440,7 +1487,7 @@ final class Database
                 $lag = $this->detectReplicaLagMs();
             }
         } catch (\Throwable $_) {
-            $lag = PHP_INT_MAX; // při chybě považuj za ne-healthy
+            $lag = PHP_INT_MAX; // on failure treat as not healthy
         }
 
         $this->replicaLagMs = is_int($lag) ? max(0, $lag) : PHP_INT_MAX;
@@ -1453,7 +1500,7 @@ final class Database
         try {
             $drv = $this->pdoRead?->getAttribute(\PDO::ATTR_DRIVER_NAME);
             if ($drv === 'pgsql') {
-                // NULL na primáru; na replice udává zpoždění v ms
+                // NULL on primary; on replica it reports lag in ms.
                 $sql = "SELECT EXTRACT(EPOCH FROM (NOW() - pg_last_xact_replay_timestamp())) * 1000 AS lag_ms";
                 $row = $this->pdoRead->query($sql)?->fetch(\PDO::FETCH_ASSOC);
                 $v = $row['lag_ms'] ?? null;
@@ -1461,7 +1508,7 @@ final class Database
                 return (int)round((float)$v);
             }
             if ($drv === 'mysql') {
-                // MySQL 8: SHOW REPLICA STATUS; starší / MariaDB: SHOW SLAVE STATUS
+                // MySQL 8: SHOW REPLICA STATUS; older versions / MariaDB: SHOW SLAVE STATUS.
                 $row = null;
                 try {
                     $row = $this->pdoRead->query("SHOW REPLICA STATUS")?->fetch(\PDO::FETCH_ASSOC);
@@ -1492,7 +1539,7 @@ final class Database
         $this->circuitCheck();
         if ($this->requireSqlComment) {
             $trim = ltrim($sql);
-            // Povolit interní kontrolní/konfigurační příkazy bez komentáře
+            // Allow internal check/config commands without a comment.
             $isTrivial = preg_match(
                 '~^\s*(SELECT\s+1|SHOW|PRAGMA|EXPLAIN|BEGIN|COMMIT|ROLLBACK|'
                 .'SET(\s+LOCAL|\s+TRANSACTION|\s+SESSION)?\b|'
@@ -1607,7 +1654,7 @@ final class Database
             \BlackCat\Database\Support\Observability::endSpan($span, ['db.error' => '1']);
             $this->circuitOnFailure();
 
-            // pokud selhala replika a dotaz je read-only, zkus jednou primár + reconnect repliky a cooldown
+            // If replica failed and query is read-only, try primary once + reconnect replica and apply cooldown.
             $isReadOnlyVerb = !$this->isWriteSql($sql);
             if ($usedReplica && $isReadOnlyVerb && $attempt === 0) {
                 try {
@@ -1618,11 +1665,11 @@ final class Database
                     $attempt = 1;
                     goto RETRY;
                 } catch (\Throwable $_) {
-                    // ignoruj a propadni níže
+                    // ignore and fall through
                 }
             }
 
-            // původní reconnect primáru (pokud nejsme v transakci na „použitém“ PDO) + retry
+            // Original primary reconnect (if not in a transaction on the "used" PDO) + retry.
             if (!$pdoUsed->inTransaction() && $this->isServerGone($e) && $attempt <= 1 && !$usedReplica) {
                 $attempt = 2;
                 try { $this->reconnect(); } catch (\Throwable $_) {}
@@ -1667,13 +1714,13 @@ final class Database
                 . ' | SQL=' . $this->sanitizeSqlPreview($sql)
                 . ' @ ' . $origin;
 
-            // Mapuj na specifičtější typ (usnadní retry/alerting)
+            // Map to a more specific type (helps retry/alerting).
             $mapped = $this->mapPdoToDomainException($e, $msg);
             throw $mapped;
         }
     }
 
-    // query() sjednocena s prepareAndRun(), aby neobcházela guardy
+    // query() unified with prepareAndRun(), so it does not bypass guards.
     public function query(string $sql): \PDOStatement
     {
         return $this->prepareAndRun($sql, []);
@@ -1912,8 +1959,8 @@ final class Database
     }
 
     /**
-     * Rychlá existence přes SELECT 1 FROM (<sql>) LIMIT 1 – nečte payload řádků.
-     * Vhodné pro velké tabulky / široké řádky.
+     * Fast existence check via SELECT 1 FROM (<sql>) LIMIT 1 – does not read row payload.
+     * Useful for large tables / wide rows.
      */
     public function existsFast(string $sql, array $params = []): bool
     {

@@ -8,27 +8,27 @@ use Psr\SimpleCache\InvalidArgumentException as PsrInvalidArgument;
 
 /**
  * In-memory PSR-16 cache (per-process).
- * - Volitelná LRU evikce přes maxItems (chrání dlouho běžící workery).
- * - TTL v sekundách nebo DateInterval; TTL<=0 => no-store (záznam se neuloží).
- * - Expirace se provádí „on-read“ a také eager před LRU evikcí (pruneExpired()).
- * - Test helper: setNowSkew(+/- sekundy) pro simulaci času.
+ * - Optional LRU eviction via maxItems (protects long-running workers).
+ * - TTL in seconds or DateInterval; TTL<=0 => no-store (entry is not stored).
+ * - Expiration happens "on-read" and also eagerly before LRU eviction (pruneExpired()).
+ * - Test helper: setNowSkew(+/- seconds) to simulate time.
  *
- * Bezpečnost:
- * - PSR-16 key guard: string, neprázdné, bez {}()/\@:
- * - getMultiple/setMultiple/deleteMultiple validují klíče dle PSR-16.
+ * Security:
+ * - PSR-16 key guard: non-empty string without {}()/\@:
+ * - getMultiple/setMultiple/deleteMultiple validate keys per PSR-16.
  */
 final class MemoryCache implements CacheInterface
 {
     /** @var array<string, array{v:mixed, t:?int, a:int}> key => ['v'=>value, 't'=>expirationUnixTs|null, 'a'=>lastAccessSeq] */
     private array $store = [];
 
-    /** Max. počet položek (LRU); null = neomezené. */
+    /** Max items (LRU); null = unlimited. */
     private ?int $maxItems;
 
-    /** Posun interního „času“ (jen pro testy). */
+    /** Internal time skew (tests only). */
     private int $nowSkew = 0;
 
-    /** Monotónní pořadí přístupů (pro LRU i při stejném timestampu). */
+    /** Monotonic access sequence (for LRU even with identical timestamps). */
     private int $accessSeq = 0;
 
     public function __construct(?int $maxItems = null)
@@ -36,19 +36,19 @@ final class MemoryCache implements CacheInterface
         $this->maxItems = ($maxItems !== null && $maxItems > 0) ? $maxItems : null;
     }
 
-    /** Test helper – posune interní čas o +/- sekundy. */
+    /** Test helper – shifts internal time by +/- seconds. */
     public function setNowSkew(int $seconds): void
     {
         $this->nowSkew = $seconds;
     }
 
-    /** @deprecated Použij setNowSkew(); alias kvůli zpětné kompatibilitě. */
+    /** Alias for older codebases (same as setNowSkew). */
     public function setNowSkewForTests(int $seconds): void
     {
         $this->setNowSkew($seconds);
     }
 
-    /** Počet aktuálně uložených (neexpirovaných) položek – pro testy/diagnostiku. */
+    /** Number of currently stored (non-expired) items – for tests/diagnostics. */
     public function debugCount(): int
     {
         $this->pruneExpired();
@@ -61,8 +61,8 @@ final class MemoryCache implements CacheInterface
     }
 
     /** 
-     * Materializuje seznam klíčů (zachová pořadí) – chrání před dvojnásobnou
-     * iterací nad generátorem v getMultiple()/deleteMultiple().
+     * Materializes the key list (preserves order) — protects against double-iterating
+     * generators in getMultiple()/deleteMultiple().
      * @param iterable<mixed> $keys
      * @return array<int,string>
      * @throws InvalidKeyException
@@ -101,7 +101,7 @@ final class MemoryCache implements CacheInterface
         }
     }
 
-    /** @return ?int unix timestamp, null = bez expirace, 0 = „no-store“ */
+    /** @return ?int unix timestamp, null = no expiration, 0 = "no-store" */
     private function ttlToExpiration(int|\DateInterval|null $ttl): ?int
     {
         if ($ttl === null) return null;
@@ -109,12 +109,12 @@ final class MemoryCache implements CacheInterface
             if ($ttl <= 0) return 0;                // no-store
             return $this->now() + $ttl;
         }
-        // DateInterval: přepočet vůči "teď"
+        // DateInterval: compute relative to "now"
         $base = (new \DateTimeImmutable('@'.$this->now()))->setTimezone(new \DateTimeZone('UTC'));
         return $base->add($ttl)->getTimestamp();
     }
 
-    /** Odstraní expirované položky (eager) – volá se před LRU evikcí a u debugCount(). */
+    /** Remove expired items (eager) — called before LRU eviction and in debugCount(). */
     private function pruneExpired(): void
     {
         $now = $this->now();
@@ -136,7 +136,7 @@ final class MemoryCache implements CacheInterface
                 $lruKey = $k;
             }
         }
-        // fallback na první klíč – ale až po tom, co zkusíme zohlednit „hitnuté“ klíče
+        // Fallback to the first key — but only after trying to account for "hit" keys.
         $victim = $lruKey ?? array_key_first($this->store);
         if ($victim !== null) {
             unset($this->store[$victim]);
@@ -147,7 +147,7 @@ final class MemoryCache implements CacheInterface
     {
         if ($this->maxItems === null) return;
 
-        // Nejdřív smaž zjevně expirované, ať LRU zbytečně nekope platná data.
+        // First remove expired entries so LRU doesn't evict valid data unnecessarily.
         $this->pruneExpired();
 
         while (count($this->store) > $this->maxItems && !empty($this->store)) {
@@ -170,7 +170,7 @@ final class MemoryCache implements CacheInterface
             return $default;
         }
 
-        // Hit – touch last-access (monotónní pořadí)
+        // Hit – touch last-access (monotonic order)
         $this->store[$key]['a'] = ++$this->accessSeq;
         return $e['v'];
     }
@@ -182,7 +182,7 @@ final class MemoryCache implements CacheInterface
         $this->pruneExpired();
         $exp = $this->ttlToExpiration($ttl);
 
-        // TTL<=0 => no-store (PSR povoluje „úspěšné zahození“; vracíme true)
+        // TTL<=0 => no-store (PSR allows a "successful drop"; we return true)
         if ($exp === 0) {
             unset($this->store[$key]);
             return true;
@@ -235,7 +235,7 @@ final class MemoryCache implements CacheInterface
             throw new InvalidKeyException('setMultiple() expects iterable of key => value.');
         }
 
-        // Materializuj jednou (generátory) a validuj všechny klíče před zápisem
+        // Materialize once (generators) and validate all keys before writing.
         $items = is_array($values) ? $values : iterator_to_array($values, true);
         foreach (array_keys($items) as $k) {
             $this->assertValidKey($k);

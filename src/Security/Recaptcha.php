@@ -6,10 +6,10 @@ namespace BlackCat\Core\Security;
 /**
  * Simple reCAPTCHA v2/v3 verifier.
  *
- * Konstruktor:
+ * Constructor:
  *   new Recaptcha(string $secret, float $minScore = 0.4, array $opts = [])
  *
- * Opcional $opts:
+ * Optional $opts:
  *   - timeout: int seconds (default 8)
  *   - endpoint: verification URL (default google)
  *   - logger: null | string (class name) | callable | object
@@ -152,7 +152,13 @@ final class Recaptcha
         }
 
         // native curl fallback
+        if (!function_exists('curl_init')) {
+            throw new \RuntimeException('Recaptcha requires ext-curl or a custom httpClient callable (opts["httpClient"]).');
+        }
         $ch = curl_init($url);
+        if ($ch === false) {
+            throw new \RuntimeException('Recaptcha curl_init failed.');
+        }
         curl_setopt_array($ch, [
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_POST => true,

@@ -64,7 +64,7 @@ final class LoggerPsrAdapter implements LoggerInterface
                     Logger::systemMessage((string)$level, (string)$message, $context['user_id'] ?? null, $context);
             }
         } catch (\Throwable $_) {
-            // adaptér nesmí vyvolat výjimku
+            // Adapter must not throw.
         }
     }
 

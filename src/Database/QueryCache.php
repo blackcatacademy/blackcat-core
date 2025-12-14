@@ -46,14 +46,14 @@ final class QueryCache
     /** @var array<string,int> */
     private array $sharedPrefixLastFetch = [];
 
-    // Lock/backoff nastavení
-    private int $lockWaitSec = 10;      // celkový strop čekání na výpočet
-    private int $lockRetryMinMs = 50;   // minimální backoff
-    private int $lockRetryMaxMs = 250;  // maximální backoff
+    // Lock/backoff settings
+    private int $lockWaitSec = 10;      // total ceiling for waiting on a compute
+    private int $lockRetryMinMs = 50;   // minimum backoff
+    private int $lockRetryMaxMs = 250;  // maximum backoff
 
-    // NEW: sjednocené API pro TTL jitter (percent 0..90)
+    // NEW: unified API for TTL jitter (percent 0..90)
     private int $ttlJitterPercent = 0;
-    // NEW: volitelný guard délky klíče (0 = vypnuto)
+    // NEW: optional key-length guard (0 = disabled)
     private int $maxKeyLength = 0;
 
     public function enableSharedPrefixVersions(bool $on = true, int $refreshSec = 1): void
@@ -62,7 +62,7 @@ final class QueryCache
         $this->sharedPrefixRefreshSec = max(1, $refreshSec);
     }
 
-    // Jemné ladění anti-herd parametrů (locking/backoff)
+    // Fine tuning for anti-herd parameters (locking/backoff)
     public function configureLocking(int $waitSec = 10, int $minBackoffMs = 50, int $maxBackoffMs = 250): void
     {
         $this->lockWaitSec = max(1, $waitSec);
@@ -86,7 +86,7 @@ final class QueryCache
         $this->ttlJitterPercent = max(0, min(90, $pct));
     }
 
-    /** Volitelný guard délky klíče (např. Memcached 250). 0 = vypnuto. */
+    /** Optional key-length guard (e.g. Memcached 250). 0 = disabled. */
     public function setMaxKeyLength(int $n = 250): void
     {
         $this->maxKeyLength = max(0, $n);
@@ -97,7 +97,7 @@ final class QueryCache
         return [
             'hits' => $this->hits,
             'miss' => $this->miss,
-            // NEW: rozšířené metriky
+            // NEW: extended metrics
             'staleHits' => $this->staleHits,
             'lockAcquired' => $this->lockAcquired,
             'lockWaitTimeouts' => $this->lockWaitTimeouts,
@@ -116,7 +116,7 @@ final class QueryCache
         }
     }
 
-    /** Cross-process prefix invalidation (atomic přes LockingCacheInterface, jinak best-effort) */
+    /** Cross-process prefix invalidation (atomic via LockingCacheInterface, otherwise best-effort). */
     public function invalidatePrefixShared(string $prefix): void
     {
         $k = $this->sharedPrefixKey($prefix);
@@ -133,7 +133,7 @@ final class QueryCache
                     if ($tok !== null) { $this->locks->releaseLock($lk, $tok); }
                 }
             } else {
-                // fallback bez locku (race-prone)
+                // fallback without locks (race-prone)
                 $v = (int)$this->cache->get($k, 0);
                 $this->cache->set($k, $v + 1);
                 $this->prefixVersions[$prefix] = $v + 1;
@@ -149,10 +149,10 @@ final class QueryCache
         return $this->namespace . ':pv|' . $prefix;
     }
 
-    // Explicitní key s prefixem pro pohodlnou invalidaci
+    // Explicit key with prefix for easier invalidation.
     public function keyWithPrefix(string $prefix, string $dbId, string $sql, array $params = []): string
     {
-        // Formát: "<prefix>{$namespace}|{$dbId}|<hash>"
+        // Format: "<prefix>{$namespace}|{$dbId}|<hash>"
         return $prefix . $this->key($dbId, $sql, $params);
     }
 
@@ -178,11 +178,11 @@ final class QueryCache
         return $key;
     }
 
-    /** Heuristika pro objevení prefixu – bez explicitních hintů vrací známé lokální prefixy. */
+    /** Heuristic prefix discovery – without explicit hints returns known local prefixes. */
     private function detectPrefixes(string $fullKey): array
     {
-        // Pokud používáš keyWithPrefix("users:"...), detekce funguje hned.
-        // Jinak vrací jen doposud známé prefixy z invalidatePrefix().
+        // If you use keyWithPrefix("users:"...), detection works immediately.
+        // Otherwise it only returns prefixes seen via invalidatePrefix().
         return array_keys($this->prefixVersions);
     }
 
@@ -207,7 +207,7 @@ final class QueryCache
         return $this->prefixVersions[$prefix] ?? null;
     }
 
-    /** NEW: explicitní registrace prefixu (eager sync shared verze, je-li zapnuta). */
+    /** NEW: explicit prefix registration (eager sync of shared version if enabled). */
     public function registerPrefix(string $prefix): void
     {
         if ($prefix === '') return;
@@ -218,13 +218,13 @@ final class QueryCache
         }
     }
 
-    // Robustnější serializace parametrů pro tvorbu klíče + PSR-16 friendly key shape
+    // More robust parameter serialization for key derivation + PSR-16 friendly key shape.
     public function key(string $dbId, string $sql, array $params = []): string
     {
         /**
-         * PSR-16 safe key kontrakt:
-         * - segmenty namespace/dbId se normalizují na [A-Za-z0-9._-] + krátký hash
-         * - konečný tvar je "<ns>|<db>|<sha256>"
+         * PSR-16 safe key contract:
+         * - namespace/dbId segments are normalized to [A-Za-z0-9._-] + a short hash suffix
+         * - final form is "<ns>|<db>|<sha256>"
          */
         $blob = $dbId . '|' . $sql . '|' . $this->encodeParams($params);
         $h = hash('sha256', $blob);
@@ -234,19 +234,19 @@ final class QueryCache
         return "{$ns}|{$db}|{$h}";
     }
 
-    // Bezpečné kódování parametrů do klíče
+    // Safe parameter encoding for the key
     private function encodeParams(array $params): string
     {
         try {
             return json_encode($params, JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE|JSON_THROW_ON_ERROR);
         } catch (\Throwable $e) {
             $this->logger?->notice('QueryCache json_encode failed, using serialize()', ['e'=>$e]);
-            // serialize je OK pro klíč (hashujeme), i když není stabilní napříč verzemi PHP – hash to „vyrovná“
+            // serialize() is OK for keys (we hash it), even if it is not stable across PHP versions.
             return serialize($params);
         }
     }
 
-    // TTL normalizace (negativní => 0 = no-store; null beze změny)
+    // TTL normalization (negative => 0 = no-store; null = unchanged)
     private function normalizeTtl(int|\DateInterval|null $ttl): int|\DateInterval|null
     {
         if (is_int($ttl)) {
@@ -270,7 +270,7 @@ final class QueryCache
     }
     private function applyTtlJitter(int $ttl): int { return $this->jitterTtl($ttl); }
 
-    // Interní pomocník s backoffem (exponential-ish + jitter)
+    // Internal helper with backoff (exponential-ish + jitter)
     private function backoffSleep(int $attempt): void
     {
         $min = $this->lockRetryMinMs;
@@ -280,7 +280,7 @@ final class QueryCache
         usleep(($base + $jitter) * 1000);
     }
 
-    /** NEW: normalizace segmentu (namespace/dbId) na bezpečné znaky + hash suffix. */
+    /** NEW: normalize a segment (namespace/dbId) to safe chars + hash suffix. */
     private function normalizeSegment(string $raw, string $fallback): string
     {
         $s = trim($raw);
@@ -291,7 +291,7 @@ final class QueryCache
         return ($safe === '' ? $fallback : $safe) . '.' . $h;
     }
 
-    /** NEW: aplikace namespace/prefix verze + guard délky; vrací finální cache klíč. */
+    /** NEW: apply namespace/prefix version + length guard; returns the final cache key. */
     private function safeNsKey(string $key): string
     {
         $nsKey = $this->applyNamespace($key);
@@ -303,14 +303,14 @@ final class QueryCache
     }
 
     /**
-     * Compute-if-absent s (volitelným) lockingem.
+     * Compute-if-absent with (optional) locking.
      * $producer = fn(): mixed { ... }  // read-only.
      */
     public function remember(string $key, int|\DateInterval|null $ttl, callable $producer): mixed
     {
         $nsKey = $this->safeNsKey($key);
 
-        // Fast path – prosté čtení
+        // Fast path – simple read
         try {
             $hit = $this->cache->get($nsKey, '__MISS__');
             if ($hit !== '__MISS__') { $this->hits++; return $hit; }
@@ -330,12 +330,12 @@ final class QueryCache
 
             if ($this->locks) {
                 $attempt = 0;
-                // zkus získat lock neblokujícím způsobem; pokud ne, opakovaně kontroluj cache s backoffem
+                // Try to acquire the lock non-blocking; if not, re-check cache with backoff.
                 do {
                     $token = $this->locks->acquireLock($lockName, $this->lockWaitSec);
                     if ($token !== null) { $this->lockAcquired++; break; }
 
-                    // někdo jiný počítá → exponential backoff + re-check
+                    // Someone else is computing -> exponential backoff + re-check
                     $this->backoffSleep(++$attempt);
                     try {
                         $hit = $this->cache->get($nsKey, '__MISS__');
@@ -345,7 +345,7 @@ final class QueryCache
                     }
                 } while (microtime(true) < $deadline);
 
-                // pokud se lock stejně nezískal, poslední pokus – znovu přečti cache (else fallback k produkci bez locku)
+                // If lock is still not acquired: last attempt — re-read cache (else fallback to computing without lock).
                 if ($token === null) {
                     $this->lockWaitTimeouts++;
                     try {
@@ -370,27 +370,27 @@ final class QueryCache
         }
     }
 
-    /** Pomocník pro běžné SELECTy */
+    /** Helper for common SELECTs. */
     public function rememberRows(Database $db, string $sql, array $params, int|\DateInterval|null $ttl): array
     {
         $key = $this->key($db->id(), $sql, $params);
         return $this->remember($key, $ttl, fn() => $db->fetchAll($sql, $params));
     }
 
-    /** Totéž co rememberRows(), ale s aplikačním prefixem pro snadnou invalidaci */
+    /** Same as rememberRows(), but with an app prefix for easier invalidation. */
     public function rememberRowsP(Database $db, string $prefix, string $sql, array $params, int|\DateInterval|null $ttl): array
     {
         $key = $this->keyWithPrefix($prefix, $db->id(), $sql, $params);
         return $this->remember($key, $ttl, fn() => $db->fetchAll($sql, $params));
     }
 
-    /** Convenience – cache SELECT ... LIMIT 1 (řádek) */
+    /** Convenience – cache SELECT ... LIMIT 1 (row). */
     public function rememberRow(Database $db, string $sql, array $params, int|\DateInterval|null $ttl): ?array
     {
         $k = $this->key($db->id(), $sql, $params);
         return $this->remember($k, $ttl, fn()=> $db->fetch($sql, $params));
     }
-    /** Convenience – cache hodnota */
+    /** Convenience – cache a scalar value. */
     public function rememberValue(Database $db, string $sql, array $params, int|\DateInterval|null $ttl, mixed $default = null): mixed
     {
         $k = $this->key($db->id(), $sql, $params);
@@ -403,14 +403,14 @@ final class QueryCache
         return (bool)$this->remember($k, $ttl, fn()=> $db->exists($sql, $params));
     }
 
-    /** Praktické bulk API: načti více klíčů najednou; chybějící dopočítej.
-     *  - Použije PSR-16 getMultiple() a (pokud nejsou locky) i setMultiple() pro rychlejší zápis.
-     *  - Při aktivních lockách zachová per-key remember() (správná synchronizace).
+    /** Practical bulk API: load multiple keys at once; compute missing values.
+     *  - Uses PSR-16 getMultiple() and (when no locks are configured) also setMultiple() for faster writes.
+     *  - With locks enabled, preserves per-key remember() (correct synchronization).
      */
     public function rememberMultiple(array $keys, int|\DateInterval|null $ttl, callable $producer): array
     {
         if ($keys === []) return [];
-        // normalizuj vstupní klíče na stringy (stabilní porovnání/diff)
+        // Normalize input keys to strings (stable diff/compare).
         $origKeys = array_values(array_map('strval', $keys));
 
         // map original -> nsKey (prefix verze + guard)
@@ -435,12 +435,12 @@ final class QueryCache
         $missKeys = array_values(array_diff($origKeys, array_keys($values)));
         if ($missKeys === []) return $values;
 
-        // normalizuj/jitteruj TTL pro batch zápis (u no-lock větve)
+        // Normalize/jitter TTL for batch writes (no-lock path).
         $ttlN = $this->normalizeTtl($ttl);
         if (is_int($ttlN) && $ttlN > 0) { $ttlN = $this->jitterTtl($ttlN); }
 
         if ($this->locks === null) {
-            // FAST-PATH bez locků: spočti a zapiš setMultiple() najednou
+            // FAST-PATH without locks: compute and setMultiple() in one go.
             $writes = [];
             foreach ($missKeys as $k) {
                 $this->producerRuns++;
@@ -450,10 +450,10 @@ final class QueryCache
             }
             try { $this->cache->setMultiple($writes, $ttlN); }
             catch (\Throwable $e) { $this->logger?->warning('QueryCache setMultiple failed', ['e'=>$e]); }
-            // metriky missů přičteme jen tady (v per-key větvi se o to postará remember())
+            // Miss metrics are incremented only here (per-key path is handled by remember()).
             $this->miss += count($missKeys);
         } else {
-            // LOCKED PATH: zachovej per-key remember() (správné získání locku a metriky)
+            // LOCKED PATH: preserve per-key remember() (correct locking + metrics)
             foreach ($missKeys as $k) {
                 $values[$k] = $this->remember($k, $ttl, fn()=> $producer($k));
             }
@@ -461,11 +461,11 @@ final class QueryCache
         return $values;
     }
 
-    /** Změna logického namespace (např. při invalidaci všech předchozích klíčů) */
+    /** Changes the logical namespace (e.g. to invalidate all previous keys). */
     public function newNamespace(string $ns): void
     {
         $this->namespace = $ns;
-        // Vyčisti lokální verze prefixů, ať neunikají do nového namespace
+        // Clear local prefix versions so they don't leak into the new namespace.
         $this->prefixVersions = [];
         $this->sharedPrefixLastFetch = [];
     }
@@ -480,8 +480,8 @@ final class QueryCache
 
     /**
      * Stale-While-Revalidate:
-     * - při „stale hitu“ vrátí okamžitě stale hodnotu
-     * - refresh spustí pouze jeden proces (pokud jsou k dispozici locky)
+     * - on a "stale hit" returns the stale value immediately
+     * - refresh runs in only one process (when locks are available)
      */
     public function rememberSWR(string $key, int $ttl, int $staleTtl, callable $producer): mixed
     {
@@ -500,7 +500,7 @@ final class QueryCache
             $stale = $this->cache->get($nsKey.':stale', '__MISS__');
             if ($stale !== '__MISS__') {
                 $this->staleHits++;
-                // fire-and-forget refresh (pokud locky nejsou, může proběhnout víckrát – acceptable)
+                // Fire-and-forget refresh (when locks are not available it may run multiple times – acceptable).
                 $refresh = function() use ($nsKey, $producer, $ttl, $staleTtl) {
                     try {
                         $this->producerRuns++;
@@ -519,7 +519,7 @@ final class QueryCache
                         finally { $this->locks->releaseLock('q:swr:' . $nsKey, $tok); }
                     }
                 } else {
-                    // bez locku – prostě spusť
+                    // Without locks: just run it.
                     $refresh();
                 }
 
@@ -527,7 +527,7 @@ final class QueryCache
             }
         } catch (\Throwable $_) {}
 
-        // produce fresh synchronně
+        // Produce fresh synchronously.
         $this->producerRuns++;
         $fresh = $producer();
         try {

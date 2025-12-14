@@ -9,8 +9,8 @@ use Psr\Log\LoggerInterface;
 /**
  * DeferredHelper
  *
- * - fronta pro deferred callbacky / jednoduché SQL payloady před tím, než je DB inicializována
- * - flush() volat po Database::init(...) (bootstrap)
+ * - Queue for deferred callbacks / simple SQL payloads before Database is initialized
+ * - Call flush() after Database::init(...) (bootstrap)
  */
 final class DeferredHelper
 {
@@ -25,7 +25,7 @@ final class DeferredHelper
     private function __construct() {}
 
     /**
-     * Přidá do fronty callable nebo SQL payload.
+     * Enqueue a callable or an SQL payload.
      *
      * SQL payload = ['sql' => string, 'params' => array]
      *
@@ -55,7 +55,7 @@ final class DeferredHelper
     }
 
     /**
-     * Explicitně nastavit PSR logger - použitelný i před inicializací Database.
+     * Explicitly set a PSR logger (usable even before Database initialization).
      */
     public static function setLogger(?LoggerInterface $logger): void
     {
@@ -63,9 +63,10 @@ final class DeferredHelper
     }
 
     /**
-     * Preferovaný logger: nejdříve explicitně nastavený (setLogger),
-     * pak logger z Database (pokud je DB initializována a vrací logger),
-     * jinak null.
+     * Preferred logger resolution:
+     * - explicit logger (setLogger)
+     * - Database logger (if initialized and available)
+     * - otherwise null
      */
     private static function getLogger(): ?LoggerInterface
     {
@@ -85,8 +86,8 @@ final class DeferredHelper
     }
 
     /**
-     * Reportuje throwable přes PSR logger (pokud je dostupný).
-     * Ticho v případě absence loggeru - logger nesmí nikdy shodit aplikaci.
+     * Reports a throwable via PSR logger (if available).
+     * Silent when logger is absent — logging must never crash the app.
      */
     private static function reportThrowable(\Throwable $e, ?string $context = null): void
     {
@@ -104,12 +105,12 @@ final class DeferredHelper
     }
 
     /**
-     * Provede všechny položky fronty.
+     * Execute all queued items.
      *
-     * - pokud je položka callable -> zavolat
-     * - pokud je položka sql payload -> pokusit se vykonat přes Database::getInstance()->execute()
+     * - if item is callable -> invoke it
+     * - if item is an SQL payload -> execute via Database::getInstance()->execute()
      *
-     * Chyby jsou zalogovány přes PSR logger (pokud je dostupný), jinak jsou potichu ignorovány.
+     * Errors are logged via PSR logger (if available), otherwise silently ignored.
      */
     public static function flush(): void
     {
@@ -133,7 +134,7 @@ final class DeferredHelper
                 }
 
                 if (is_array($item) && isset($item['sql'])) {
-                    // pokud ještě není DB inicializována, vrátíme payload zpět a ukončíme flush
+                    // If DB is not initialized yet, push payload back and stop flushing.
                     if (!Database::isInitialized()) {
                         array_unshift(self::$queue, $item);
                         break;
@@ -156,7 +157,7 @@ final class DeferredHelper
         self::$isProcessing = false;
     }
 
-    /* ----------------- Utility pro testování / introspekci ----------------- */
+    /* ----------------- Test / introspection utilities ----------------- */
 
     public static function getQueueSize(): int
     {

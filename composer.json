@@ -1,19 +1,19 @@
 {
   "name": "blackcatacademy/blackcat-core",
-  "description": "BlackCat Store core libs — libsodium-based encryption framework for e-commerce (proprietary)",
+  "description": "BlackCat kernel: secure DB wrapper, crypto primitives, and core utilities for the modular BlackCat ecosystem.",
   "type": "library",
   "license": "proprietary",
   "homepage": "https://github.com/blackcatacademy/blackcat-core",
-  "keywords": ["ecommerce", "security", "libsodium", "encryption", "storekit"],
+  "keywords": ["kernel", "security", "database", "pdo", "libsodium", "encryption", "crypto", "observability"],
   "authors": [
     {
       "name": "Black Cat Academy s. r. o.",
-      "email": "backcatacademy@protonmail.com",
+      "email": "blackcatacademy@protonmail.com",
       "role": "owner"
     }
   ],
   "support": {
-    "email": "backcatacademy@protonmail.com",
+    "email": "blackcatacademy@protonmail.com",
     "issues": "https://github.com/blackcatacademy/blackcat-core/issues",
     "source": "https://github.com/blackcatacademy/blackcat-core"
   },
@@ -26,7 +26,17 @@
     "psr/log": "^1.1 || ^2.0 || ^3.0"
   },
   "suggest": {
-    "ext-mbstring": "Improves SQL preview sanitization and multibyte handling in logs."
+    "ext-curl": "Used by some optional helpers (e.g. Recaptcha).",
+    "ext-mbstring": "Improves SQL preview sanitization and multibyte handling in logs.",
+    "blackcatacademy/blackcat-database": "Generated repositories + installer (single source of truth for schemas/views).",
+    "blackcatacademy/blackcat-sessions": "DB-backed sessions module (recommended over legacy core session helpers).",
+    "blackcatacademy/blackcat-mailing": "DB-backed notifications + mail worker.",
+    "blackcatacademy/blackcat-messaging": "DB-backed outbox/inbox and messaging workers.",
+    "blackcatacademy/blackcat-auth": "Authentication flows (register/login/reset/verify/magic-link/webauthn).",
+    "blackcatacademy/blackcat-jobs": "DB-backed job queue (system_jobs).",
+    "blackcatacademy/blackcat-jwt": "JWT issuing/verification + optional DB revocation store.",
+    "blackcatacademy/blackcat-rbac": "RBAC module on top of blackcat-database.",
+    "blackcatacademy/blackcat-gopay": "GoPay gateway integration module."
   },
   "autoload": {
     "psr-4": {
@@ -38,8 +48,13 @@
       "BlackCat\\Core\\Tests\\": "tests/"
     }
   },
+  "require-dev": {
+    "phpunit/phpunit": "^10.5",
+    "phpstan/phpstan": "^1.11"
+  },
   "scripts": {
-    "test": "vendor/bin/phpunit --colors=always"
+    "test": "vendor/bin/phpunit --colors=always",
+    "stan": "vendor/bin/phpstan analyse"
   },
   "config": {
     "optimize-autoloader": true,

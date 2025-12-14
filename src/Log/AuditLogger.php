@@ -31,33 +31,11 @@ final class AuditLogger
      */
     public static function log(?\PDO $pdo, $actorId, string $action, string $payloadEnc, string $keyVersion = '', array $meta = []): bool
     {
+        // NOTE: DB writes removed from core (no table-specific SQL/PDO in kernel).
+        unset($pdo);
         $now = (new \DateTimeImmutable('now', new \DateTimeZone('UTC')))->format('Y-m-d H:i:s');
 
-        // Try DB first (best-effort)
-        if ($pdo instanceof \PDO) {
-            try {
-                $sql = 'INSERT INTO audit_log (event_time, actor_id, action, payload_enc, key_version, meta)
-                        VALUES (:t, :actor, :action, :payload, :kv, :meta)';
-                $stmt = $pdo->prepare($sql);
-                $params = [
-                    't' => $now,
-                    'actor' => (string)($actorId ?? ''),
-                    'action' => $action,
-                    'payload' => $payloadEnc,
-                    'kv' => $keyVersion,
-                    'meta' => json_encode($meta, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
-                ];
-                $ok = $stmt->execute($params);
-                if ($ok) return true;
-                // else fallthrough to file fallback
-                error_log('[AuditLogger] DB execute returned false; falling back to file');
-            } catch (\Throwable $e) {
-                error_log('[AuditLogger] DB write failed: ' . $e->getMessage());
-                // continue to file fallback
-            }
-        }
-
-        // File fallback
+        // File-based audit
         try {
             return self::fileFallback($now, (string)($actorId ?? ''), $action, $payloadEnc, $keyVersion, $meta);
         } catch (\Throwable $e) {

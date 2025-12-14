@@ -130,7 +130,7 @@ final class FileVault
 
     /**
      * Helper: get key raw bytes and version for filevault keys.
-     * If $specificVersion provided (like 'v1'), try to load exact file: filevault_key_v1.bin
+     * If $specificVersion provided (like 'v1'), try to load exact file: filevault_key_v1.key
      * Returns ['raw' => <bytes>, 'version' => 'vN']
      * Throws RuntimeException on failure.
      */
@@ -159,19 +159,11 @@ final class FileVault
         if ($specificVersion !== null && $specificVersion !== '') {
             $verNum = ltrim($specificVersion, 'vV');
             if ($verNum === '') $verNum = '1';
-            $path = rtrim($keysDir, '/\\') . '/filevault_key_v' . $verNum . '.bin';
+            $path = rtrim($keysDir, '/\\') . '/filevault_key_v' . $verNum . '.key';
             if (is_readable($path)) {
                 $raw = @file_get_contents($path);
                 if ($raw !== false && strlen($raw) === SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_KEYBYTES) {
                     return ['raw' => $raw, 'version' => 'v' . $verNum, 'id' => 'v' . $verNum];
-                }
-            }
-            // fallback: try non-versioned name
-            $path2 = rtrim($keysDir, '/\\') . '/filevault_key.bin';
-            if (is_readable($path2)) {
-                $raw = @file_get_contents($path2);
-                if ($raw !== false && strlen($raw) === SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_KEYBYTES) {
-                    return ['raw' => $raw, 'version' => 'v1', 'id' => 'v1'];
                 }
             }
 
