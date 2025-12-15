@@ -13,6 +13,7 @@ It is designed for two modes:
 ## What lives here
 
 - `BlackCat\Core\Database` — hardened PDO wrapper (prepared statements, retries, observability helpers, safety guards).
+- `BlackCat\Database\SqlDialect` + `BlackCat\Database\Support\Observability` / `QueryObserver` — shared DB primitives used by the kernel DB wrapper and generated repositories.
 - `BlackCat\Core\Security\KeyManager` / `Crypto` / `CSRF` / `FileVault` — low-level security primitives (versioned keys, AEAD, CSRF binding, file-at-rest encryption).
 - `BlackCat\Core\Cache\*` — PSR-16 caches (memory/file/null) and locking support.
 - `BlackCat\Core\Log\Logger` / `AuditLogger` — lightweight logging helpers for kernel-only stacks.

@@ -407,16 +407,19 @@ final class EmailTemplates extends Templates
 final class SafeHtml
 {
     private string $html;
-    /** @var \HTMLPurifier|null */
+    /** @var object|null */
     private static $purifier = null;
 
     public function __construct(string $html)
     {
-        if (class_exists(\HTMLPurifier::class, true)) {
+        $purifierClass = 'HTMLPurifier';
+        $configClass = 'HTMLPurifier_Config';
+
+        if (class_exists($purifierClass, true) && class_exists($configClass, true)) {
             try {
                 if (self::$purifier === null) {
-                    $config = \HTMLPurifier_Config::createDefault();
-                    self::$purifier = new \HTMLPurifier($config);
+                    $config = $configClass::createDefault();
+                    self::$purifier = new $purifierClass($config);
                 }
                 $this->html = self::$purifier->purify($html);
             } catch (\Throwable $e) {

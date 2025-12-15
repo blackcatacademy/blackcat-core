@@ -7,8 +7,8 @@ use BlackCat\Core\Database;
 use Psr\SimpleCache\CacheInterface;
 
 // The session implementation lives in the dedicated blackcat-sessions module.
-if (class_exists(\BlackCat\Sessions\Php\SessionManager::class)) {
-    class_alias(\BlackCat\Sessions\Php\SessionManager::class, __NAMESPACE__ . '\\SessionManager');
+if (class_exists('BlackCat\\Sessions\\Php\\SessionManager')) {
+    class_alias('BlackCat\\Sessions\\Php\\SessionManager', __NAMESPACE__ . '\\SessionManager');
     return;
 }
 
@@ -45,4 +45,3 @@ final class SessionManager
         throw new \RuntimeException('blackcat-sessions is required (composer require blackcatacademy/blackcat-sessions).');
     }
 }
-

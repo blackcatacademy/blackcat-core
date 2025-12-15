@@ -11,8 +11,8 @@ namespace BlackCat\Core\Mail;
  *
  * Otherwise it throws a clear runtime error.
  */
-if (class_exists(\BlackCat\Mailing\CoreCompat\CoreMailer::class)) {
-    class_alias(\BlackCat\Mailing\CoreCompat\CoreMailer::class, __NAMESPACE__ . '\\Mailer');
+if (class_exists('BlackCat\\Mailing\\CoreCompat\\CoreMailer')) {
+    class_alias('BlackCat\\Mailing\\CoreCompat\\CoreMailer', __NAMESPACE__ . '\\Mailer');
     return;
 }
 

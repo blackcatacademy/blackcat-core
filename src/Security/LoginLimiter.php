@@ -16,8 +16,8 @@ final class LoginLimiter
 
     private static function impl(): ?string
     {
-        return \class_exists(\BlackCat\Auth\Security\LoginLimiter::class)
-            ? \BlackCat\Auth\Security\LoginLimiter::class
+        return \class_exists('BlackCat\\Auth\\Security\\LoginLimiter')
+            ? 'BlackCat\\Auth\\Security\\LoginLimiter'
             : null;
     }
 

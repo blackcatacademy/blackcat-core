@@ -4,8 +4,8 @@ declare(strict_types=1);
 namespace BlackCat\Core\Session;
 
 // The session handler implementation lives in the dedicated blackcat-sessions module.
-if (class_exists(\BlackCat\Sessions\Php\DbCachedSessionHandler::class)) {
-    class_alias(\BlackCat\Sessions\Php\DbCachedSessionHandler::class, __NAMESPACE__ . '\\DbCachedSessionHandler');
+if (class_exists('BlackCat\\Sessions\\Php\\DbCachedSessionHandler')) {
+    class_alias('BlackCat\\Sessions\\Php\\DbCachedSessionHandler', __NAMESPACE__ . '\\DbCachedSessionHandler');
     return;
 }
 
@@ -24,4 +24,3 @@ final class DbCachedSessionHandler implements \SessionHandlerInterface
     public function destroy(string $id): bool { return true; }
     public function gc(int $max_lifetime): int|false { return 0; }
 }
-

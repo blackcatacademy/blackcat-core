@@ -75,11 +75,12 @@ final class Crypto
     public static function hmac(string $data, string $keyName, string $basename, ?string $keysDir = null, bool $allCandidates = false): array|string
     {
         $keysDir = $keysDir ?? self::$keysDir;
-        if (self::$bridgeEnabled && !$allCandidates && $keysDir === self::$keysDir && class_exists('\\BlackCat\\Crypto\\Bridge\\CoreCryptoBridge')) {
+        $bridgeClass = 'BlackCat\\Crypto\\Bridge\\CoreCryptoBridge';
+        if (self::$bridgeEnabled && !$allCandidates && $keysDir === self::$keysDir && class_exists($bridgeClass)) {
             $slot = self::mapHmacSlot($basename);
             if ($slot !== null) {
                 try {
-                    return \BlackCat\Crypto\Bridge\CoreCryptoBridge::hmac($slot, $data);
+                    return $bridgeClass::hmac($slot, $data);
                 } catch (\Throwable $e) {
                     self::logError('Crypto::hmac bridge failed', ['exception' => $e->getMessage()]);
                 }
@@ -135,19 +136,20 @@ final class Crypto
         self::logDebug('Crypto initialized', ['keys' => count(self::$keys)]);
 
         self::$bridgeEnabled = false;
-        if (class_exists('\\BlackCat\\Crypto\\Bridge\\CoreCryptoBridge')) {
+        $bridgeClass = 'BlackCat\\Crypto\\Bridge\\CoreCryptoBridge';
+        if (class_exists($bridgeClass)) {
             try {
-                \BlackCat\Crypto\Bridge\CoreCryptoBridge::configure([
+                $bridgeClass::configure([
                     'keys_dir' => self::$keysDir,
                     'logger' => self::logger(),
                 ]);
-                \BlackCat\Crypto\Bridge\CoreCryptoBridge::boot();
+                $bridgeClass::boot();
                 self::$bridgeEnabled = true;
                 self::logDebug('Crypto bridge enabled');
             } catch (\Throwable $e) {
                 self::logError('Crypto bridge init failed', ['exception' => $e->getMessage()]);
                 try {
-                    \BlackCat\Crypto\Bridge\CoreCryptoBridge::flush();
+                    $bridgeClass::flush();
                 } catch (\Throwable $_) {
                     // ignore
                 }
@@ -186,9 +188,10 @@ final class Crypto
         self::$primaryKey = null;
         self::logDebug('Crypto cleared keys');
 
-        if (self::$bridgeEnabled && class_exists('\\BlackCat\\Crypto\\Bridge\\CoreCryptoBridge')) {
+        $bridgeClass = 'BlackCat\\Crypto\\Bridge\\CoreCryptoBridge';
+        if (self::$bridgeEnabled && class_exists($bridgeClass)) {
             try {
-                \BlackCat\Crypto\Bridge\CoreCryptoBridge::flush();
+                $bridgeClass::flush();
             } catch (\Throwable $_) {
                 // ignore
             }
@@ -218,9 +221,10 @@ final class Crypto
             throw new \InvalidArgumentException('Unsupported outFormat');
         }
 
-        if (self::$bridgeEnabled && class_exists('\\BlackCat\\Crypto\\Bridge\\CoreCryptoBridge')) {
+        $bridgeClass = 'BlackCat\\Crypto\\Bridge\\CoreCryptoBridge';
+        if (self::$bridgeEnabled && class_exists($bridgeClass)) {
             try {
-                $binary = \BlackCat\Crypto\Bridge\CoreCryptoBridge::encryptBinary(self::BRIDGE_DEFAULT_SLOT, $plaintext);
+                $binary = $bridgeClass::encryptBinary(self::BRIDGE_DEFAULT_SLOT, $plaintext);
                 if ($outFormat === 'compact_base64') {
                     return base64_encode($binary);
                 }
@@ -264,11 +268,12 @@ final class Crypto
             return null;
         }
 
-        if (self::$bridgeEnabled && class_exists('\\BlackCat\\Crypto\\Bridge\\CoreCryptoBridge')) {
+        $bridgeClass = 'BlackCat\\Crypto\\Bridge\\CoreCryptoBridge';
+        if (self::$bridgeEnabled && class_exists($bridgeClass)) {
             $normalized = self::normalizePayload($payload);
             if ($normalized !== null) {
                 try {
-                    $plain = \BlackCat\Crypto\Bridge\CoreCryptoBridge::decryptBinary(self::BRIDGE_DEFAULT_SLOT, $normalized);
+                    $plain = $bridgeClass::decryptBinary(self::BRIDGE_DEFAULT_SLOT, $normalized);
                     if ($plain !== null) {
                         return $plain;
                     }

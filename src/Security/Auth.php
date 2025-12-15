@@ -11,8 +11,8 @@ namespace BlackCat\Core\Security;
  *
  * Otherwise it throws a clear runtime error.
  */
-if (class_exists(\BlackCat\Auth\CoreCompat\CoreAuth::class)) {
-    class_alias(\BlackCat\Auth\CoreCompat\CoreAuth::class, __NAMESPACE__ . '\\Auth');
+if (class_exists('BlackCat\\Auth\\CoreCompat\\CoreAuth')) {
+    class_alias('BlackCat\\Auth\\CoreCompat\\CoreAuth', __NAMESPACE__ . '\\Auth');
     return;
 }
 

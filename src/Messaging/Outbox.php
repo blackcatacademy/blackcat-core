@@ -14,8 +14,8 @@ use Psr\Log\LoggerInterface;
  *
  * Otherwise it throws a clear runtime error.
  */
-if (class_exists(\BlackCat\Messaging\CoreCompat\CoreOutbox::class)) {
-    class_alias(\BlackCat\Messaging\CoreCompat\CoreOutbox::class, __NAMESPACE__ . '\\Outbox');
+if (class_exists('BlackCat\\Messaging\\CoreCompat\\CoreOutbox')) {
+    class_alias('BlackCat\\Messaging\\CoreCompat\\CoreOutbox', __NAMESPACE__ . '\\Outbox');
     return;
 }
 

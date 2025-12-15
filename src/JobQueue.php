@@ -7,8 +7,8 @@ declare(strict_types=1);
  * If `blackcatacademy/blackcat-jobs` is installed, this file aliases:
  * `BlackCat\Jobs\CoreCompat\JobQueue`.
  */
-if (class_exists(\BlackCat\Jobs\CoreCompat\JobQueue::class)) {
-    class_alias(\BlackCat\Jobs\CoreCompat\JobQueue::class, 'JobQueue');
+if (class_exists('BlackCat\\Jobs\\CoreCompat\\JobQueue')) {
+    class_alias('BlackCat\\Jobs\\CoreCompat\\JobQueue', 'JobQueue');
     return;
 }
 

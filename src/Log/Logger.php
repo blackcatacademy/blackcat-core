@@ -224,15 +224,13 @@ final class Logger
      */
     private static function criteriaTransform(string $table, array $criteria): ?array
     {
-        if (
-            !class_exists(\BlackCat\Database\Crypto\IngressLocator::class)
-            || !interface_exists(\BlackCat\Database\Contracts\DatabaseIngressCriteriaAdapterInterface::class)
-        ) {
+        $locatorClass = 'BlackCat\\Database\\Crypto\\IngressLocator';
+        if (!class_exists($locatorClass)) {
             return null;
         }
 
         try {
-            $adapter = \BlackCat\Database\Crypto\IngressLocator::adapter();
+            $adapter = $locatorClass::adapter();
         } catch (\Throwable) {
             return null;
         }
@@ -401,7 +399,7 @@ final class Logger
             // flush earlier items to try to preserve ordering
             DeferredHelper::flush();
             try {
-                $repo = self::repoInstance(\BlackCat\Database\Packages\AuthEvents\Repository\AuthEventRepository::class, 'auth_events');
+                $repo = self::repoInstance('BlackCat\\Database\\Packages\\AuthEvents\\Repository\\AuthEventRepository', 'auth_events');
                 if ($repo !== null && method_exists($repo, 'insert')) {
                     $repo->insert($row);
                 }
@@ -415,7 +413,7 @@ final class Logger
         // DB not ready -> enqueue safe, pre-sanitized row
         DeferredHelper::enqueue(function() use ($row) {
             try {
-                $repo = self::repoInstance(\BlackCat\Database\Packages\AuthEvents\Repository\AuthEventRepository::class, 'auth_events');
+                $repo = self::repoInstance('BlackCat\\Database\\Packages\\AuthEvents\\Repository\\AuthEventRepository', 'auth_events');
                 if ($repo !== null && method_exists($repo, 'insert')) {
                     $repo->insert($row);
                 }
@@ -453,7 +451,7 @@ final class Logger
         if (Database::isInitialized()) {
             DeferredHelper::flush();
             try {
-                $repo = self::repoInstance(\BlackCat\Database\Packages\VerifyEvents\Repository\VerifyEventRepository::class, 'verify_events');
+                $repo = self::repoInstance('BlackCat\\Database\\Packages\\VerifyEvents\\Repository\\VerifyEventRepository', 'verify_events');
                 if ($repo !== null && method_exists($repo, 'insert')) {
                     $repo->insert($row);
                 }
@@ -465,7 +463,7 @@ final class Logger
 
         DeferredHelper::enqueue(function() use ($row) {
             try {
-                $repo = self::repoInstance(\BlackCat\Database\Packages\VerifyEvents\Repository\VerifyEventRepository::class, 'verify_events');
+                $repo = self::repoInstance('BlackCat\\Database\\Packages\\VerifyEvents\\Repository\\VerifyEventRepository', 'verify_events');
                 if ($repo !== null && method_exists($repo, 'insert')) {
                     $repo->insert($row);
                 }
@@ -540,7 +538,7 @@ final class Logger
         if (Database::isInitialized()) {
             DeferredHelper::flush();
             try {
-                $repo = self::repoInstance(\BlackCat\Database\Packages\SessionAudit\Repository\SessionAuditRepository::class, 'session_audit');
+                $repo = self::repoInstance('BlackCat\\Database\\Packages\\SessionAudit\\Repository\\SessionAuditRepository', 'session_audit');
                 if ($repo !== null && method_exists($repo, 'insert')) {
                     $repo->insert($row);
                 }
@@ -553,7 +551,7 @@ final class Logger
 
         DeferredHelper::enqueue(function() use ($row) {
             try {
-                $repo = self::repoInstance(\BlackCat\Database\Packages\SessionAudit\Repository\SessionAuditRepository::class, 'session_audit');
+                $repo = self::repoInstance('BlackCat\\Database\\Packages\\SessionAudit\\Repository\\SessionAuditRepository', 'session_audit');
                 if ($repo !== null && method_exists($repo, 'insert')) {
                     $repo->insert($row);
                 }
@@ -743,7 +741,7 @@ final class Logger
      */
     private static function writeSystemError(array $row, bool $aggregateByFingerprint): void
     {
-        $repo = self::repoInstance(\BlackCat\Database\Packages\SystemErrors\Repository\SystemErrorRepository::class, 'system_errors');
+        $repo = self::repoInstance('BlackCat\\Database\\Packages\\SystemErrors\\Repository\\SystemErrorRepository', 'system_errors');
         if ($repo === null || !method_exists($repo, 'insert')) {
             return;
         }

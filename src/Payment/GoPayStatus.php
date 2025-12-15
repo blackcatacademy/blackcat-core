@@ -10,8 +10,8 @@ namespace BlackCat\Core\Payment;
  * If `blackcatacademy/blackcat-gopay` is installed, this file aliases:
  * `BlackCat\GoPay\GoPayStatus`.
  */
-if (class_exists(\BlackCat\GoPay\GoPayStatus::class)) {
-    class_alias(\BlackCat\GoPay\GoPayStatus::class, __NAMESPACE__ . '\\GoPayStatus');
+if (class_exists('BlackCat\\GoPay\\GoPayStatus')) {
+    class_alias('BlackCat\\GoPay\\GoPayStatus', __NAMESPACE__ . '\\GoPayStatus');
     return;
 }
 

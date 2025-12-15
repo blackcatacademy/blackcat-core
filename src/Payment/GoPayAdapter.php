@@ -14,8 +14,8 @@ use Psr\SimpleCache\CacheInterface;
  * If `blackcatacademy/blackcat-gopay` is installed, this file aliases:
  * `BlackCat\GoPay\GoPayAdapter`.
  */
-if (class_exists(\BlackCat\GoPay\GoPayAdapter::class)) {
-    class_alias(\BlackCat\GoPay\GoPayAdapter::class, __NAMESPACE__ . '\\GoPayAdapter');
+if (class_exists('BlackCat\\GoPay\\GoPayAdapter')) {
+    class_alias('BlackCat\\GoPay\\GoPayAdapter', __NAMESPACE__ . '\\GoPayAdapter');
     return;
 }
 

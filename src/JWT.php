@@ -7,8 +7,8 @@ declare(strict_types=1);
  * If `blackcatacademy/blackcat-jwt` is installed, this file aliases:
  * `BlackCat\Jwt\CoreCompat\CoreJWT`.
  */
-if (class_exists(\BlackCat\Jwt\CoreCompat\CoreJWT::class)) {
-    class_alias(\BlackCat\Jwt\CoreCompat\CoreJWT::class, 'JWT');
+if (class_exists('BlackCat\\Jwt\\CoreCompat\\CoreJWT')) {
+    class_alias('BlackCat\\Jwt\\CoreCompat\\CoreJWT', 'JWT');
     return;
 }
 

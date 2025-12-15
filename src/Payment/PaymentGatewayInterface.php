@@ -10,8 +10,8 @@ namespace BlackCat\Core\Payment;
  * If `blackcatacademy/blackcat-gopay` is installed, this file aliases:
  * `BlackCat\GoPay\PaymentGatewayInterface`.
  */
-if (interface_exists(\BlackCat\GoPay\PaymentGatewayInterface::class)) {
-    class_alias(\BlackCat\GoPay\PaymentGatewayInterface::class, __NAMESPACE__ . '\\PaymentGatewayInterface');
+if (interface_exists('BlackCat\\GoPay\\PaymentGatewayInterface')) {
+    class_alias('BlackCat\\GoPay\\PaymentGatewayInterface', __NAMESPACE__ . '\\PaymentGatewayInterface');
     return;
 }
 

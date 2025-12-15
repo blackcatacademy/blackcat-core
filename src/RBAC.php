@@ -7,8 +7,8 @@ declare(strict_types=1);
  * If `blackcatacademy/blackcat-rbac` is installed, this file aliases:
  * `BlackCat\Rbac\CoreCompat\CoreRBAC`.
  */
-if (class_exists(\BlackCat\Rbac\CoreCompat\CoreRBAC::class)) {
-    class_alias(\BlackCat\Rbac\CoreCompat\CoreRBAC::class, 'RBAC');
+if (class_exists('BlackCat\\Rbac\\CoreCompat\\CoreRBAC')) {
+    class_alias('BlackCat\\Rbac\\CoreCompat\\CoreRBAC', 'RBAC');
     return;
 }
 

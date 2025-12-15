@@ -136,10 +136,11 @@ final class FileVault
      */
     private static function getFilevaultKeyInfo(?string $specificVersion = null): array
     {
-        if ($specificVersion === null && class_exists('\\BlackCat\\Crypto\\Bridge\\CoreCryptoBridge')) {
+        $bridgeClass = 'BlackCat\\Crypto\\Bridge\\CoreCryptoBridge';
+        if ($specificVersion === null && class_exists($bridgeClass)) {
             try {
                 $slot = self::$bridgeSlot ?: 'core.vault';
-                $material = \BlackCat\Crypto\Bridge\CoreCryptoBridge::deriveKeyMaterial($slot);
+                $material = $bridgeClass::deriveKeyMaterial($slot);
                 if (!isset($material['bytes'])) {
                     throw new \RuntimeException('Bridge did not return raw key bytes');
                 }

@@ -13,11 +13,22 @@ use Psr\SimpleCache\CacheInterface;
  * If `blackcatacademy/blackcat-gopay` is installed, this file aliases:
  * `BlackCat\GoPay\GoPaySdkWrapper` and related exception types.
  */
-if (class_exists(\BlackCat\GoPay\GoPaySdkWrapper::class)) {
-    class_alias(\BlackCat\GoPay\GoPayTokenException::class, __NAMESPACE__ . '\\GoPayTokenException');
-    class_alias(\BlackCat\GoPay\GoPayHttpException::class, __NAMESPACE__ . '\\GoPayHttpException');
-    class_alias(\BlackCat\GoPay\GoPayPaymentException::class, __NAMESPACE__ . '\\GoPayPaymentException');
-    class_alias(\BlackCat\GoPay\GoPaySdkWrapper::class, __NAMESPACE__ . '\\GoPaySdkWrapper');
+if (class_exists('BlackCat\\GoPay\\GoPaySdkWrapper')) {
+    $sdk = 'BlackCat\\GoPay\\GoPaySdkWrapper';
+    $tok = 'BlackCat\\GoPay\\GoPayTokenException';
+    $http = 'BlackCat\\GoPay\\GoPayHttpException';
+    $pay = 'BlackCat\\GoPay\\GoPayPaymentException';
+
+    if (class_exists($tok)) {
+        class_alias($tok, __NAMESPACE__ . '\\GoPayTokenException');
+    }
+    if (class_exists($http)) {
+        class_alias($http, __NAMESPACE__ . '\\GoPayHttpException');
+    }
+    if (class_exists($pay)) {
+        class_alias($pay, __NAMESPACE__ . '\\GoPayPaymentException');
+    }
+    class_alias($sdk, __NAMESPACE__ . '\\GoPaySdkWrapper');
     return;
 }
 
