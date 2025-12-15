@@ -8,10 +8,10 @@ use DateTime;
 /**
  * Class Validator
  *
- * Centralizovaný statický helper pro validaci vstupních dat.
- * - PSR-12 kompatibilní
- * - Nepoužívá globální funkce mimo bezpečné PHP filtry
- * - Žádné side effects (čistě deterministické)
+ * Centralized static helper for validating input data.
+ * - PSR-12 compliant
+ * - Avoids global functions except safe PHP filters
+ * - No side effects (purely deterministic)
  */
 final class Validator
 {
@@ -66,8 +66,9 @@ final class Validator
 
     public static function passwordStrong(string $pw, int $minLength = 12): bool
     {
+        $len = function_exists('mb_strlen') ? mb_strlen($pw) : strlen($pw);
         return (
-            mb_strlen($pw) >= $minLength &&
+            $len >= $minLength &&
             preg_match('/[a-z]/', $pw) &&
             preg_match('/[A-Z]/', $pw) &&
             preg_match('/[0-9]/', $pw) &&
@@ -78,7 +79,13 @@ final class Validator
     public static function stringSanitized(string $s, int $maxLen = 0): string
     {
         $out = preg_replace('/[\x00-\x1F\x7F]/u', '', trim($s));
-        return $maxLen > 0 ? mb_substr($out, 0, $maxLen) : $out;
+        if ($maxLen <= 0) {
+            return $out;
+        }
+        if (function_exists('mb_substr')) {
+            return mb_substr($out, 0, $maxLen);
+        }
+        return substr($out, 0, $maxLen);
     }
 
     public static function fileSize(int $sizeBytes, int $maxBytes): bool
@@ -92,10 +99,10 @@ final class Validator
     }
 
     /**
-     * Validuje JSON payload pro notifikační systém.
+     * Validates JSON payload for the notification system.
      *
-     * @param string $json     JSON obsahující notifikaci
-     * @param string $template Očekávaný template (např. verify_email)
+     * @param string $json     JSON body containing the notification
+     * @param string $template Expected template (e.g., verify_email)
      */
     public static function notificationPayload(string $json, string $template): bool
     {

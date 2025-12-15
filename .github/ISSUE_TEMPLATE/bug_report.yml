@@ -1,0 +1,48 @@
+name: Bug report
+description: Report a reproducible problem in blackcat-core
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: textarea
+    attributes:
+      label: What happened?
+      description: Include error messages and stack traces if available.
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps or a small code sample.
+    validations:
+      required: true
+
+  - type: input
+    attributes:
+      label: PHP version
+      placeholder: "8.3.x"
+    validations:
+      required: false
+
+  - type: input
+    attributes:
+      label: DB driver (if applicable)
+      placeholder: "pdo_pgsql / pdo_mysql / ..."
+    validations:
+      required: false
+
+  - type: checkboxes
+    attributes:
+      label: Confirmation
+      options:
+        - label: I searched existing issues.
+          required: true
+        - label: This is not a security vulnerability (those should be reported via SECURITY policy).
+          required: true
+

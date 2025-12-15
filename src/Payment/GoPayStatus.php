@@ -4,6 +4,17 @@ declare(strict_types=1);
 
 namespace BlackCat\Core\Payment;
 
+/**
+ * Compatibility facade for the legacy `BlackCat\Core\Payment\GoPayStatus` name.
+ *
+ * If `blackcatacademy/blackcat-gopay` is installed, this file aliases:
+ * `BlackCat\GoPay\GoPayStatus`.
+ */
+if (class_exists('BlackCat\\GoPay\\GoPayStatus')) {
+    class_alias('BlackCat\\GoPay\\GoPayStatus', __NAMESPACE__ . '\\GoPayStatus');
+    return;
+}
+
 enum GoPayStatus: string
 {
     case CREATED = 'CREATED';

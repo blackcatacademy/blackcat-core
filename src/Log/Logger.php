@@ -26,7 +26,10 @@ final class Logger
     private static function truncateUserAgent(?string $ua): ?string
     {
         if ($ua === null) return null;
-        return mb_substr($ua, 0, 255);
+        if (function_exists('mb_substr')) {
+            return mb_substr($ua, 0, 255);
+        }
+        return substr($ua, 0, 255);
     }
 
     /**
@@ -173,7 +176,27 @@ final class Logger
 
     private static function validateAuthType(string $type): string
     {
-        $allowed = ['login_success','login_failure','logout','password_reset','lockout'];
+        // Keep in sync with `blackcat-database` package `auth-events` ENUM.
+        $allowed = [
+            'login_success',
+            'login_failure',
+            'logout',
+            'password_reset',
+            'lockout',
+            'magic_link_request',
+            'magic_link_throttled',
+            'magic_link_email_queued',
+            'device_code_issue',
+            'device_code_issue_failure',
+            'device_code_activate_success',
+            'device_code_activate_failure',
+            'device_code_poll_success',
+            'device_code_poll_failure',
+            'webauthn_register_success',
+            'webauthn_register_failure',
+            'webauthn_login_success',
+            'webauthn_login_failure',
+        ];
         return in_array($type, $allowed, true) ? $type : 'login_failure';
     }
 
@@ -192,14 +215,148 @@ final class Logger
     // -------------------------
     // AUTH / REGISTER / VERIFY
     // -------------------------
+
+    /**
+     * Best-effort crypto criteria transform (HMAC) via blackcat-database-crypto (when present).
+     *
+     * @param array<string,mixed> $criteria
+     * @return array<string,mixed>|null
+     */
+    private static function criteriaTransform(string $table, array $criteria): ?array
+    {
+        $locatorClass = 'BlackCat\\Database\\Crypto\\IngressLocator';
+        if (!class_exists($locatorClass)) {
+            return null;
+        }
+
+        try {
+            $adapter = $locatorClass::adapter();
+        } catch (\Throwable) {
+            return null;
+        }
+        if (!is_object($adapter) || !method_exists($adapter, 'criteria')) {
+            return null;
+        }
+
+        try {
+            /** @var mixed $out */
+            $out = $adapter->criteria($table, $criteria);
+        } catch (\Throwable) {
+            return null;
+        }
+        return is_array($out) ? $out : null;
+    }
+
+    /**
+     * @return array{hash: ?string, key_version: ?string, used: string}
+     */
+    private static function resolveIpHash(?string $ip, string $table): array
+    {
+        $ip = $ip ?? self::getClientIp();
+        $ip = is_string($ip) ? trim($ip) : null;
+        if ($ip === null || $ip === '') {
+            return ['hash' => null, 'key_version' => null, 'used' => 'none'];
+        }
+
+        $criteria = self::criteriaTransform($table, ['ip_hash' => $ip]);
+        if (is_array($criteria)) {
+            $hash = self::prepareIpForStorage($criteria['ip_hash'] ?? null);
+            $keyVersion = isset($criteria['ip_hash_key_version']) && is_string($criteria['ip_hash_key_version'])
+                ? $criteria['ip_hash_key_version']
+                : null;
+            if ($hash !== null) {
+                return ['hash' => $hash, 'key_version' => $keyVersion, 'used' => 'ingress'];
+            }
+        }
+
+        $fallback = self::getHashedIp($ip);
+        return [
+            'hash' => self::prepareIpForStorage($fallback['hash'] ?? null),
+            'key_version' => isset($fallback['key_id']) && is_string($fallback['key_id']) ? $fallback['key_id'] : null,
+            'used' => isset($fallback['used']) && is_string($fallback['used']) ? $fallback['used'] : 'none',
+        ];
+    }
+
+    private static function noopIngressAdapter(): ?object
+    {
+        if (!class_exists(\BlackCat\Core\Adapter\NoopIngressAdapter::class)) {
+            return null;
+        }
+        try {
+            return new \BlackCat\Core\Adapter\NoopIngressAdapter();
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
+    private static function isDuplicateError(\Throwable $e): bool
+    {
+        $msg = strtolower($e->getMessage() ?? '');
+        return str_contains($msg, 'duplicate') || str_contains($msg, 'unique') || str_contains($msg, 'constraint');
+    }
+
+    private static function repoInstance(string $repoClass, string $ingressTable): ?object
+    {
+        if (!Database::isInitialized()) {
+            return null;
+        }
+        if (!class_exists($repoClass)) {
+            return null;
+        }
+        try {
+            $db = Database::getInstance();
+            $repo = new $repoClass($db);
+        } catch (\Throwable) {
+            return null;
+        }
+
+        if (method_exists($repo, 'setIngressAdapter')) {
+            $noop = self::noopIngressAdapter();
+            if ($noop !== null) {
+                try {
+                    $repo->setIngressAdapter($noop, $ingressTable);
+                } catch (\Throwable) {
+                }
+            }
+        }
+
+        return is_object($repo) ? $repo : null;
+    }
+
+    private static function safeJsonOrNull(array $data): ?string
+    {
+        if ($data === []) {
+            return null;
+        }
+        return self::safeJsonEncode($data);
+    }
+
+    private static function hex32(?string $bin32): ?string
+    {
+        if (!is_string($bin32) || strlen($bin32) !== 32) {
+            return null;
+        }
+        return strtoupper(bin2hex($bin32));
+    }
+
+    private static function sessionId(): ?string
+    {
+        if (!function_exists('session_id')) {
+            return null;
+        }
+        $sid = session_id();
+        $sid = is_string($sid) ? trim($sid) : null;
+        return $sid !== '' ? $sid : null;
+    }
+
     public static function auth(string $type, ?int $userId = null, ?array $meta = null, ?string $ip = null, ?string $userAgent = null): void
     {
         $type = self::validateAuthType($type);
         $userAgent = self::truncateUserAgent($userAgent ?? self::getUserAgent());
 
-        $ipResult = self::getHashedIp($ip);
-        $ipHash = self::prepareIpForStorage($ipResult['hash']);
-        $ipKeyId = $ipResult['key_id'];
+        $ipResult = self::resolveIpHash($ip, 'auth_events');
+        $ipHash = $ipResult['hash'];
+        $ipKeyVersion = $ipResult['key_version'];
         $ipUsed = $ipResult['used'];
 
         // sanitize meta (remove sensitive values)
@@ -211,64 +368,57 @@ final class Logger
             unset($filteredMeta['email']);
         }
 
-        // If caller provided a precomputed email hash (binary or base64/text), use it for meta_email.
-        $metaEmail = null;
-        if (isset($filteredMeta['email_hash'])) {
-            $eh = $filteredMeta['email_hash'];
-            // if binary (non-printable), base64 encode for storage
-            if (is_string($eh)) {
-                if (preg_match('/[^\x20-\x7E]/', $eh)) {
-                    // binary -> base64
-                    $metaEmail = base64_encode($eh);
-                } else {
-                    // printable -> store as-is (expected base64 or hex or textual token)
-                    $metaEmail = $eh;
-                }
-            } elseif (is_scalar($eh)) {
-                $metaEmail = (string)$eh;
+        // If caller provided a precomputed email hash (bin32/hex64), store it under meta.email
+        // so the generated meta_email column remains queryable without plaintext.
+        if (isset($filteredMeta['email_hash']) && is_string($filteredMeta['email_hash'])) {
+            $bin = self::prepareIpForStorage($filteredMeta['email_hash']);
+            $hex = self::hex32($bin);
+            if ($hex !== null) {
+                $filteredMeta['email'] = $hex;
             }
-            // remove from meta JSON to avoid duplication of sensitive-ish value
             unset($filteredMeta['email_hash']);
         }
 
         // add ip metadata
         $filteredMeta['_ip_hash_used'] = $ipUsed;
-        if ($ipKeyId !== null) $filteredMeta['_ip_hash_key'] = $ipKeyId;
+        if ($ipKeyVersion !== null) {
+            $filteredMeta['_ip_hash_key_version'] = $ipKeyVersion;
+        }
 
-        $json = self::safeJsonEncode($filteredMeta);
-
-        // include meta_email column (stores email_hash token/base64) to avoid saving plaintext email in meta JSON
-        $sql = "INSERT INTO auth_events (user_id, type, ip_hash, ip_hash_key, user_agent, occurred_at, meta, meta_email)
-                VALUES (:user_id, :type, :ip_hash, :ip_hash_key, :ua, UTC_TIMESTAMP(), :meta, :meta_email)";
-
-        $params = [
-            ':user_id'    => $userId,
-            ':type'       => $type,
-            ':ip_hash'    => $ipHash,
-            ':ip_hash_key'=> $ipKeyId,
-            ':ua'         => $userAgent,
-            ':meta'       => $json,
-            ':meta_email' => $metaEmail,
+        $metaJson = self::safeJsonOrNull($filteredMeta);
+        $row = [
+            'user_id' => $userId,
+            'type' => $type,
+            'ip_hash' => $ipHash,
+            'ip_hash_key_version' => $ipKeyVersion,
+            'user_agent' => $userAgent,
+            'meta' => $metaJson,
         ];
 
         if (Database::isInitialized()) {
             // flush earlier items to try to preserve ordering
             DeferredHelper::flush();
             try {
-                Database::getInstance()->execute($sql, $params);
+                $repo = self::repoInstance('BlackCat\\Database\\Packages\\AuthEvents\\Repository\\AuthEventRepository', 'auth_events');
+                if ($repo !== null && method_exists($repo, 'insert')) {
+                    $repo->insert($row);
+                }
             } catch (\Throwable $e) {
-                // silent fail in production — logger nesmí shodit aplikaci
+                // Silent fail in production — logger must not crash the app.
                 return;
             }
             return;
         }
 
-        // DB not ready -> enqueue safe, pre-sanitized SQL/params
-        DeferredHelper::enqueue(function() use ($sql, $params) {
+        // DB not ready -> enqueue safe, pre-sanitized row
+        DeferredHelper::enqueue(function() use ($row) {
             try {
-                Database::getInstance()->execute($sql, $params);
+                $repo = self::repoInstance('BlackCat\\Database\\Packages\\AuthEvents\\Repository\\AuthEventRepository', 'auth_events');
+                if ($repo !== null && method_exists($repo, 'insert')) {
+                    $repo->insert($row);
+                }
             } catch (\Throwable $e) {
-                // silent fail – logger nikdy nesmí shodit aplikaci
+                // Silent fail — logger must never crash the app.
             }
         });
     }
@@ -278,60 +428,65 @@ final class Logger
         $type = self::validateVerifyType($type);
         $userAgent = self::truncateUserAgent($userAgent ?? self::getUserAgent());
 
-        $ipResult = self::getHashedIp($ip);
-        $ipHash = self::prepareIpForStorage($ipResult['hash']);
-        $ipKeyId = $ipResult['key_id'];
+        $ipResult = self::resolveIpHash($ip, 'verify_events');
+        $ipHash = $ipResult['hash'];
+        $ipKeyVersion = $ipResult['key_version'];
         $ipUsed = $ipResult['used'];
 
         $filteredMeta = self::filterSensitive($meta) ?? [];
         $filteredMeta['_ip_hash_used'] = $ipUsed;
-        if ($ipKeyId !== null) $filteredMeta['_ip_hash_key'] = $ipKeyId;
-        $json = self::safeJsonEncode($filteredMeta);
-
-        $sql = "INSERT INTO verify_events (user_id, type, ip_hash, ip_hash_key, user_agent, occurred_at, meta)
-                VALUES (:user_id, :type, :ip_hash, :ip_hash_key, :ua, UTC_TIMESTAMP(), :meta)";
-        $params = [
-            ':user_id' => $userId,
-            ':type' => $type,
-            ':ip_hash' => $ipHash,
-            ':ip_hash_key' => $ipKeyId,
-            ':ua' => $userAgent,
-            ':meta' => $json,
+        if ($ipKeyVersion !== null) {
+            $filteredMeta['_ip_hash_key_version'] = $ipKeyVersion;
+        }
+        $metaJson = self::safeJsonOrNull($filteredMeta);
+        $row = [
+            'user_id' => $userId,
+            'type' => $type,
+            'ip_hash' => $ipHash,
+            'ip_hash_key_version' => $ipKeyVersion,
+            'user_agent' => $userAgent,
+            'meta' => $metaJson,
         ];
 
         if (Database::isInitialized()) {
             DeferredHelper::flush();
             try {
-                Database::getInstance()->execute($sql, $params);
+                $repo = self::repoInstance('BlackCat\\Database\\Packages\\VerifyEvents\\Repository\\VerifyEventRepository', 'verify_events');
+                if ($repo !== null && method_exists($repo, 'insert')) {
+                    $repo->insert($row);
+                }
             } catch (\Throwable $e) {
                 return;
             }
             return;
         }
 
-        DeferredHelper::enqueue(function() use ($sql, $params) {
+        DeferredHelper::enqueue(function() use ($row) {
             try {
-                Database::getInstance()->execute($sql, $params);
+                $repo = self::repoInstance('BlackCat\\Database\\Packages\\VerifyEvents\\Repository\\VerifyEventRepository', 'verify_events');
+                if ($repo !== null && method_exists($repo, 'insert')) {
+                    $repo->insert($row);
+                }
             } catch (\Throwable $e) {
-                // silent fail – logger nikdy nesmí shodit aplikaci
+                // Silent fail — logger must never crash the app.
             }
         });
     }
 
     /**
-     * Zaznamená událost do session_audit.
+     * Records an event into session_audit.
      *
      * @param string $event          event key (validated against allow-list)
      * @param int|null $userId
-     * @param array|null $meta       asociativní pole (sensitive fields budou filtrovány)
+     * @param array|null $meta       associative array (sensitive fields are filtered)
      * @param string|null $ip
      * @param string|null $userAgent
      * @param string|null $outcome
-     * @param string|null $tokenHashBin  binární token_hash (BINARY(32)) - pokud dostupné
+     * @param string|null $tokenHashBin  binary token_hash (BINARY(32)) - if available
      */
     public static function session(string $event, ?int $userId = null, ?array $meta = null, ?string $ip = null, ?string $userAgent = null, ?string $outcome = null, ?string $tokenHashBin = null): void
     {
-        // Rozšířený allow-list (přidej další interní eventy, které používáš)
+        // Extended allow-list (add additional internal events you use).
         $allowed = [
             'session_created','session_destroyed','session_regenerated',
             'csrf_valid','csrf_invalid','session_expired','session_activity',
@@ -339,88 +494,69 @@ final class Logger
         ];
         $event = in_array($event, $allowed, true) ? $event : 'session_activity';
 
-        $ipResult = self::getHashedIp($ip);
-        $ipHash = self::prepareIpForStorage($ipResult['hash']);
-        $ipKeyId = $ipResult['key_id'];
+        $ipResult = self::resolveIpHash($ip, 'session_audit');
+        $ipHash = $ipResult['hash'];
+        $ipKeyVersion = $ipResult['key_version'];
         $ipUsed = $ipResult['used'];
 
         $ua = self::truncateUserAgent($userAgent ?? self::getUserAgent());
         $filteredMeta = self::filterSensitive($meta) ?? [];
-        // doplníme info do meta (neobsahuje raw sensitive data)
+        // Add metadata (does not contain raw sensitive data).
         $filteredMeta['_ip_hash_used'] = $ipUsed;
-        if ($ipKeyId !== null) $filteredMeta['_ip_hash_key'] = $ipKeyId;
-        $json = self::safeJsonEncode($filteredMeta);
-
-        $sessId = null;
-        if (function_exists('session_id')) {
-            $sid = session_id();
-            if ($sid !== '' && $sid !== null) $sessId = $sid;
+        if ($ipKeyVersion !== null) {
+            $filteredMeta['_ip_hash_key_version'] = $ipKeyVersion;
         }
+        $metaJson = self::safeJsonOrNull($filteredMeta);
 
-        // z meta si vyzobneme verze pokud tam jsou
+        $sessId = self::sessionId();
+
+        // Read key versions from metadata if present.
         $sessionTokenKeyVersion = $filteredMeta['session_token_key_version'] ?? null;
         $csrfKeyVersion = $filteredMeta['csrf_key_version'] ?? null;
 
-        $sql = "INSERT INTO session_audit (
-                    session_token,
-                    session_token_key_version,
-                    csrf_key_version,
-                    session_id,
-                    event,
-                    user_id,
-                    ip_hash,
-                    ip_hash_key,
-                    ua,
-                    meta_json,
-                    outcome,
-                    created_at
-                ) VALUES (
-                    :session_token,
-                    :session_token_key_version,
-                    :csrf_key_version,
-                    :session_id,
-                    :event,
-                    :user_id,
-                    :ip_hash,
-                    :ip_hash_key,
-                    :ua,
-                    :meta,
-                    :outcome,
-                    UTC_TIMESTAMP()
-                )";
+        $tokenHashBin = self::prepareIpForStorage($tokenHashBin);
+        $csrfTokenHash = null;
+        if (isset($filteredMeta['csrf_token_hash']) && is_string($filteredMeta['csrf_token_hash'])) {
+            $csrfTokenHash = self::prepareIpForStorage($filteredMeta['csrf_token_hash']);
+        }
 
-        $params = [
-            ':session_token' => $tokenHashBin, // necháváme binární data (Database wrapper musí to umět)
-            ':session_token_key_version' => $sessionTokenKeyVersion,
-            ':csrf_key_version' => $csrfKeyVersion,
-            ':session_id' => $sessId,
-            ':event' => $event,
-            ':user_id' => $userId,
-            ':ip_hash' => $ipHash,
-            ':ip_hash_key' => $ipKeyId,
-            ':ua' => $ua,
-            ':meta' => $json,
-            ':outcome' => $outcome,
+        $row = [
+            'session_token_hash' => $tokenHashBin,
+            'session_token_key_version' => is_string($sessionTokenKeyVersion) ? $sessionTokenKeyVersion : null,
+            'csrf_token_hash' => $csrfTokenHash,
+            'csrf_key_version' => is_string($csrfKeyVersion) ? $csrfKeyVersion : null,
+            'session_id' => $sessId,
+            'event' => $event,
+            'user_id' => $userId,
+            'ip_hash' => $ipHash,
+            'ip_hash_key_version' => $ipKeyVersion,
+            'user_agent' => $ua,
+            'meta_json' => $metaJson,
+            'outcome' => $outcome,
         ];
 
-        // Pokud máš vlastní Database wrapper, který správně váže nibinární hodnoty – ok.
-        // Jinak níže nabízím přímý PDO fallback.
         if (Database::isInitialized()) {
             DeferredHelper::flush();
             try {
-                Database::getInstance()->execute($sql, $params);
+                $repo = self::repoInstance('BlackCat\\Database\\Packages\\SessionAudit\\Repository\\SessionAuditRepository', 'session_audit');
+                if ($repo !== null && method_exists($repo, 'insert')) {
+                    $repo->insert($row);
+                }
             } catch (\Throwable $e) {
-                // silent fail — nechceme shodit aplikaci kvůli auditu
+                // Silent fail — audit logging must not crash the app.
                 return;
             }
             return;
         }
 
-        DeferredHelper::enqueue(function() use ($sql, $params) {
+        DeferredHelper::enqueue(function() use ($row) {
             try {
-                Database::getInstance()->execute($sql, $params);
+                $repo = self::repoInstance('BlackCat\\Database\\Packages\\SessionAudit\\Repository\\SessionAuditRepository', 'session_audit');
+                if ($repo !== null && method_exists($repo, 'insert')) {
+                    $repo->insert($row);
+                }
             } catch (\Throwable $e) {
-                // silent fail – logger nikdy nesmí shodit aplikaci
+                // Silent fail — logger must never crash the app.
             }
         });
     }
@@ -431,26 +567,33 @@ final class Logger
     public static function systemMessage(string $level, string $message, ?int $userId = null, ?array $context = null, ?string $token = null, bool $aggregateByFingerprint = false): void
     {
         $level = in_array($level, ['notice','warning','error','critical'], true) ? $level : 'error';
-        $ipResult = self::getHashedIp(null);
-        $ipHash = self::prepareIpForStorage($ipResult['hash']);
-        $ipKeyId = $ipResult['key_id'];
+        $ipResult = self::resolveIpHash(null, 'system_errors');
+        $ipHash = $ipResult['hash'];
+        $ipKeyVersion = $ipResult['key_version'];
         $ipUsed = $ipResult['used'];
         $ua = self::truncateUserAgent(self::getUserAgent());
         $context = $context ?? [];
         $file = $context['file'] ?? null;
         $line = $context['line'] ?? null;
-        $fingerprint = hash('sha256', $level . '|' . $message . '|' . ($file ?? '') . ':' . ($line ?? ''));
+        $baseFingerprint = hash('sha256', $level . '|' . $message . '|' . ($file ?? '') . ':' . ($line ?? ''));
+        $fingerprint = $baseFingerprint;
+        if (!$aggregateByFingerprint) {
+            $entropy = microtime(true) . '|' . (string)(function_exists('getmypid') ? getmypid() : 0) . '|' . uniqid('', true);
+            $fingerprint = hash('sha256', $baseFingerprint . '|' . $entropy);
+        }
         $context['_ip_hash_used'] = $ipUsed;
-        if ($ipKeyId !== null) $context['_ip_hash_key'] = $ipKeyId;
+        if ($ipKeyVersion !== null) {
+            $context['_ip_hash_key_version'] = $ipKeyVersion;
+        }
         $jsonContext = self::safeJsonEncode($context);
         $rawUrl = $_SERVER['REQUEST_URI'] ?? null;
         if ($rawUrl !== null) {
             $parts = parse_url($rawUrl);
             if (isset($parts['query'])) {
                 parse_str($parts['query'], $q);
-                $qClean = self::filterSensitive($q); // použij tvou funkci
+                $qClean = self::filterSensitive($q); // reuse the existing sanitizer
                 $parts['query'] = http_build_query($qClean);
-                // složíme URL zpět
+                // Build the URL back.
                 $cleanUrl = (isset($parts['path']) ? $parts['path'] : '')
                         . (isset($parts['query']) ? '?' . $parts['query'] : '')
                         . (isset($parts['fragment']) ? '#' . $parts['fragment'] : '');
@@ -461,44 +604,42 @@ final class Logger
             $cleanUrl = null;
         }
 
-        // Upsert style: requires UNIQUE index on fingerprint in DB
-        $sql = "INSERT INTO system_error
-            (level, message, exception_class, file, line, stack_trace, token, context, fingerprint, occurrences, user_id, ip_hash, ip_hash_key, user_agent, url, method, http_status, created_at, last_seen)
-            VALUES (:level, :message, NULL, :file, :line, NULL, :token, :context, :fingerprint, 1, :user_id, :ip_hash, :ip_hash_key, :ua, :url, :method, :status, UTC_TIMESTAMP(), UTC_TIMESTAMP())
-            ON DUPLICATE KEY UPDATE occurrences = occurrences + 1, last_seen = UTC_TIMESTAMP(), message = VALUES(message)";
-
-        $params = [
-            ':level' => $level,
-            ':message' => $message,
-            ':file' => $file,
-            ':line' => $line,
-            ':token' => $token,
-            ':context' => $jsonContext,
-            ':fingerprint' => $fingerprint,
-            ':user_id' => $userId,
-            ':ip_hash' => $ipHash,
-            ':ip_hash_key' => $ipKeyId,
-            ':ua' => $ua,
-            ':url' => $cleanUrl,
-            ':method' => $_SERVER['REQUEST_METHOD'] ?? null,
-            ':status' => http_response_code() ?: null,
+        $status = http_response_code() ?: null;
+        $payload = [
+            'level' => $level,
+            'message' => $message,
+            'exception_class' => null,
+            'file' => is_string($file) ? $file : null,
+            'line' => is_numeric($line) ? (int)$line : null,
+            'stack_trace' => null,
+            'token' => $token,
+            'context' => $jsonContext,
+            'fingerprint' => $fingerprint,
+            'occurrences' => 1,
+            'user_id' => $userId,
+            'ip_hash' => $ipHash,
+            'ip_hash_key_version' => $ipKeyVersion,
+            'user_agent' => $ua,
+            'url' => $cleanUrl,
+            'method' => $_SERVER['REQUEST_METHOD'] ?? null,
+            'http_status' => is_int($status) && $status > 0 ? $status : null,
         ];
 
         if (Database::isInitialized()) {
             DeferredHelper::flush();
             try {
-                Database::getInstance()->execute($sql, $params);
+                self::writeSystemError($payload, $aggregateByFingerprint);
             } catch (\Throwable $e) {
                 return;
             }
             return;
         }
 
-        DeferredHelper::enqueue(function() use ($sql, $params) {
+        DeferredHelper::enqueue(function() use ($payload, $aggregateByFingerprint) {
             try {
-                Database::getInstance()->execute($sql, $params);
+                self::writeSystemError($payload, $aggregateByFingerprint);
             } catch (\Throwable $e) {
-                // silent fail – logger nikdy nesmí shodit aplikaci
+                // Silent fail — logger must never crash the app.
             }
         });
     }
@@ -516,26 +657,33 @@ final class Logger
         $line = $e->getLine();
         $stack = !empty($_ENV['DEBUG']) ? $e->getTraceAsString() : null;
 
-        $ipResult = self::getHashedIp(null);
-        $ipHash = self::prepareIpForStorage($ipResult['hash']);
-        $ipKeyId = $ipResult['key_id'];
+        $ipResult = self::resolveIpHash(null, 'system_errors');
+        $ipHash = $ipResult['hash'];
+        $ipKeyVersion = $ipResult['key_version'];
         $ipUsed = $ipResult['used'];
 
         $ua = self::truncateUserAgent(self::getUserAgent());
-        $fingerprint = hash('sha256', $message . '|' . $exceptionClass . '|' . $file . ':' . $line);
+        $baseFingerprint = hash('sha256', $message . '|' . $exceptionClass . '|' . $file . ':' . $line);
+        $fingerprint = $baseFingerprint;
+        if (!$aggregateByFingerprint) {
+            $entropy = microtime(true) . '|' . (string)(function_exists('getmypid') ? getmypid() : 0) . '|' . uniqid('', true);
+            $fingerprint = hash('sha256', $baseFingerprint . '|' . $entropy);
+        }
 
         $context = $context ?? [];
         $context['_ip_hash_used'] = $ipUsed;
-        if ($ipKeyId !== null) $context['_ip_hash_key'] = $ipKeyId;
+        if ($ipKeyVersion !== null) {
+            $context['_ip_hash_key_version'] = $ipKeyVersion;
+        }
         $jsonContext = self::safeJsonEncode($context);
         $rawUrl = $_SERVER['REQUEST_URI'] ?? null;
         if ($rawUrl !== null) {
             $parts = parse_url($rawUrl);
             if (isset($parts['query'])) {
                 parse_str($parts['query'], $q);
-                $qClean = self::filterSensitive($q); // použij tvou funkci
+                $qClean = self::filterSensitive($q); // reuse the existing sanitizer
                 $parts['query'] = http_build_query($qClean);
-                // složíme URL zpět
+                // Build the URL back.
                 $cleanUrl = (isset($parts['path']) ? $parts['path'] : '')
                         . (isset($parts['query']) ? '?' . $parts['query'] : '')
                         . (isset($parts['fragment']) ? '#' . $parts['fragment'] : '');
@@ -546,46 +694,102 @@ final class Logger
             $cleanUrl = null;
         }
 
-        $sql = "INSERT INTO system_error
-            (level, message, exception_class, file, line, stack_trace, token, context, fingerprint, occurrences, user_id, ip_hash, ip_hash_key, user_agent, url, method, http_status, created_at, last_seen)
-            VALUES ('error', :message, :exception_class, :file, :line, :stack_trace, :token, :context, :fingerprint, 1, :user_id, :ip_hash, :ip_hash_key, :ua, :url, :method, :status, UTC_TIMESTAMP(), UTC_TIMESTAMP())
-            ON DUPLICATE KEY UPDATE occurrences = occurrences + 1, last_seen = UTC_TIMESTAMP(), stack_trace = VALUES(stack_trace)";
-
-        $params = [
-            ':message' => $message,
-            ':exception_class' => $exceptionClass,
-            ':file' => $file,
-            ':line' => $line,
-            ':stack_trace' => $stack,
-            ':token' => $token,
-            ':context' => $jsonContext,
-            ':fingerprint' => $fingerprint,
-            ':user_id' => $userId,
-            ':ip_hash' => $ipHash,
-            ':ip_hash_key' => $ipKeyId,
-            ':ua' => $ua,
-            ':url' => $cleanUrl,
-            ':method' => $_SERVER['REQUEST_METHOD'] ?? null,
-            ':status' => http_response_code() ?: null,
+        $status = http_response_code() ?: null;
+        $payload = [
+            'level' => 'error',
+            'message' => $message,
+            'exception_class' => $exceptionClass,
+            'file' => $file,
+            'line' => $line,
+            'stack_trace' => $stack,
+            'token' => $token,
+            'context' => $jsonContext,
+            'fingerprint' => $fingerprint,
+            'occurrences' => 1,
+            'user_id' => $userId,
+            'ip_hash' => $ipHash,
+            'ip_hash_key_version' => $ipKeyVersion,
+            'user_agent' => $ua,
+            'url' => $cleanUrl,
+            'method' => $_SERVER['REQUEST_METHOD'] ?? null,
+            'http_status' => is_int($status) && $status > 0 ? $status : null,
         ];
 
         if (Database::isInitialized()) {
             DeferredHelper::flush();
             try {
-                Database::getInstance()->execute($sql, $params);
+                self::writeSystemError($payload, $aggregateByFingerprint);
             } catch (\Throwable $ex) {
                 return;
             }
             return;
         }
 
-        DeferredHelper::enqueue(function() use ($sql, $params) {
+        DeferredHelper::enqueue(function() use ($payload, $aggregateByFingerprint) {
             try {
-                Database::getInstance()->execute($sql, $params);
+                self::writeSystemError($payload, $aggregateByFingerprint);
             } catch (\Throwable $e) {
-                // silent fail – logger nikdy nesmí shodit aplikaci
+                // Silent fail — logger must never crash the app.
             }
         });
+    }
+
+    /**
+     * Insert into `system_errors` with optional fingerprint aggregation (occurrences++).
+     *
+     * @param array<string,mixed> $row
+     */
+    private static function writeSystemError(array $row, bool $aggregateByFingerprint): void
+    {
+        $repo = self::repoInstance('BlackCat\\Database\\Packages\\SystemErrors\\Repository\\SystemErrorRepository', 'system_errors');
+        if ($repo === null || !method_exists($repo, 'insert')) {
+            return;
+        }
+
+        $fingerprint = $row['fingerprint'] ?? null;
+        $fingerprint = is_string($fingerprint) ? trim($fingerprint) : '';
+        if ($fingerprint === '') {
+            return;
+        }
+
+        if (!$aggregateByFingerprint) {
+            $repo->insert($row);
+            return;
+        }
+
+        try {
+            $repo->insert($row);
+            return;
+        } catch (\Throwable $e) {
+            if (!self::isDuplicateError($e)) {
+                throw $e;
+            }
+        }
+
+        if (!method_exists($repo, 'getByFingerprint') || !method_exists($repo, 'updateById')) {
+            return;
+        }
+
+        $existing = $repo->getByFingerprint($fingerprint, false);
+        if (!is_array($existing) || !isset($existing['id'])) {
+            return;
+        }
+
+        $occ = isset($existing['occurrences']) ? (int)$existing['occurrences'] : 1;
+        $occ = max(1, $occ + 1);
+
+        $update = [
+            'occurrences' => $occ,
+            'last_seen' => (new \DateTimeImmutable('now', new \DateTimeZone('UTC')))->format('Y-m-d H:i:s.u'),
+        ];
+        if (isset($row['message'])) {
+            $update['message'] = $row['message'];
+        }
+        if (isset($row['stack_trace']) && $row['stack_trace'] !== null) {
+            $update['stack_trace'] = $row['stack_trace'];
+        }
+
+        $repo->updateById($existing['id'], $update);
     }
 
     // Convenience aliases

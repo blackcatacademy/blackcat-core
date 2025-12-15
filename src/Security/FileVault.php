@@ -28,20 +28,23 @@ final class FileVault
     private const FRAME_SIZE = 1 * 1024 * 1024; // 1 MB
 
     /* -------- configuration / dependency injection (no getenv / no $GLOBALS) -------- */
-    /** @var string|null explicitně nastavený keys dir */
+    /** @var string|null explicitly configured keys directory */
     private static ?string $keysDir = null;
-    /** @var string|null explicitně nastavený storage base */
+    /** @var string|null explicitly configured storage base */
     private static ?string $storageBase = null;
-    /** @var string|null explicitně nastavený audit dir */
+    /** @var string|null explicitly configured audit directory */
     private static ?string $auditDir = null;
-    /** @var PDO|null explicitně nastavené PDO pro audit (optional) */
+    /** @var PDO|null explicitly configured PDO for audit (optional) */
     private static ?\PDO $auditPdo = null;
     /**
      * actor provider: callable(): string|null
-     * Výchozí null = 'guest' (nevoláme session_start() uvnitř knihovny).
+     * Default null = 'guest' (the library does not call session_start()).
      */
     /** @var callable|null actor provider: callable(): string|null */
     private static $actorProvider = null;
+
+    /** @var string slot name inside blackcat-crypto bridge */
+    private static string $bridgeSlot = 'core.vault';
 
     public static function setKeysDir(string $dir): void
     {
@@ -82,6 +85,7 @@ final class FileVault
         if (!empty($opts['audit_dir'])) self::setAuditDir($opts['audit_dir']);
         if (!empty($opts['audit_pdo']) && $opts['audit_pdo'] instanceof \PDO) self::setAuditPdo($opts['audit_pdo']);
         if (!empty($opts['actor_provider']) && is_callable($opts['actor_provider'])) self::setActorProvider($opts['actor_provider']);
+        if (!empty($opts['bridge_slot'])) self::$bridgeSlot = (string) $opts['bridge_slot'];
     }
 
 
@@ -97,7 +101,7 @@ final class FileVault
             return self::$keysDir;
         }
 
-        // pokud není explicitně nastaveno, použij bezpečný default relativně k projektu
+        // when not set explicitly, use a safe default relative to the project root
         $default = __DIR__ . '/../secure/keys';
         return $default;
     }
@@ -108,7 +112,7 @@ final class FileVault
             return self::$storageBase;
         }
 
-        // bezpečný default
+        // safe default
         return __DIR__ . '/../secure/storage';
     }
 
@@ -118,7 +122,7 @@ final class FileVault
             return self::$auditDir;
         }
 
-        // pokud není explicitní audit dir, vytvoříme audit pod storage
+        // if no audit directory is provided, create one under storage
         $storage = self::getStorageBase();
         return rtrim($storage, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'audit';
     }
@@ -126,31 +130,41 @@ final class FileVault
 
     /**
      * Helper: get key raw bytes and version for filevault keys.
-     * If $specificVersion provided (like 'v1'), try to load exact file: filevault_key_v1.bin
+     * If $specificVersion provided (like 'v1'), try to load exact file: filevault_key_v1.key
      * Returns ['raw' => <bytes>, 'version' => 'vN']
      * Throws RuntimeException on failure.
      */
     private static function getFilevaultKeyInfo(?string $specificVersion = null): array
     {
+        $bridgeClass = 'BlackCat\\Crypto\\Bridge\\CoreCryptoBridge';
+        if ($specificVersion === null && class_exists($bridgeClass)) {
+            try {
+                $slot = self::$bridgeSlot ?: 'core.vault';
+                $material = $bridgeClass::deriveKeyMaterial($slot);
+                if (!isset($material['bytes'])) {
+                    throw new \RuntimeException('Bridge did not return raw key bytes');
+                }
+                return [
+                    'raw' => $material['bytes'],
+                    'version' => self::normalizeKeyVersion((string)($material['id'] ?? 'v1')),
+                    'id' => (string)($material['id'] ?? 'v1'),
+                ];
+            } catch (\Throwable $e) {
+                self::logError('FileVault bridge key lookup failed: ' . $e->getMessage());
+            }
+        }
+
         $keysDir = self::getKeysDir();
 
         // If specific version requested, attempt to load exact file
         if ($specificVersion !== null && $specificVersion !== '') {
             $verNum = ltrim($specificVersion, 'vV');
             if ($verNum === '') $verNum = '1';
-            $path = rtrim($keysDir, '/\\') . '/filevault_key_v' . $verNum . '.bin';
+            $path = rtrim($keysDir, '/\\') . '/filevault_key_v' . $verNum . '.key';
             if (is_readable($path)) {
                 $raw = @file_get_contents($path);
                 if ($raw !== false && strlen($raw) === SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_KEYBYTES) {
-                    return ['raw' => $raw, 'version' => 'v' . $verNum];
-                }
-            }
-            // fallback: try non-versioned name
-            $path2 = rtrim($keysDir, '/\\') . '/filevault_key.bin';
-            if (is_readable($path2)) {
-                $raw = @file_get_contents($path2);
-                if ($raw !== false && strlen($raw) === SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_KEYBYTES) {
-                    return ['raw' => $raw, 'version' => 'v1'];
+                    return ['raw' => $raw, 'version' => 'v' . $verNum, 'id' => 'v' . $verNum];
                 }
             }
 
@@ -166,7 +180,11 @@ final class FileVault
             if (!is_array($info) || !isset($info['raw'])) {
                 throw new \RuntimeException('KeyManager did not return key info');
             }
-            return ['raw' => $info['raw'], 'version' => $info['version'] ?? 'v1'];
+            return [
+                'raw' => $info['raw'],
+                'version' => $info['version'] ?? 'v1',
+                'id' => $info['version'] ?? 'v1',
+            ];
         } catch (\Throwable $e) {
             // do not leak internal exception messages — rethrow a generic runtime exception
             throw new \RuntimeException('getFilevaultKeyInfo failure');
@@ -188,11 +206,13 @@ final class FileVault
             return false;
         }
 
+        $keyId = null;
         // try to get key info (throws on fatal)
         try {
             $keyInfo = self::getFilevaultKeyInfo(null);
             $key = $keyInfo['raw'];
             $keyVersion = $keyInfo['version'];
+            $keyId = $keyInfo['id'] ?? $keyVersion;
         } catch (\Throwable $e) {
             self::logError('uploadAndEncrypt: key retrieval failed: ' . $e->getMessage());
             return false;
@@ -226,6 +246,16 @@ final class FileVault
             // write version byte
             if (fwrite($out, chr(self::VERSION)) === false) {
                 throw new \RuntimeException('failed writing version byte');
+            }
+            $keyIdBytes = $keyId ?? '';
+            $keyIdLen = strlen($keyIdBytes);
+            if ($keyIdLen > 255) {
+                $keyIdBytes = substr($keyIdBytes, 0, 255);
+                $keyIdLen = 255;
+            }
+
+            if (fwrite($out, chr($keyIdLen)) === false || ($keyIdLen > 0 && fwrite($out, $keyIdBytes) === false)) {
+                throw new \RuntimeException('failed writing key id');
             }
 
             $useStream = ($filesize > self::STREAM_THRESHOLD);
@@ -280,6 +310,8 @@ final class FileVault
                     'mode' => 'stream',
                     'version' => self::VERSION,
                     'key_version' => $keyVersion,
+                    'context' => self::$bridgeSlot,
+                    'key_id' => $keyId ?? $keyVersion,
                     'encryption_algo' => 'secretstream_xchacha20poly1305'
                 ];
                 $metaJson = json_encode($meta, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
@@ -349,6 +381,8 @@ final class FileVault
                 'mode' => 'single',
                 'version' => self::VERSION,
                 'key_version' => $keyVersion,
+                'context' => self::$bridgeSlot,
+                'key_id' => $keyId ?? $keyVersion,
                 'encryption_algo' => 'xchacha20poly1305_ietf'
             ];
             $metaJson = json_encode($meta, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
@@ -442,6 +476,7 @@ final class FileVault
             $keyInfo = self::getFilevaultKeyInfo($specificKeyVersion);
             $key = $keyInfo['raw'];
             $keyVersion = $keyInfo['version'];
+            $keyId = $keyInfo['id'] ?? $keyVersion;
         } catch (\Throwable $e) {
             self::logError('decryptAndStream: key retrieval failed: ' . $e->getMessage());
             return false;
@@ -466,6 +501,20 @@ final class FileVault
             $version = ord($versionByte);
             if ($version !== self::VERSION) {
                 throw new \RuntimeException('unsupported version: ' . $version);
+            }
+            $keyId = null;
+            if ($version === 2) {
+                $b = fread($fh, 1);
+                if ($b === false || strlen($b) !== 1) {
+                    throw new \RuntimeException('failed reading key id len');
+                }
+                $keyIdLen = ord($b);
+                if ($keyIdLen > 0) {
+                    $keyId = fread($fh, $keyIdLen);
+                    if ($keyId === false || strlen($keyId) !== $keyIdLen) {
+                        throw new \RuntimeException('failed reading key id');
+                    }
+                }
             }
 
             // iv_len
@@ -526,7 +575,7 @@ final class FileVault
                 $success = true;
 
                 // audit log (best-effort)
-                self::maybeAudit($encPath, $downloadName, $contentLength ?? $len, $keyVersion);
+                self::maybeAudit($encPath, $downloadName, $contentLength ?? $len, $keyVersion, $keyId ?? null);
                 return true;
             }
 
@@ -559,7 +608,7 @@ final class FileVault
 
             $success = true;
             // audit log (best-effort)
-            self::maybeAudit($encPath, $downloadName, $contentLength ?? $outTotal, $keyVersion);
+            self::maybeAudit($encPath, $downloadName, $contentLength ?? $outTotal, $keyVersion, $keyId ?? null);
             return true;
         } catch (\Throwable $e) {
             self::logError('decryptAndStream: ' . $e->getMessage());
@@ -607,7 +656,7 @@ final class FileVault
      * @param int|null $plainSize
      * @param string|null $keyVersion
      */
-    private static function maybeAudit(string $encPath, string $downloadName, ?int $plainSize, ?string $keyVersion = null): void
+    private static function maybeAudit(string $encPath, string $downloadName, ?int $plainSize, ?string $keyVersion = null, ?string $keyId = null): void
     {
         try {
             if (!class_exists(AuditLogger::class, true)) return;
@@ -632,6 +681,7 @@ final class FileVault
                 'enc_path' => $encPath,
                 'download_name' => $downloadName,
                 'plain_size' => $plainSize,
+                'key_id' => $keyId,
             ];
             $payload = json_encode($details, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
             if ($payload === false) $payload = json_encode(['enc_path' => $encPath], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
@@ -655,5 +705,18 @@ final class FileVault
             }
         }
         error_log('[FileVault] ' . $msg);
+    }
+
+    private static function normalizeKeyVersion(string $id): string
+    {
+        if ($id === '') {
+            return 'v1';
+        }
+
+        if (preg_match('/v(\d+)/i', $id, $m)) {
+            return 'v' . $m[1];
+        }
+
+        return 'v' . substr(hash('crc32', $id), 0, 4);
     }
 }

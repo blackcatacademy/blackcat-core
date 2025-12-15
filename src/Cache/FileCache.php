@@ -54,6 +54,14 @@ class FileCache implements LockingCacheInterface
 
     private const SAFE_PREFIX_LEN = 32;
 
+    private static function substrSafe(string $s, int $start, int $length): string
+    {
+        if (function_exists('mb_substr')) {
+            return mb_substr($s, $start, $length);
+        }
+        return substr($s, $start, $length);
+    }
+
     public static function ensurePsrExceptionExists(): void
     {
         // helper; PSR exception class defined below
@@ -197,7 +205,7 @@ class FileCache implements LockingCacheInterface
 
     private function getPath(string $key): string
     {
-        $prefix = preg_replace('/[^a-zA-Z0-9_\-]/', '_', mb_substr($key, 0, self::SAFE_PREFIX_LEN));
+        $prefix = preg_replace('/[^a-zA-Z0-9_\-]/', '_', self::substrSafe($key, 0, self::SAFE_PREFIX_LEN));
         if ($prefix === '') $prefix = 'key';
         $hash = hash('sha256', $key);
 
@@ -310,7 +318,7 @@ class FileCache implements LockingCacheInterface
      */
     public function acquireLock(string $name, int $ttlSeconds = 10): ?string
     {
-        $safe = preg_replace('/[^A-Za-z0-9_\-]/', '_', mb_substr($name, 0, 64));
+        $safe = preg_replace('/[^A-Za-z0-9_\-]/', '_', self::substrSafe($name, 0, 64));
         $locksDir = $this->cacheDirReal . DIRECTORY_SEPARATOR . 'locks';
         if (!is_dir($locksDir)) {
             @mkdir($locksDir, 0700, true);
@@ -363,7 +371,7 @@ class FileCache implements LockingCacheInterface
      */
     public function releaseLock(string $name, string $token): bool
     {
-        $safe = preg_replace('/[^A-Za-z0-9_\-]/', '_', mb_substr($name, 0, 64));
+        $safe = preg_replace('/[^A-Za-z0-9_\-]/', '_', self::substrSafe($name, 0, 64));
         $lockFile = $this->cacheDirReal . DIRECTORY_SEPARATOR . 'locks' . DIRECTORY_SEPARATOR . $safe . '.lock';
         if (!is_file($lockFile) || !is_readable($lockFile)) return false;
         $raw = @file_get_contents($lockFile);
@@ -670,8 +678,8 @@ class FileCache implements LockingCacheInterface
      */
     public function deleteKeysByPrefix(string $prefix): int
     {
-        $this->validateKey(mb_substr($prefix, 0, self::SAFE_PREFIX_LEN)); // quick sanity (may throw)
-        $safePrefix = preg_replace('/[^a-zA-Z0-9_\-]/', '_', mb_substr($prefix, 0, self::SAFE_PREFIX_LEN));
+        $this->validateKey(self::substrSafe($prefix, 0, self::SAFE_PREFIX_LEN)); // quick sanity (may throw)
+        $safePrefix = preg_replace('/[^a-zA-Z0-9_\-]/', '_', self::substrSafe($prefix, 0, self::SAFE_PREFIX_LEN));
         $deleted = 0;
 
         $it = new \RecursiveIteratorIterator(

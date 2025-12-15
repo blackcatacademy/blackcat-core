@@ -30,6 +30,10 @@ final class Crypto
 
     private const VERSION = 1;
     private const AD = 'app:crypto:v1';
+    private const BRIDGE_DEFAULT_SLOT = 'crypto.default';
+    private const BRIDGE_CSRF_SLOT = 'hmac.csrf';
+
+    private static bool $bridgeEnabled = false;
 
     public static function setLogger(?LoggerInterface $logger): void
     {
@@ -71,6 +75,18 @@ final class Crypto
     public static function hmac(string $data, string $keyName, string $basename, ?string $keysDir = null, bool $allCandidates = false): array|string
     {
         $keysDir = $keysDir ?? self::$keysDir;
+        $bridgeClass = 'BlackCat\\Crypto\\Bridge\\CoreCryptoBridge';
+        if (self::$bridgeEnabled && !$allCandidates && $keysDir === self::$keysDir && class_exists($bridgeClass)) {
+            $slot = self::mapHmacSlot($basename);
+            if ($slot !== null) {
+                try {
+                    return $bridgeClass::hmac($slot, $data);
+                } catch (\Throwable $e) {
+                    self::logError('Crypto::hmac bridge failed', ['exception' => $e->getMessage()]);
+                }
+            }
+        }
+
         if ($allCandidates) {
             return KeyManager::deriveHmacCandidates($keyName, $keysDir, $basename, $data);
         }
@@ -118,6 +134,28 @@ final class Crypto
         }
 
         self::logDebug('Crypto initialized', ['keys' => count(self::$keys)]);
+
+        self::$bridgeEnabled = false;
+        $bridgeClass = 'BlackCat\\Crypto\\Bridge\\CoreCryptoBridge';
+        if (class_exists($bridgeClass)) {
+            try {
+                $bridgeClass::configure([
+                    'keys_dir' => self::$keysDir,
+                    'logger' => self::logger(),
+                ]);
+                $bridgeClass::boot();
+                self::$bridgeEnabled = true;
+                self::logDebug('Crypto bridge enabled');
+            } catch (\Throwable $e) {
+                self::logError('Crypto bridge init failed', ['exception' => $e->getMessage()]);
+                try {
+                    $bridgeClass::flush();
+                } catch (\Throwable $_) {
+                    // ignore
+                }
+                self::$bridgeEnabled = false;
+            }
+        }
     }
 
     /**
@@ -149,6 +187,15 @@ final class Crypto
         self::$keys = [];
         self::$primaryKey = null;
         self::logDebug('Crypto cleared keys');
+
+        $bridgeClass = 'BlackCat\\Crypto\\Bridge\\CoreCryptoBridge';
+        if (self::$bridgeEnabled && class_exists($bridgeClass)) {
+            try {
+                $bridgeClass::flush();
+            } catch (\Throwable $_) {
+                // ignore
+            }
+        }
     }
 
     /**
@@ -172,6 +219,19 @@ final class Crypto
 
         if ($outFormat !== 'binary' && $outFormat !== 'compact_base64') {
             throw new \InvalidArgumentException('Unsupported outFormat');
+        }
+
+        $bridgeClass = 'BlackCat\\Crypto\\Bridge\\CoreCryptoBridge';
+        if (self::$bridgeEnabled && class_exists($bridgeClass)) {
+            try {
+                $binary = $bridgeClass::encryptBinary(self::BRIDGE_DEFAULT_SLOT, $plaintext);
+                if ($outFormat === 'compact_base64') {
+                    return base64_encode($binary);
+                }
+                return $binary;
+            } catch (\Throwable $e) {
+                self::logError('Crypto::encrypt bridge failed', ['exception' => $e->getMessage()]);
+            }
         }
 
         $nonceSize = SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_NPUBBYTES; // 24
@@ -208,14 +268,38 @@ final class Crypto
             return null;
         }
 
+        $bridgeClass = 'BlackCat\\Crypto\\Bridge\\CoreCryptoBridge';
+        if (self::$bridgeEnabled && class_exists($bridgeClass)) {
+            $normalized = self::normalizePayload($payload);
+            if ($normalized !== null) {
+                try {
+                    $plain = $bridgeClass::decryptBinary(self::BRIDGE_DEFAULT_SLOT, $normalized);
+                    if ($plain !== null) {
+                        return $plain;
+                    }
+                } catch (\Throwable $e) {
+                    self::logError('Crypto::decrypt bridge failed', ['exception' => $e->getMessage()]);
+                }
+            }
+        }
+
         // versioned-binary shortcut
-        if (strlen($payload) >= 1 && ord($payload[0]) === self::VERSION) {
-            return self::decrypt_versioned($payload);
+        if (strlen($payload) >= 1) {
+            $prefix = ord($payload[0]);
+            if ($prefix === self::VERSION || $prefix === 2) {
+                return self::decrypt_versioned($payload);
+            }
         }
 
         // compact_base64 path
         $decoded = base64_decode($payload, true);
         if ($decoded !== false) {
+            if (strlen($decoded) >= 1) {
+                $prefix = ord($decoded[0]);
+                if ($prefix === self::VERSION || $prefix === 2) {
+                    return self::decrypt_versioned($decoded);
+                }
+            }
             $nonceLen = SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_NPUBBYTES;
             if (strlen($decoded) < $nonceLen + SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_ABYTES) {
                 self::logError('decrypt failed: compact_base64 too short');
@@ -239,8 +323,11 @@ final class Crypto
         }
 
         // fallback check versioned-binary again (if raw binary passed)
-        if (strlen($payload) >= 1 && ord($payload[0]) === self::VERSION) {
-            return self::decrypt_versioned($payload);
+        if (strlen($payload) >= 1) {
+            $prefix = ord($payload[0]);
+            if ($prefix === self::VERSION || $prefix === 2) {
+                return self::decrypt_versioned($payload);
+            }
         }
 
         self::logError('decrypt failed: unknown payload format');
@@ -257,7 +344,19 @@ final class Crypto
 
         $ptr = 0;
         $version = ord($data[$ptr++]);
-        if ($version !== self::VERSION) {
+        $keyIdLen = 0;
+        if ($version === 2) {
+            if ($ptr >= $len) {
+                self::logError('decrypt_versioned: missing key id length');
+                return null;
+            }
+            $keyIdLen = ord($data[$ptr++]);
+            if ($keyIdLen < 0 || $ptr + $keyIdLen > $len) {
+                self::logError('decrypt_versioned: invalid key id length ' . $keyIdLen);
+                return null;
+            }
+            $ptr += $keyIdLen;
+        } elseif ($version !== self::VERSION) {
             self::logError('decrypt_versioned: unsupported version ' . $version);
             return null;
         }
@@ -415,5 +514,43 @@ final class Crypto
         // unknown format
         self::logError('decryptWithKeyCandidates: unknown format');
         return null;
+    }
+
+    private static function normalizePayload(string $payload): ?string
+    {
+        if ($payload === '') {
+            return null;
+        }
+
+        $prefix = ord($payload[0]);
+        if ($prefix === self::VERSION || $prefix === 2) {
+            return $payload;
+        }
+
+        $decoded = base64_decode($payload, true);
+        if ($decoded === false || $decoded === '') {
+            return null;
+        }
+
+        $first = ord($decoded[0]);
+        if ($first === self::VERSION || $first === 2) {
+            return $decoded;
+        }
+
+        // legacy compact_base64 payloads did not include version prefix; return decoded anyway
+        if (strlen($decoded) > SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_NPUBBYTES) {
+            return $decoded;
+        }
+
+        return null;
+    }
+
+    private static function mapHmacSlot(string $basename): ?string
+    {
+        return match ($basename) {
+            'csrf_key' => self::BRIDGE_CSRF_SLOT,
+            'session_token_key' => 'core.hmac.session',
+            default => null,
+        };
     }
 }

@@ -1,54 +1,83 @@
-# BlackCat Core — BlackCat\Core
+![BlackCat Core](.github/blackcat-core-banner.png)
 
-<p align="left">
-  <img src="https://github.com/blackcatacademy/blackcat-core/blob/master/.github/logo.png" alt="BlackCat Core Logo" width="160" />
-</p>
+# BlackCat Core (Kernel)
 
-**Status:** 🔧 *In Development*
+[![CI](https://github.com/blackcatacademy/blackcat-core/actions/workflows/ci.yml/badge.svg)](https://github.com/blackcatacademy/blackcat-core/actions/workflows/ci.yml)
 
-A proprietary set of PHP libraries (libs) built on `libsodium` (`ext-sodium`), serving as the foundational framework (library set) for the e-commerce platform developed by **Black Cat Academy s. r. o.**.
+`blackcat-core` is the **minimal kernel** of the BlackCat ecosystem: a small, auditable set of primitives and utilities that other modules build on.
 
----
+It is designed for two modes:
+- **Kernel-only deployments** (extreme minimalism / custom systems)
+- **Modular deployments** (recommended): `blackcat-core` + purpose-built modules (`blackcat-database`, `blackcat-auth`, `blackcat-messaging`, …)
 
-## 🧩 Requirements
-```json
-"require": {
-  "php": "^8.1",
-  "ext-sodium": "*",
-  "psr/simple-cache": "^1.0",
-  "psr/log": "^1.1"
-}
-```
+## What lives here
 
----
+- `BlackCat\Core\Database` — hardened PDO wrapper (prepared statements, retries, observability helpers, safety guards).
+- `BlackCat\Database\SqlDialect` + `BlackCat\Database\Support\Observability` / `QueryObserver` — shared DB primitives used by the kernel DB wrapper and generated repositories.
+- `BlackCat\Core\Security\KeyManager` / `Crypto` / `CSRF` / `FileVault` — low-level security primitives (versioned keys, AEAD, CSRF binding, file-at-rest encryption).
+- `BlackCat\Core\Cache\*` — PSR-16 caches (memory/file/null) and locking support.
+- `BlackCat\Core\Log\Logger` / `AuditLogger` — lightweight logging helpers for kernel-only stacks.
+- `BlackCat\Core\Migrations\MigrationRunner` — tiny migration runner (no schema source of truth inside core).
+- `BlackCat\Core\Templates\Templates` + `BlackCat\Core\Validation\Validator` — small DX helpers.
 
-## 🚀 Installation
-This package is **proprietary** and **not distributed via Packagist**. Installation should be done manually or from the internal Git repository.
+## What does NOT live here
+
+To keep a single source of truth and avoid duplicated business logic, these belong to dedicated modules:
+
+- **DB schema, views, joins, generated repositories** → `blackcatacademy/blackcat-database`
+- **DB encryption ingress (automatic field encryption/hmac)** → `blackcatacademy/blackcat-database-crypto` (+ `blackcat/crypto`)
+- **Auth flows (register/login/verify/reset/magic-link/webauthn)** → `blackcatacademy/blackcat-auth`
+- **Sessions** → `blackcatacademy/blackcat-sessions`
+- **Outbox/inbox workers + transports** → `blackcatacademy/blackcat-messaging`
+- **Notifications + mailing worker** → `blackcatacademy/blackcat-mailing`
+- **Job queue** → `blackcatacademy/blackcat-jobs`
+- **JWT** → `blackcatacademy/blackcat-jwt`
+- **RBAC** → `blackcatacademy/blackcat-rbac`
+- **GoPay** → `blackcatacademy/blackcat-gopay`
+
+## Compatibility facades (optional)
+
+Some legacy class names are kept as **thin facades**. When the target module is installed, the class is `class_alias`-ed to the real implementation; otherwise it fails fast with a clear error:
+
+- `BlackCat\Core\Messaging\Outbox` / `Inbox` → `blackcatacademy/blackcat-messaging`
+- `BlackCat\Core\Mail\Mailer` → `blackcatacademy/blackcat-mailing`
+- `BlackCat\Core\Security\Auth` / `LoginLimiter` → `blackcatacademy/blackcat-auth`
+- Global `JWT`, `RBAC`, `JobQueue` → `blackcatacademy/blackcat-jwt`, `blackcatacademy/blackcat-rbac`, `blackcatacademy/blackcat-jobs`
+
+New code should depend on the dedicated module directly.
+
+## Install
 
 ```bash
-composer install
+composer require blackcatacademy/blackcat-core
 ```
 
----
+## Quick start (Database)
 
-## ⚙️ Development Status
-This project is currently **under active development**. APIs, internal structure, and interfaces are subject to change without prior notice. Production use is not yet recommended until a stable release is announced.
+```php
+use BlackCat\Core\Database;
 
----
+Database::init([
+  'dsn'  => 'mysql:host=127.0.0.1;dbname=app;charset=utf8mb4',
+  'user' => 'app',
+  'pass' => 'secret',
+  'appName' => 'my-service',
+]);
 
-## 🔐 Security Notes
-- Uses `ext-sodium`, the standard PHP extension providing access to `libsodium` for secure cryptography.
-- Using high-level APIs such as `crypto_aead_*`, `crypto_kdf_*`, etc.
-- Never commit production keys or secrets to the repository.
-- To report security issues, contact **backcatacademy@protonmail.com**.
+$db = Database::getInstance();
+$row = $db->fetch('SELECT 1 AS ok');
+```
 
----
+## Documentation
 
-## 📜 License
-This software is **proprietary**. See the [`LICENSE`](./LICENSE) file for full license terms.  
-Use, redistribution, or modification is permitted only under the conditions defined by Black Cat Academy s. r. o.
+- [Docs index](docs/README.md)
+- [Bootstrap examples](docs/BOOTSTRAP_EXAMPLES.md)
+- [Database](docs/DATABASE.md)
+- [Security](docs/SECURITY.md)
+- [Troubleshooting](docs/TROUBLESHOOTING.md)
+- [Roadmap](docs/ROADMAP.md)
 
----
+## Project meta
 
-© 2025 Black Cat Academy s. r. o.
-
+- Contributing: `.github/CONTRIBUTING.md`
+- Security: `.github/SECURITY.md`
