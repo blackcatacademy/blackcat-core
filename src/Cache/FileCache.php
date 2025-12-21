@@ -231,7 +231,7 @@ class FileCache implements LockingCacheInterface
     /**
      * Normalize TTL input into seconds.
      *
-     * @param int|DateInterval|null $ttl
+     * @param int|\DateInterval|null $ttl
      * @return int|null seconds or null for unlimited
      */
     private function normalizeTtl($ttl): ?int
@@ -327,7 +327,11 @@ class FileCache implements LockingCacheInterface
         $lockFile = $locksDir . DIRECTORY_SEPARATOR . $safe . '.lock';
         $token = bin2hex(random_bytes(16));
         $expireAt = time() + max(1, (int)$ttlSeconds);
-        $payload = json_encode(['token' => $token, 'expires' => $expireAt], JSON_UNESCAPED_SLASHES);
+        try {
+            $payload = json_encode(['token' => $token, 'expires' => $expireAt], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+        } catch (\JsonException) {
+            return null;
+        }
 
         // Try atomic create via fopen('x')
         $fp = @fopen($lockFile, 'x'); // fails if file exists
@@ -435,19 +439,17 @@ class FileCache implements LockingCacheInterface
                 }
             }
 
-            if ($expired) {
-                $expiredFiles++;
-                $expiredSize += $size;
-                // Light GC: remove max 1000 expired files per run
-                if ($processedExpired < $maxGcPerRun) {
-                    if ($this->isPathInCacheDir($path)) {
+                if ($expired) {
+                    $expiredFiles++;
+                    $expiredSize += $size;
+                    // Light GC: remove max 1000 expired files per run
+                    if ($processedExpired < $maxGcPerRun) {
                         @unlink($path);
+                        $processedExpired++;
                     }
-                    $processedExpired++;
-                }
-            } else {
-                $activeFiles++;
-                $activeSize += $size;
+                } else {
+                    $activeFiles++;
+                    $activeSize += $size;
             }
         }
 
@@ -500,7 +502,7 @@ class FileCache implements LockingCacheInterface
         $payload = $data['value'];
         $version = $data['key_version'] ?? null;
 
-        if ($version !== null) {
+        if ($version !== null && $this->cryptoKeysDir !== null) {
             try {
                 $info = KeyManager::getRawKeyBytesByVersion(
                     $this->cryptoEnvName,
@@ -561,7 +563,7 @@ class FileCache implements LockingCacheInterface
      *
      * @param string $key
      * @param mixed $value
-     * @param int|DateInterval|null $ttl
+     * @param int|\DateInterval|null $ttl
      * @return bool True on success, false on failure
      *
      * @throws CacheInvalidArgumentException
@@ -591,8 +593,8 @@ class FileCache implements LockingCacheInterface
                 return false;
             }
 
-            $raw = $info['raw'] ?? null;
-            $version = $info['version'] ?? null;
+            $raw = $info['raw'];
+            $version = $info['version'];
 
             if (!is_string($raw) || strlen($raw) !== KeyManager::keyByteLen()) {
                 try { KeyManager::memzero($raw); } catch (\Throwable $_) {}
@@ -758,7 +760,7 @@ class FileCache implements LockingCacheInterface
      * Stores multiple key/value pairs.
      *
      * @param iterable<string,mixed> $values
-     * @param int|DateInterval|null $ttl
+     * @param int|\DateInterval|null $ttl
      * @return bool
      *
      * @throws CacheInvalidArgumentException
@@ -841,9 +843,12 @@ class FileCache implements LockingCacheInterface
             $fp = @fopen($path, 'rb');
             if ($fp === false) continue;
             if (!flock($fp, LOCK_SH)) { fclose($fp); continue; }
-            $raw = $raw = stream_get_contents($fp, 32768, 0);
+            $raw = stream_get_contents($fp, 32768, 0);
             flock($fp, LOCK_UN);
             fclose($fp);
+            if ($raw === false) {
+                continue;
+            }
             $data = @unserialize($raw, ['allowed_classes' => false]);
             if (is_array($data) && isset($data['expires']) && $data['expires'] !== null && $data['expires'] < time()) {
                 if ($this->isPathInCacheDir($path)) @unlink($path);

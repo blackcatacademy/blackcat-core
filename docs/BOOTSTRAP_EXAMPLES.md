@@ -59,7 +59,6 @@ composer require blackcat/crypto blackcatacademy/blackcat-database-crypto
 ### 3) Configure env (example)
 
 ```bash
-export BLACKCAT_DB_ENCRYPTION_MAP="/path/to/encryption-map.json"
 export BLACKCAT_KEYS_DIR="/path/to/keys"
 
 # optional (recommended for slot config/rotation policies):
@@ -86,11 +85,8 @@ Database::init([
     'dangerousSqlGuard' => true,
 ]);
 
-// If BLACKCAT_DB_ENCRYPTION_REQUIRED=1, this throws unless ingress is configured.
-$ingress = IngressLocator::adapter();
-if ($ingress !== null) {
-    // validate the adapter can encrypt a sample payload
-    $ingress->encrypt('example_table', ['example' => 'value']);
-}
+// Fail-closed by default: this throws unless ingress is configured.
+$ingress = IngressLocator::requireAdapter();
+// validate the adapter can encrypt a sample payload
+$ingress->encrypt('example_table', ['example' => 'value']);
 ```
-

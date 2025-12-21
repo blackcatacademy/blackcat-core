@@ -10,7 +10,6 @@ class KeyManagerException extends \RuntimeException {}
 
 final class KeyManager
 {
-    private const DEFAULT_PER_REQUEST_CACHE_TTL = 300; // seconds, but here just per-request static cache
     private static ?LoggerInterface $logger = null;
     private static array $cache = []; // simple per-request cache ['key_<env>_<basename>[_vN]'=> ['raw'=>..., 'version'=>...]]
     
@@ -91,6 +90,9 @@ final class KeyManager
         }
     }
 
+    /**
+     * @return int<1, max>
+     */
     public static function keyByteLen(): int
     {
         return SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_KEYBYTES;
@@ -224,7 +226,7 @@ final class KeyManager
     {
         $pattern = rtrim($keysDir, '/\\') . '/' . $basename . '_v*.key';
         $out = [];
-        foreach (glob($pattern) as $p) {
+        foreach (glob($pattern) ?: [] as $p) {
             if (!is_file($p)) continue;
             if (preg_match('/_v([0-9]+)\.key$/', $p, $m)) {
                 $ver = 'v' . (string)(int)$m[1];
@@ -349,6 +351,8 @@ final class KeyManager
     /**
      * Read a specific versioned key file (e.g. 'v2') if present.
      * Returns ['raw'=>'...', 'version'=>'v2'] or throws if not found/invalid.
+     *
+     * @return array{raw:string,version:string}
      */
     public static function getRawKeyBytesByVersion(string $envName, string $keysDir, string $basename, string $version, ?int $expectedByteLen = null): array
     {
@@ -459,7 +463,7 @@ final class KeyManager
         // get latest key (fail-fast)
         $info = self::getRawKeyBytes($envName, $keysDir, $basename, false, self::keyByteLen());
         $key = $info['raw'];
-        $ver = $info['version'] ?? null;
+        $ver = $info['version'];
         if (!is_string($key) || strlen($key) !== self::keyByteLen()) {
             throw new KeyManagerException('deriveHmacWithLatest: invalid key material');
         }

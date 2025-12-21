@@ -11,7 +11,7 @@ if (class_exists('BlackCat\\Messaging\\CoreCompat\\CoreStdoutSender')) {
 
 final class StdoutSender implements OutboxSender
 {
-    public function __construct(...$args)
+    public function __construct(mixed ...$args)
     {
         unset($args);
         throw new \RuntimeException('blackcat-messaging is required (composer require blackcatacademy/blackcat-messaging).');

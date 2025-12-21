@@ -3,6 +3,8 @@ declare(strict_types=1);
 
 namespace BlackCat\Core\Security;
 
+use Psr\SimpleCache\CacheInterface;
+
 /**
  * Simple reCAPTCHA v2/v3 verifier.
  *
@@ -25,12 +27,9 @@ final class Recaptcha
     private float $minScore;
     private int $timeout;
     private string $endpoint;
-    /** @var null|string|callable|object */
-    private $logger;
-    /** @var null|callable */
-    private $httpClient;
-    /** @var null|object */
-    private $cache;
+    private mixed $logger = null;
+    private mixed $httpClient = null;
+    private ?CacheInterface $cache = null;
 
     public function __construct(string $secret, float $minScore = 0.4, array $opts = [])
     {
@@ -51,7 +50,8 @@ final class Recaptcha
         }
 
         $this->httpClient = isset($opts['httpClient']) && is_callable($opts['httpClient']) ? $opts['httpClient'] : null;
-        $this->cache = $opts['cache'] ?? null;
+        $cacheOpt = $opts['cache'] ?? null;
+        $this->cache = $cacheOpt instanceof CacheInterface ? $cacheOpt : null;
     }
 
     /**

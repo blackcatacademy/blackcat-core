@@ -131,7 +131,7 @@ final class MemoryCache implements CacheInterface
         $lruKey = null;
         $lruTs  = PHP_INT_MAX;
         foreach ($this->store as $k => $meta) {
-            if (isset($meta['a']) && $meta['a'] < $lruTs) {
+            if ($meta['a'] < $lruTs) {
                 $lruTs  = $meta['a'];
                 $lruKey = $k;
             }

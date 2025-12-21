@@ -33,10 +33,10 @@ If `requireSqlComment` is enabled, every non-trivial query must be prefixed with
 
 Repositories and services can auto-load the crypto ingress via `BlackCat\\Database\\Crypto\\IngressLocator`.
 
-- If you set `BLACKCAT_DB_ENCRYPTION_REQUIRED=1`, missing ingress becomes a hard error.
+- DB crypto ingress is **fail-closed by default**: if it cannot boot, it throws.
 - Common causes:
-  - `BLACKCAT_DB_ENCRYPTION_MAP` not set or points to a non-existent file
   - `BLACKCAT_KEYS_DIR` not set or missing key files
+  - `blackcatacademy/blackcat-database` packages are not present (expected `packages/*/schema/encryption-map.json`)
   - Missing packages: `blackcat/crypto` + `blackcatacademy/blackcat-database-crypto`
 
 ## File cache permissions (FileCache)
@@ -44,4 +44,3 @@ Repositories and services can auto-load the crypto ingress via `BlackCat\\Databa
 `BlackCat\\Core\\Cache\\FileCache` expects to create and write files under its cache directory.
 
 - Fix: ensure the cache directory exists, is writable, and has restrictive permissions (`0700`).
-

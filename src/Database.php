@@ -95,12 +95,15 @@ final class Database
         $m = [];
         // mysql & pgsql by host/port/dbname
         if (preg_match('~^(mysql|pgsql):.*?host=([^;]+)(?:;port=([0-9]+))?.*?(?:;dbname=([^;]+))?~i', $dsn, $m)) {
-            $drv = strtolower($m[1]); $host = $m[2] ?? 'localhost'; $port = $m[3] ?? ($drv==='mysql'?'3306':'5432'); $db = $m[4] ?? '';
+            $drv = strtolower($m[1]);
+            $host = $m[2];
+            $port = (($m[3] ?? '') !== '') ? (string)$m[3] : ($drv === 'mysql' ? '3306' : '5432');
+            $db = $m[4] ?? '';
             return "{$drv}://{$host}:{$port}/{$db}";
         }
         // sqlite path / :memory:
         if (preg_match('~^sqlite:(?://)?(.+)$~i', $dsn, $m)) {
-            $path = $m[1] ?? '';
+            $path = $m[1];
             if (stripos($path, ':memory:') === 0) return 'sqlite://memory';
             // strip query/fragment
             $path = preg_replace('~[?#].*$~', '', $path) ?? $path;
@@ -396,7 +399,7 @@ final class Database
             $hasAnalyze = (bool)preg_match('~\bANALYZE\b~', $uu);
             $innerVerb = null;
             if (preg_match('~\bEXPLAIN(?:\s*\([^)]*\))?\s+([A-Z]+)~', $uu, $mm)) {
-                $innerVerb = $mm[1] ?? null;
+                $innerVerb = $mm[1];
             }
             if ($this->isPg() && $hasAnalyze && $innerVerb !== 'SELECT') {
                 return $this->getPdo();
@@ -790,9 +793,9 @@ final class Database
         $sqlstate = $e->errorInfo[0] ?? (string)$e->getCode();
         $code     = (int)($e->errorInfo[1] ?? 0);
         if (in_array($sqlstate, ['40P01','40001','55P03'], true)) return true; // PG
-        if ($code === 1213 || $code === 1205 || $sqlstate === '40001') return true; // MySQL/MariaDB
+        if ($code === 1213 || $code === 1205) return true; // MySQL/MariaDB
         // Heuristic: treat common "communication errors" as transient.
-        $msg = strtolower($e->getMessage() ?? '');
+        $msg = strtolower($e->getMessage());
         if (str_contains($msg, 'server has gone away') || str_contains($msg, 'lost connection') || str_contains($msg, 'closed the connection unexpectedly')) {
             return true;
         }
@@ -1172,9 +1175,11 @@ final class Database
     public function upsert(string $table, array $rows, array $uniqueKeys, ?array $updateCols = null, int $chunk = 500): int {
         $batch = \array_is_list($rows) ? $rows : [$rows];
         if (!$batch) return 0;
-        $cols = array_keys($batch[0]);
+        /** @var list<string> $cols */
+        $cols = array_values(array_map(static fn ($c): string => (string) $c, array_keys($batch[0])));
         foreach ($batch as $i=>$r) {
-            if (array_keys($r) !== $cols) {
+            $rowCols = array_values(array_map(static fn ($c): string => (string) $c, array_keys($r)));
+            if ($rowCols !== $cols) {
                 throw new DatabaseException("upsert: row {$i} has different columns than the first row");
             }
         }
@@ -1219,7 +1224,11 @@ final class Database
     {
         // Anonymize the content of all string literals (even short ones).
         $s = preg_replace("/'(?:''|\\\\'|[^'])*'/", "'…'", $sql);
-        $s = preg_replace('/\s+/', ' ', trim((string)$s));
+        if ($s === null) {
+            $s = $sql;
+        }
+        $s2 = preg_replace('/\s+/', ' ', trim($s));
+        $s = $s2 === null ? trim($sql) : $s2;
         $max = 300;
         if (function_exists('mb_strlen') && function_exists('mb_substr')) {
             return mb_strlen($s) > $max ? mb_substr($s, 0, $max) . '...' : $s;
@@ -1269,7 +1278,7 @@ final class Database
     private function guardPlaceholders(string $sql, array $params): void {
         if ($params === [] || $this->usesPositionalOnly($sql)) return;
         preg_match_all('/:([A-Za-z_][A-Za-z0-9_]*)/', $sql, $m);
-        $need = array_unique($m[1] ?? []);
+        $need = array_unique($m[1]);
         $have = array_map(fn($k)=> ltrim((string)$k, ':'), array_keys($params));
         $missing = array_values(array_diff($need, $have));
         $extra   = array_values(array_diff($have, $need));
@@ -1335,7 +1344,7 @@ final class Database
     private function mapPdoToDomainException(\PDOException $e, string $fallbackMsg): DatabaseException {
         $sqlstate = $e->errorInfo[0] ?? (string)$e->getCode();
         $code     = (int)($e->errorInfo[1] ?? 0);
-        $msg      = strtolower($e->getMessage() ?? '');
+        $msg      = strtolower($e->getMessage());
         if (str_contains($msg, 'server has gone away') || str_contains($msg, 'lost connection') ||
             str_contains($msg, 'connection refused') || str_contains($msg, 'closed the connection unexpectedly')) {
             return new ConnectionGoneException($fallbackMsg, 0, $e);
@@ -1407,7 +1416,7 @@ final class Database
 
     private function isServerGone(\PDOException $e): bool
     {
-        $m = strtolower($e->getMessage() ?? '');
+        $m = strtolower($e->getMessage());
         return str_contains($m, 'server has gone away')
             || str_contains($m, 'lost connection')
             || str_contains($m, 'connection refused')
@@ -1497,12 +1506,17 @@ final class Database
 
     private function detectReplicaLagMs(): ?int
     {
+        $pdo = $this->pdoRead;
+        if ($pdo === null) {
+            return null;
+        }
         try {
-            $drv = $this->pdoRead?->getAttribute(\PDO::ATTR_DRIVER_NAME);
+            $drv = (string)$pdo->getAttribute(\PDO::ATTR_DRIVER_NAME);
             if ($drv === 'pgsql') {
                 // NULL on primary; on replica it reports lag in ms.
                 $sql = "SELECT EXTRACT(EPOCH FROM (NOW() - pg_last_xact_replay_timestamp())) * 1000 AS lag_ms";
-                $row = $this->pdoRead->query($sql)?->fetch(\PDO::FETCH_ASSOC);
+                $stmt = $pdo->query($sql);
+                $row = $stmt instanceof \PDOStatement ? $stmt->fetch(\PDO::FETCH_ASSOC) : false;
                 $v = $row['lag_ms'] ?? null;
                 if ($v === null) return null;
                 return (int)round((float)$v);
@@ -1511,10 +1525,14 @@ final class Database
                 // MySQL 8: SHOW REPLICA STATUS; older versions / MariaDB: SHOW SLAVE STATUS.
                 $row = null;
                 try {
-                    $row = $this->pdoRead->query("SHOW REPLICA STATUS")?->fetch(\PDO::FETCH_ASSOC);
+                    $stmt = $pdo->query("SHOW REPLICA STATUS");
+                    $row = $stmt instanceof \PDOStatement ? $stmt->fetch(\PDO::FETCH_ASSOC) : false;
                 } catch (\Throwable $_) {}
                 if (!$row) {
-                    try { $row = $this->pdoRead->query("SHOW SLAVE STATUS")?->fetch(\PDO::FETCH_ASSOC); }
+                    try {
+                        $stmt = $pdo->query("SHOW SLAVE STATUS");
+                        $row = $stmt instanceof \PDOStatement ? $stmt->fetch(\PDO::FETCH_ASSOC) : false;
+                    }
                     catch (\Throwable $_) {}
                 }
                 if (is_array($row)) {
@@ -1562,6 +1580,7 @@ final class Database
         }
 
         $start   = microtime(true);
+        /** @var int $attempt */
         $attempt = 0;
         $usedReplica = false;
         $route = 'primary';
@@ -1583,7 +1602,7 @@ final class Database
                 $s = preg_replace("/'([^'\\\\]|\\\\.)*'/", "''", $sql) ?? $sql;
                 if (!preg_match('~\bORDER\s+BY\b~i', $s)) {
                     if (preg_match('~((?:[\w`\".]+\s+(?:ASC|DESC))(?:\s*,\s*[\w`\".]+\s+(?:ASC|DESC))*)\s*(?:LIMIT|OFFSET|$)~i', $s, $m)) {
-                        $off = $m[1] ?? '(n/a)';
+                        $off = $m[1];
                         $bt = array_slice(debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS), 0, 8);
                         $where = array_map(fn($f)=>($f['file'] ?? '?').':'.($f['line'] ?? '?'), $bt);
                         throw new DatabaseException("ORDER BY is missing; bare order clause detected: [{$off}] in SQL: ".$this->sanitizeSqlPreview($sql)." @ ".implode(' <- ', $where));
@@ -1878,7 +1897,8 @@ final class Database
     public function lastInsertId(?string $name = null): ?string
     {
         try {
-            return $this->getPdo()->lastInsertId($name);
+            $id = $this->getPdo()->lastInsertId($name);
+            return $id === false ? null : $id;
         } catch (\Throwable $e) {
             $this->logger?->warning('lastInsertId() failed', [
                 'message' => $e->getMessage(),
@@ -1908,7 +1928,7 @@ final class Database
         catch (\Throwable $e) { return false; }
     }
 
-    public function fetchValue(string $sql, array $params = [], $default = null): mixed
+    public function fetchValue(string $sql, array $params = [], mixed $default = null): mixed
     {
         $stmt = $this->prepareAndRun($sql, $params);
         try {
@@ -2025,7 +2045,7 @@ final class Database
     public function isReadOnlyGuardEnabled(): bool { return $this->readOnlyGuard; }
 
     public static function encodeCursor(array $cursor): string {
-        $j = json_encode($cursor, JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);
+        $j = json_encode($cursor, JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES|JSON_THROW_ON_ERROR);
         return rtrim(strtr(base64_encode($j), '+/', '-_'), '=');
     }
     public static function decodeCursor(?string $token): ?array {

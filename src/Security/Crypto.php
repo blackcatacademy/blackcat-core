@@ -165,23 +165,15 @@ final class Crypto
     {
         $expectedLen = KeyManager::keyByteLen();
 
-        foreach (array_keys(self::$keys) as $i) {
-            if (isset(self::$keys[$i]) && is_string(self::$keys[$i]) && strlen(self::$keys[$i]) === $expectedLen) {
-                if (function_exists('sodium_memzero')) {
-                    @sodium_memzero(self::$keys[$i]);
-                } else {
-                    self::$keys[$i] = str_repeat("\0", strlen(self::$keys[$i]));
-                }
+        foreach (self::$keys as &$k) {
+            if (is_string($k) && $k !== '') {
+                KeyManager::memzero($k);
             }
-            unset(self::$keys[$i]);
         }
+        unset($k);
 
         if (is_string(self::$primaryKey) && strlen(self::$primaryKey) === $expectedLen) {
-            if (function_exists('sodium_memzero')) {
-                @sodium_memzero(self::$primaryKey);
-            } else {
-                self::$primaryKey = str_repeat("\0", strlen(self::$primaryKey));
-            }
+            KeyManager::memzero(self::$primaryKey);
         }
 
         self::$keys = [];
@@ -237,9 +229,6 @@ final class Crypto
         $nonceSize = SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_NPUBBYTES; // 24
         $nonce = random_bytes($nonceSize);
         $combined = sodium_crypto_aead_xchacha20poly1305_ietf_encrypt($plaintext, self::AD, $nonce, self::$primaryKey);
-        if ($combined === false) {
-            throw new RuntimeException('Crypto::encrypt: encryption failed');
-        }
 
         if ($outFormat === 'compact_base64') {
             return base64_encode($nonce . $combined);
@@ -346,12 +335,8 @@ final class Crypto
         $version = ord($data[$ptr++]);
         $keyIdLen = 0;
         if ($version === 2) {
-            if ($ptr >= $len) {
-                self::logError('decrypt_versioned: missing key id length');
-                return null;
-            }
             $keyIdLen = ord($data[$ptr++]);
-            if ($keyIdLen < 0 || $ptr + $keyIdLen > $len) {
+            if ($ptr + $keyIdLen > $len) {
                 self::logError('decrypt_versioned: invalid key id length ' . $keyIdLen);
                 return null;
             }
@@ -361,8 +346,12 @@ final class Crypto
             return null;
         }
 
+        if ($ptr >= $len) {
+            self::logError('decrypt_versioned: missing nonce_len');
+            return null;
+        }
         $nonce_len = ord($data[$ptr++]);
-        if ($nonce_len < 1 || $nonce_len > 255) {
+        if ($nonce_len < 1) {
             self::logError('decrypt_versioned: unreasonable nonce_len ' . $nonce_len);
             return null;
         }
@@ -376,7 +365,7 @@ final class Crypto
         $ptr += $nonce_len;
 
         $cipher = substr($data, $ptr);
-        if ($cipher === false || $cipher === '') {
+        if ($cipher === '') {
             self::logError('decrypt_versioned: no cipher data');
             return null;
         }
@@ -417,9 +406,6 @@ final class Crypto
         $nonceSize = SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_NPUBBYTES;
         $nonce = random_bytes($nonceSize);
         $combined = sodium_crypto_aead_xchacha20poly1305_ietf_encrypt($plaintext, self::AD, $nonce, $keyRaw);
-        if ($combined === false) {
-            throw new RuntimeException('encryptWithKeyBytes: encryption failed');
-        }
 
         if ($outFormat === 'compact_base64') {
             return base64_encode($nonce . $combined);
@@ -489,7 +475,7 @@ final class Crypto
             $ptr = 0;
             $version = ord($payload[$ptr++]);
             $nonce_len = ord($payload[$ptr++]);
-            if ($nonce_len < 1 || $nonce_len > 255) return null;
+            if ($nonce_len < 1) return null;
             if (strlen($payload) < $ptr + $nonce_len) return null;
             $nonce = substr($payload, $ptr, $nonce_len);
             $ptr += $nonce_len;

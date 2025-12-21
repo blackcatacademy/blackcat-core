@@ -23,7 +23,8 @@ use BlackCat\Core\Log\Logger;
 
 final class FileVault
 {
-    private const VERSION = 1;
+    private const VERSION = 2;
+    private const LEGACY_VERSION = 1;
     private const STREAM_THRESHOLD = 20 * 1024 * 1024; // 20 MB
     private const FRAME_SIZE = 1 * 1024 * 1024; // 1 MB
 
@@ -32,9 +33,7 @@ final class FileVault
     private static ?string $keysDir = null;
     /** @var string|null explicitly configured storage base */
     private static ?string $storageBase = null;
-    /** @var string|null explicitly configured audit directory */
-    private static ?string $auditDir = null;
-    /** @var PDO|null explicitly configured PDO for audit (optional) */
+    /** @var \PDO|null explicitly configured PDO for audit (optional) */
     private static ?\PDO $auditPdo = null;
     /**
      * actor provider: callable(): string|null
@@ -58,7 +57,7 @@ final class FileVault
 
     public static function setAuditDir(string $dir): void
     {
-        self::$auditDir = rtrim($dir, DIRECTORY_SEPARATOR);
+        AuditLogger::setAuditDir(rtrim($dir, DIRECTORY_SEPARATOR));
     }
 
     public static function setAuditPdo(\PDO $pdo): void
@@ -116,18 +115,6 @@ final class FileVault
         return __DIR__ . '/../secure/storage';
     }
 
-    private static function getAuditDir(): string
-    {
-        if (self::$auditDir !== null) {
-            return self::$auditDir;
-        }
-
-        // if no audit directory is provided, create one under storage
-        $storage = self::getStorageBase();
-        return rtrim($storage, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'audit';
-    }
-
-
     /**
      * Helper: get key raw bytes and version for filevault keys.
      * If $specificVersion provided (like 'v1'), try to load exact file: filevault_key_v1.key
@@ -168,7 +155,7 @@ final class FileVault
                 }
             }
 
-            if (isset($raw) && strlen($raw) !== SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_KEYBYTES) {
+            if (isset($raw) && is_string($raw) && strlen($raw) !== SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_KEYBYTES) {
                 throw new \RuntimeException('Invalid key length for FileVault');
             }
             // else fallthrough to KeyManager locateLatest
@@ -177,13 +164,10 @@ final class FileVault
         // Use KeyManager (pass explicit keys dir)
         try {
             $info = KeyManager::getRawKeyBytes('FILEVAULT_KEY', self::getKeysDir(), 'filevault_key', false);
-            if (!is_array($info) || !isset($info['raw'])) {
-                throw new \RuntimeException('KeyManager did not return key info');
-            }
             return [
                 'raw' => $info['raw'],
-                'version' => $info['version'] ?? 'v1',
-                'id' => $info['version'] ?? 'v1',
+                'version' => $info['version'],
+                'id' => $info['version'],
             ];
         } catch (\Throwable $e) {
             // do not leak internal exception messages — rethrow a generic runtime exception
@@ -210,7 +194,7 @@ final class FileVault
         // try to get key info (throws on fatal)
         try {
             $keyInfo = self::getFilevaultKeyInfo(null);
-            $key = $keyInfo['raw'];
+            $key = &$keyInfo['raw'];
             $keyVersion = $keyInfo['version'];
             $keyId = $keyInfo['id'] ?? $keyVersion;
         } catch (\Throwable $e) {
@@ -272,7 +256,6 @@ final class FileVault
                 }
 
                 $iv_len = strlen($header);
-                if ($iv_len > 255) throw new \RuntimeException('header too long');
 
                 if (fwrite($out, chr($iv_len)) === false || fwrite($out, $header) === false) {
                     throw new \RuntimeException('failed writing header');
@@ -290,7 +273,6 @@ final class FileVault
                     $isFinal = feof($in);
                     $tag = $isFinal ? SODIUM_CRYPTO_SECRETSTREAM_XCHACHA20POLY1305_TAG_FINAL : SODIUM_CRYPTO_SECRETSTREAM_XCHACHA20POLY1305_TAG_MESSAGE;
                     $frame = sodium_crypto_secretstream_xchacha20poly1305_push($state, $chunk, '', $tag);
-                    if ($frame === false) throw new \RuntimeException('secretstream push failed');
 
                     $frameLen = strlen($frame);
                     $lenBuf = pack('N', $frameLen);
@@ -359,14 +341,12 @@ final class FileVault
             // AEAD encrypt
             $nonce = random_bytes(SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_NPUBBYTES);
             $combined = sodium_crypto_aead_xchacha20poly1305_ietf_encrypt($plaintext, '', $nonce, $key);
-            if ($combined === false) throw new \RuntimeException('AEAD encrypt failed');
 
             $tagLen = SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_ABYTES;
             $tag = substr($combined, -$tagLen);
             $cipher = substr($combined, 0, -$tagLen);
 
             $iv_len = strlen($nonce);
-            if ($iv_len > 255 || $tagLen > 255) throw new \RuntimeException('iv/tag too long');
 
             if (fwrite($out, chr($iv_len)) === false || fwrite($out, $nonce) === false) throw new \RuntimeException('failed writing iv');
             if (fwrite($out, chr($tagLen)) === false || fwrite($out, $tag) === false) throw new \RuntimeException('failed writing tag');
@@ -428,11 +408,6 @@ final class FileVault
             // best-effort memzero key and ensure handles closed
             if (isset($key) && is_string($key) && $key !== '') {
                 try { KeyManager::memzero($key); } catch (\Throwable $ee) { /* swallow */ }
-                $key = null;
-            }
-            // also try to memzero possible $keyInfo raw (if still in scope)
-            if (isset($keyInfo) && is_array($keyInfo) && isset($keyInfo['raw']) && is_string($keyInfo['raw'])) {
-                try { KeyManager::memzero($keyInfo['raw']); } catch (\Throwable $_) {}
             }
             if (is_resource($in)) { fclose($in); }
             if (is_resource($out)) { fclose($out); }
@@ -474,9 +449,8 @@ final class FileVault
 
         try {
             $keyInfo = self::getFilevaultKeyInfo($specificKeyVersion);
-            $key = $keyInfo['raw'];
+            $key = &$keyInfo['raw'];
             $keyVersion = $keyInfo['version'];
-            $keyId = $keyInfo['id'] ?? $keyVersion;
         } catch (\Throwable $e) {
             self::logError('decryptAndStream: key retrieval failed: ' . $e->getMessage());
             return false;
@@ -499,41 +473,85 @@ final class FileVault
                 throw new \RuntimeException('failed reading version byte');
             }
             $version = ord($versionByte);
-            if ($version !== self::VERSION) {
+            if ($version !== self::VERSION && $version !== self::LEGACY_VERSION) {
                 throw new \RuntimeException('unsupported version: ' . $version);
             }
-            $keyId = null;
-            if ($version === 2) {
+            $fileKeyId = null;
+            $ivLenByte = null;
+
+            if ($version === self::VERSION) {
                 $b = fread($fh, 1);
                 if ($b === false || strlen($b) !== 1) {
                     throw new \RuntimeException('failed reading key id len');
                 }
                 $keyIdLen = ord($b);
                 if ($keyIdLen > 0) {
-                    $keyId = fread($fh, $keyIdLen);
-                    if ($keyId === false || strlen($keyId) !== $keyIdLen) {
+                    $fileKeyId = fread($fh, $keyIdLen);
+                    if ($fileKeyId === false || strlen($fileKeyId) !== $keyIdLen) {
                         throw new \RuntimeException('failed reading key id');
+                    }
+                }
+                $ivLenByte = fread($fh, 1);
+                if ($ivLenByte === false || strlen($ivLenByte) !== 1) {
+                    throw new \RuntimeException('failed reading iv_len');
+                }
+            } else {
+                $posAfterVersion = ftell($fh);
+                if ($posAfterVersion === false) {
+                    throw new \RuntimeException('failed reading file cursor');
+                }
+
+                // Attempt "v1-with-key-id" variant (historical bug) first.
+                $b = fread($fh, 1);
+                if ($b === false || strlen($b) !== 1) {
+                    throw new \RuntimeException('failed reading iv_len/key_id_len');
+                }
+                $keyIdLen = ord($b);
+                $candidateKeyId = null;
+                if ($keyIdLen > 0) {
+                    $candidateKeyId = fread($fh, $keyIdLen);
+                    if ($candidateKeyId === false || strlen($candidateKeyId) !== $keyIdLen) {
+                        $candidateKeyId = null;
+                    }
+                }
+                $candidateIvLenByte = fread($fh, 1);
+                if ($candidateIvLenByte !== false && strlen($candidateIvLenByte) === 1) {
+                    $candidateIvLen = ord($candidateIvLenByte);
+                    $expectedIvLen = SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_NPUBBYTES;
+                    if ($candidateIvLen === $expectedIvLen) {
+                        $fileKeyId = $candidateKeyId;
+                        $ivLenByte = $candidateIvLenByte;
+                    }
+                }
+
+                if ($ivLenByte === null) {
+                    if (fseek($fh, $posAfterVersion, SEEK_SET) !== 0) {
+                        throw new \RuntimeException('failed rewinding file cursor');
+                    }
+                    $ivLenByte = fread($fh, 1);
+                    if ($ivLenByte === false || strlen($ivLenByte) !== 1) {
+                        throw new \RuntimeException('failed reading iv_len');
                     }
                 }
             }
 
             // iv_len
-            $b = fread($fh, 1);
-            if ($b === false || strlen($b) !== 1) throw new \RuntimeException('failed reading iv_len');
-            $iv_len = ord($b);
-            if ($iv_len < 0 || $iv_len > 255) throw new \RuntimeException('unreasonable iv_len: ' . $iv_len);
-
-            $iv = '';
-            if ($iv_len > 0) {
-                $iv = fread($fh, $iv_len);
-                if ($iv === false || strlen($iv) !== $iv_len) throw new \RuntimeException('failed reading iv/header');
+            $iv_len = ord($ivLenByte);
+            $expectedIvLen = SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_NPUBBYTES;
+            if ($iv_len !== $expectedIvLen) {
+                throw new \RuntimeException('unreasonable iv_len: ' . $iv_len);
             }
+
+            $iv = fread($fh, $iv_len);
+            if ($iv === false || strlen($iv) !== $iv_len) throw new \RuntimeException('failed reading iv/header');
 
             // tag_len
             $b = fread($fh, 1);
             if ($b === false || strlen($b) !== 1) throw new \RuntimeException('failed reading tag_len');
             $tag_len = ord($b);
-            if ($tag_len < 0 || $tag_len > 255) throw new \RuntimeException('unreasonable tag_len: ' . $tag_len);
+            if ($tag_len !== 0 && $tag_len !== SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_ABYTES) {
+                throw new \RuntimeException('unreasonable tag_len: ' . $tag_len);
+            }
 
             $tag = '';
             if ($tag_len > 0) {
@@ -567,15 +585,16 @@ final class FileVault
                 while ($pos < $len) {
                     $chunk = substr($plain, $pos, self::FRAME_SIZE);
                     echo $chunk;
-                    $pos += strlen($chunk);
-                    @ob_flush(); @flush();
-                }
+                $pos += strlen($chunk);
+                @ob_flush(); @flush();
+            }
 
                 $outTotal = $len;
                 $success = true;
 
                 // audit log (best-effort)
-                self::maybeAudit($encPath, $downloadName, $contentLength ?? $len, $keyVersion, $keyId ?? null);
+                $auditKeyId = $fileKeyId ?? (is_string($meta['key_id'] ?? null) ? (string) $meta['key_id'] : null);
+                self::maybeAudit($encPath, $downloadName, $contentLength ?? $len, $keyVersion, $auditKeyId);
                 return true;
             }
 
@@ -608,7 +627,8 @@ final class FileVault
 
             $success = true;
             // audit log (best-effort)
-            self::maybeAudit($encPath, $downloadName, $contentLength ?? $outTotal, $keyVersion, $keyId ?? null);
+            $auditKeyId = $fileKeyId ?? (is_string($meta['key_id'] ?? null) ? (string) $meta['key_id'] : null);
+            self::maybeAudit($encPath, $downloadName, $contentLength ?? $outTotal, $keyVersion, $auditKeyId);
             return true;
         } catch (\Throwable $e) {
             self::logError('decryptAndStream: ' . $e->getMessage());
@@ -617,10 +637,6 @@ final class FileVault
             if (is_resource($fh)) fclose($fh);
             if (isset($key) && is_string($key) && $key !== '') {
                 try { KeyManager::memzero($key); } catch (\Throwable $_) {}
-                $key = null;
-            }
-            if (isset($keyInfo) && is_array($keyInfo) && isset($keyInfo['raw']) && is_string($keyInfo['raw'])) {
-                try { KeyManager::memzero($keyInfo['raw']); } catch (\Throwable $_) {}
             }
         }
     }
@@ -684,7 +700,9 @@ final class FileVault
                 'key_id' => $keyId,
             ];
             $payload = json_encode($details, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-            if ($payload === false) $payload = json_encode(['enc_path' => $encPath], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+            if ($payload === false) {
+                $payload = '{}';
+            }
 
             // AuditLogger::log(PDO $pdo = null, string $actorId, string $action, string $payloadEnc, string $keyVersion = '', array $meta = [])
             AuditLogger::log($pdo instanceof \PDO ? $pdo : null, (string)$actorId, 'file_download', $payload, $keyVersion ?? '', []);

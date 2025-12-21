@@ -11,7 +11,7 @@ if (class_exists('BlackCat\\Sessions\\Php\\DbCachedSessionHandler')) {
 
 final class DbCachedSessionHandler implements \SessionHandlerInterface
 {
-    public function __construct(...$args)
+    public function __construct(mixed ...$args)
     {
         unset($args);
         throw new \RuntimeException('blackcat-sessions is required (composer require blackcatacademy/blackcat-sessions).');

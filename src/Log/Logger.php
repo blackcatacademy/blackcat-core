@@ -118,7 +118,7 @@ final class Logger
             $hmacBin = hash_hmac('sha256', $ipRaw, $keyRaw, true);
 
             // best-effort memzero of key material
-            if (method_exists('KeyManager', 'memzero')) {
+            if (method_exists(KeyManager::class, 'memzero')) {
                 try { KeyManager::memzero($keyRaw); } catch (\Throwable $_) {}
             } elseif (function_exists('sodium_memzero')) {
                 @sodium_memzero($keyRaw);
@@ -126,7 +126,7 @@ final class Logger
             }
 
             // best-effort: purge KeyManager per-request cache for this env so no copies remain
-            if (method_exists('KeyManager', 'purgeCacheFor')) {
+            if (method_exists(KeyManager::class, 'purgeCacheFor')) {
                 try { KeyManager::purgeCacheFor('IP_HASH_KEY'); } catch (\Throwable $_) {}
             }
 
@@ -142,7 +142,7 @@ final class Logger
         return $_SERVER['HTTP_USER_AGENT'] ?? null;
     }
 
-    private static function safeJsonEncode($data): ?string
+    private static function safeJsonEncode(mixed $data): ?string
     {
         if ($data === null) return null;
         $json = @json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
@@ -198,12 +198,6 @@ final class Logger
             'webauthn_login_failure',
         ];
         return in_array($type, $allowed, true) ? $type : 'login_failure';
-    }
-
-    private static function validateRegisterType(string $type): string
-    {
-        $allowed = ['register_success','register_failure'];
-        return in_array($type, $allowed, true) ? $type : 'register_failure';
     }
 
     private static function validateVerifyType(string $type): string
@@ -282,16 +276,12 @@ final class Logger
         if (!class_exists(\BlackCat\Core\Adapter\NoopIngressAdapter::class)) {
             return null;
         }
-        try {
-            return new \BlackCat\Core\Adapter\NoopIngressAdapter();
-        } catch (\Throwable) {
-            return null;
-        }
+        return new \BlackCat\Core\Adapter\NoopIngressAdapter();
     }
 
     private static function isDuplicateError(\Throwable $e): bool
     {
-        $msg = strtolower($e->getMessage() ?? '');
+        $msg = strtolower($e->getMessage());
         return str_contains($msg, 'duplicate') || str_contains($msg, 'unique') || str_contains($msg, 'constraint');
     }
 
@@ -589,13 +579,12 @@ final class Logger
         $rawUrl = $_SERVER['REQUEST_URI'] ?? null;
         if ($rawUrl !== null) {
             $parts = parse_url($rawUrl);
-            if (isset($parts['query'])) {
+            if (is_array($parts) && isset($parts['query'])) {
                 parse_str($parts['query'], $q);
-                $qClean = self::filterSensitive($q); // reuse the existing sanitizer
+                $qClean = self::filterSensitive($q) ?? [];
                 $parts['query'] = http_build_query($qClean);
-                // Build the URL back.
-                $cleanUrl = (isset($parts['path']) ? $parts['path'] : '')
-                        . (isset($parts['query']) ? '?' . $parts['query'] : '')
+                $cleanUrl = ($parts['path'] ?? '')
+                        . '?' . $parts['query']
                         . (isset($parts['fragment']) ? '#' . $parts['fragment'] : '');
             } else {
                 $cleanUrl = $rawUrl;
@@ -679,13 +668,12 @@ final class Logger
         $rawUrl = $_SERVER['REQUEST_URI'] ?? null;
         if ($rawUrl !== null) {
             $parts = parse_url($rawUrl);
-            if (isset($parts['query'])) {
+            if (is_array($parts) && isset($parts['query'])) {
                 parse_str($parts['query'], $q);
-                $qClean = self::filterSensitive($q); // reuse the existing sanitizer
+                $qClean = self::filterSensitive($q) ?? [];
                 $parts['query'] = http_build_query($qClean);
-                // Build the URL back.
-                $cleanUrl = (isset($parts['path']) ? $parts['path'] : '')
-                        . (isset($parts['query']) ? '?' . $parts['query'] : '')
+                $cleanUrl = ($parts['path'] ?? '')
+                        . '?' . $parts['query']
                         . (isset($parts['fragment']) ? '#' . $parts['fragment'] : '');
             } else {
                 $cleanUrl = $rawUrl;

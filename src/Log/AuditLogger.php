@@ -17,11 +17,21 @@ namespace BlackCat\Core\Log;
 
 final class AuditLogger
 {
+    private static ?string $auditDirOverride = null;
+
+    /**
+     * Override audit directory resolution for non-ENV environments.
+     */
+    public static function setAuditDir(string $dir): void
+    {
+        self::$auditDirOverride = rtrim($dir, DIRECTORY_SEPARATOR);
+    }
+
     /**
      * Public API: attempt to write audit entry to DB, fallback to file.
      * Returns true on success (DB or file), false on failure.
      *
-     * @param PDO|null $pdo
+     * @param \PDO|null $pdo
      * @param mixed $actorId anything that can be stringified (or null)
      * @param string $action
      * @param string $payloadEnc JSON or encoded payload string
@@ -51,6 +61,9 @@ final class AuditLogger
      */
     private static function resolveAuditDir(): string
     {
+        if (self::$auditDirOverride !== null) {
+            return self::$auditDirOverride;
+        }
         if (!empty($_ENV['AUDIT_PATH'])) {
             return rtrim($_ENV['AUDIT_PATH'], DIRECTORY_SEPARATOR);
         }
@@ -78,7 +91,7 @@ final class AuditLogger
      * @param string $keyVersion
      * @param array $meta
      * @return bool
-     * @throws RuntimeException
+     * @throws \RuntimeException
      */
     private static function fileFallback(string $timestamp, string $actorId, string $action, string $payloadEnc, string $keyVersion, array $meta): bool
     {
@@ -153,7 +166,7 @@ final class AuditLogger
         }
 
         // final exists -> append safely
-        $ok = self::appendFile($final, file_get_contents($tmp));
+        $ok = self::appendFile($final, $line);
         @unlink($tmp);
         if ($ok) {
             @chmod($final, 0600);

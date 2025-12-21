@@ -130,8 +130,7 @@ final class CSRF
         $cookie = $_COOKIE['session_token'] ?? null;
         if (!is_string($cookie) || $cookie === '') return null;
         // use raw cookie string as SessionManager does when creating token_fingerprint
-        $fp = hash('sha256', $cookie, true);
-        return $fp === false ? null : $fp;
+        return hash('sha256', $cookie, true);
     }
 
     /**
@@ -146,7 +145,7 @@ final class CSRF
         $raw = 'csrf_user_' . $userId . '_' . $fpHex;
 
         // extra sanitization (belt & suspenders) - allow only A-Z, 0-9, underscore and dash
-        $safe = preg_replace('/[^A-Za-z0-9_\-]/', '_', $raw);
+        $safe = preg_replace('/[^A-Za-z0-9_\-]/', '_', $raw) ?? $raw;
 
         return $safe;
     }
@@ -326,7 +325,11 @@ final class CSRF
             return count($store);
         }
 
-        return count(self::$session['csrf_tokens']);
+        $session = self::$session;
+        if ($session === null) {
+            return 0;
+        }
+        return count($session['csrf_tokens'] ?? []);
     }
 
     public static function reset(): void
@@ -374,7 +377,11 @@ final class CSRF
                 // Note: session persistence to DB will be handled by SessionManager / session handler
             }
 
-            $mac = bin2hex(Crypto::hmac($id . ':' . $val, 'CSRF_KEY', 'csrf_key'));
+            $macRaw = Crypto::hmac($id . ':' . $val, 'CSRF_KEY', 'csrf_key');
+            if (!is_string($macRaw)) {
+                throw new \RuntimeException('CSRF HMAC failed (unexpected candidate list).');
+            }
+            $mac = bin2hex($macRaw);
             return $id . ':' . $val . ':' . $mac;
         }
 
@@ -415,7 +422,11 @@ final class CSRF
         $meta = ['v' => $val, 'exp' => $now + self::$ttl];
         self::$session['csrf_tokens'][$id] = $meta;
 
-        $mac = bin2hex(Crypto::hmac($id . ':' . $val, 'CSRF_KEY', 'csrf_key'));
+        $macRaw = Crypto::hmac($id . ':' . $val, 'CSRF_KEY', 'csrf_key');
+        if (!is_string($macRaw)) {
+            throw new \RuntimeException('CSRF HMAC failed (unexpected candidate list).');
+        }
+        $mac = bin2hex($macRaw);
         return $id . ':' . $val . ':' . $mac;
     }
 
@@ -441,7 +452,8 @@ final class CSRF
         }
 
         // KEY ROTATION AWARE CHECK
-        $candidates = Crypto::hmac($id . ':' . $val, 'CSRF_KEY', 'csrf_key', null, true);
+        $candidatesRaw = Crypto::hmac($id . ':' . $val, 'CSRF_KEY', 'csrf_key', null, true);
+        $candidates = is_array($candidatesRaw) ? $candidatesRaw : [$candidatesRaw];
 
         $macBin = hex2bin($mac);
         // HMAC-SHA256 expected => 32 bytes
@@ -577,7 +589,6 @@ final class CSRF
         }
 
         $guestTokens = self::$session['csrf_tokens'];
-        if (empty($guestTokens)) return;
 
         // load primary user store and merge
         $fp = self::getSessionFingerprint();
