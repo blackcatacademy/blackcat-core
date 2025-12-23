@@ -11,11 +11,36 @@ class KeyManagerException extends \RuntimeException {}
 final class KeyManager
 {
     private static ?LoggerInterface $logger = null;
+    /** @var null|callable(string):void */
+    private static $accessGuard = null;
     private static array $cache = []; // simple per-request cache ['key_<env>_<basename>[_vN]'=> ['raw'=>..., 'version'=>...]]
     
     public static function setLogger(?LoggerInterface $logger): void
     {
         self::$logger = $logger;
+    }
+
+    /**
+     * Optional security hook: called before accessing key material.
+     *
+     * The callable receives an operation string:
+     * - "read"  (key reads for decrypt/hmac/etc.)
+     * - "write" (key rotation / new key creation)
+     *
+     * In strict mode the guard should throw to deny access.
+     */
+    public static function setAccessGuard(?callable $guard): void
+    {
+        self::$accessGuard = $guard;
+    }
+
+    private static function guard(string $operation): void
+    {
+        if (self::$accessGuard === null) {
+            return;
+        }
+
+        (self::$accessGuard)($operation);
     }
 
     private static function getLogger(): ?LoggerInterface
@@ -54,6 +79,7 @@ final class KeyManager
      */
     public static function getAllRawKeys(string $envName, ?string $keysDir, string $basename, ?int $expectedByteLen = null): array
     {
+        self::guard('read');
         $wantedLen = $expectedByteLen ?? self::keyByteLen();
         $keys = [];
 
@@ -68,8 +94,8 @@ final class KeyManager
             }
         }
 
-        // fallback to ENV only if no key files found
-        if (empty($keys)) {
+        // fallback to ENV only if no key files found and env fallback is explicitly allowed
+        if (empty($keys) && self::isEnvKeyFallbackAllowed()) {
             $envVal = $_ENV[$envName] ?? '';
             if ($envVal !== '') {
                 $raw = base64_decode($envVal, true);
@@ -106,6 +132,7 @@ final class KeyManager
      */
     public static function rotateKey(string $basename, string $keysDir, mixed $db = null, int $keepVersions = 5, bool $archiveOld = false, ?string $archiveDir = null): array
     {
+        self::guard('write');
         self::requireSodium();
         $wantedLen = self::keyByteLen();
 
@@ -278,6 +305,7 @@ final class KeyManager
      */
     public static function getBase64Key(string $envName, ?string $keysDir = null, string $basename = '', bool $generateIfMissing = false, ?int $expectedByteLen = null): string
     {
+        self::guard('read');
         self::requireSodium();
         $wantedLen = $expectedByteLen ?? self::keyByteLen();
 
@@ -293,7 +321,7 @@ final class KeyManager
         }
 
         $envVal = $_ENV[$envName] ?? '';
-        if ($envVal !== '') {
+        if ($envVal !== '' && self::isEnvKeyFallbackAllowed()) {
             $raw = base64_decode($envVal, true);
             if ($raw === false || strlen($raw) !== $wantedLen) {
                 throw new KeyManagerException(sprintf('ENV %s set but invalid base64 or wrong length (expected %d bytes)', $envName, $wantedLen));
@@ -356,6 +384,7 @@ final class KeyManager
      */
     public static function getRawKeyBytesByVersion(string $envName, string $keysDir, string $basename, string $version, ?int $expectedByteLen = null): array
     {
+        self::guard('read');
         $version = ltrim($version, 'v'); // accept 'v2' or '2'
         $verStr = 'v' . (string)(int)$version;
         $path = rtrim($keysDir, '/\\') . '/' . $basename . '_' . $verStr . '.key';
@@ -492,6 +521,7 @@ final class KeyManager
      */
     public static function deriveHmacCandidates(string $envName, ?string $keysDir, string $basename, string $data, ?int $maxCandidates = 20, bool $useEnvFallback = true): array
     {
+        self::guard('read');
         static $cache = []; // per-request cache for hashes (we store only result hashes)
         $cacheKey = $envName . '|' . $basename . '|' . hash('sha256', $data);
         if (isset($cache[$cacheKey])) {
@@ -533,8 +563,8 @@ final class KeyManager
             }
         }
 
-        // fallback to ENV-only (if no files and useEnvFallback is true)
-        if (empty($out) && $useEnvFallback) {
+        // fallback to ENV-only (if no files and fallback is explicitly allowed)
+        if (empty($out) && $useEnvFallback && self::isEnvKeyFallbackAllowed()) {
             $envVal = $_ENV[$envName] ?? '';
             if ($envVal !== '') {
                 $raw = base64_decode($envVal, true);
@@ -549,6 +579,30 @@ final class KeyManager
 
         $cache[$cacheKey] = $out;
         return $out;
+    }
+
+    private static function isEnvKeyFallbackAllowed(): bool
+    {
+        $configClass = implode('\\', ['BlackCat', 'Config', 'Runtime', 'Config']);
+        if (!class_exists($configClass) || !is_callable([$configClass, 'repo'])) {
+            // Legacy stacks: preserve existing behavior.
+            return true;
+        }
+
+        try {
+            /** @var mixed $repo */
+            $repo = $configClass::repo();
+            if (!is_object($repo) || !method_exists($repo, 'get')) {
+                return false;
+            }
+
+            $method = 'get';
+            /** @var mixed $val */
+            $val = $repo->$method('crypto.allow_env_keys', false);
+            return $val === true || $val === 1 || $val === '1';
+        } catch (\Throwable) {
+            return false;
+        }
     }
 
     /**

@@ -83,5 +83,6 @@ Core owns only the **runtime enforcement surface**. Contracts, installers, and C
 - The server installs only `blackcat-core` (and its required deps), plus a runtime config file that contains:
   - chain + RPC quorum configuration,
   - contract addresses,
+  - local integrity inputs (`trust.integrity.root_dir`, `trust.integrity.manifest`),
   - the chosen trust mode (root+URI vs full detail),
   - strict production policy defaults.

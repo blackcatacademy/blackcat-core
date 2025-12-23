@@ -17,6 +17,8 @@ class ConnectionGoneException extends DatabaseException {}
 final class Database
 {
     private static ?self $instance = null;
+    /** @var null|callable(string):void */
+    private static $writeGuard = null;
     private ?\PDO $pdo = null;
     /** Optional read-replica PDO */
     private ?\PDO $pdoRead = null;
@@ -507,9 +509,6 @@ final class Database
     public function exec(string $sql, array $params = []): int
     {
         $this->circuitCheck();
-        if ($this->readOnlyGuard && $this->isWriteSql($sql)) {
-            throw new DatabaseException('Read-only guard: write statements are disabled');
-        }
         $stmt = $this->prepareAndRun($sql, $params);
         try {
             $n = $stmt->rowCount();
@@ -1569,8 +1568,13 @@ final class Database
                 throw new DatabaseException('SQL comment required (use Observability::sqlComment(meta))');
             }
         }
-        if ($this->readOnlyGuard && $this->isWriteSql($sql)) {
-            throw new DatabaseException('Read-only guard: write statements are disabled');
+        if ($this->isWriteSql($sql)) {
+            if ($this->readOnlyGuard) {
+                throw new DatabaseException('Read-only guard: write statements are disabled');
+            }
+            if (self::$writeGuard !== null) {
+                (self::$writeGuard)($sql);
+            }
         }
         if ($this->dangerousSqlGuard && $this->isDangerousWriteWithoutWhere($sql)) {
             throw new DatabaseException('Dangerous write without WHERE/LIMIT detected');
@@ -1846,9 +1850,6 @@ final class Database
     public function execute(string $sql, array $params = []): int
     {
         $this->circuitCheck();
-        if ($this->readOnlyGuard && $this->isWriteSql($sql)) {
-            throw new DatabaseException('Read-only guard: write statements are disabled');
-        }
         $stmt = $this->prepareAndRun($sql, $params);
         try {
             $n = $stmt->rowCount();
@@ -2043,6 +2044,11 @@ final class Database
 
     public function enableReadOnlyGuard(bool $on = true): void { $this->readOnlyGuard = $on; }
     public function isReadOnlyGuardEnabled(): bool { return $this->readOnlyGuard; }
+
+    public static function setWriteGuard(?callable $guard): void
+    {
+        self::$writeGuard = $guard;
+    }
 
     public static function encodeCursor(array $cursor): string {
         $j = json_encode($cursor, JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES|JSON_THROW_ON_ERROR);

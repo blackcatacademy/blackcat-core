@@ -8,9 +8,17 @@ Higher-level security features (auth flows, crypto manifests, DB ingress) live i
 
 `BlackCat\Core\Security\KeyManager` loads keys from:
 1) key files (preferred): `<basename>_vN.key`
-2) environment variables (fallback): base64-encoded
+2) environment variables (legacy fallback): base64-encoded
 
 Key length is enforced (libsodium AEAD key length for crypto keys).
+
+Security note:
+- When `blackcat-config` runtime config is present, ENV key fallback is **disabled by default**.
+- To explicitly allow ENV fallback (legacy/dev only), set `crypto.allow_env_keys=true` in the runtime config.
+
+Optional trust hook:
+- `KeyManager::setAccessGuard()` can be used to fail-closed before any key material is read/rotated.
+  The Trust Kernel bootstrap installs this guard automatically.
 
 ## Crypto (AEAD)
 
@@ -42,3 +50,20 @@ Notes:
 
 - If you provide `opts['httpClient']` (callable), no additional PHP extensions are required.
 - Otherwise it uses `ext-curl` (optional). If `ext-curl` is not available, it throws a clear runtime error.
+
+## Trust Kernel (Web3, optional but recommended for production)
+
+If you install `blackcat-config` and configure `trust.web3` + `trust.integrity`, core can enforce an external trust authority:
+- reads on-chain state from the per-install `InstanceController`,
+- verifies local files against an integrity manifest,
+- blocks DB writes immediately on RPC quorum loss,
+- allows reads (including key reads) only until `max_stale_sec`, then fails closed.
+
+Bootstrap helper:
+
+```php
+use BlackCat\Core\TrustKernel\TrustKernelBootstrap;
+
+// Best-effort: returns null if blackcat-config is not installed or trust.web3 is not configured.
+$trust = TrustKernelBootstrap::tryBootFromBlackCatConfig();
+```
