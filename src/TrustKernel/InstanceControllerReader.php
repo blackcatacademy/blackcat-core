@@ -100,9 +100,6 @@ final class InstanceControllerReader
         $addr = '0x' . substr($word, 24, 40);
         // normalize to lowercase + validate.
         Bytes32::normalizeHex('0x' . substr($word, 0, 64));
-        if ($addr === '0x0000000000000000000000000000000000000000') {
-            throw new \RuntimeException('Invalid address (zero).');
-        }
         return $addr;
     }
 }

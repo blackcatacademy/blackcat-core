@@ -55,7 +55,8 @@ Notes:
 
 If you install `blackcat-config` and configure `trust.web3` + `trust.integrity`, core can enforce an external trust authority:
 - reads on-chain state from the per-install `InstanceController`,
-- (optional) validates the active root against `ReleaseRegistry` (`isTrustedRoot`) when configured,
+- validates the active root against `ReleaseRegistry` (`isTrustedRoot`) when the controller has a non-zero `releaseRegistry` pointer,
+  and optionally pins the expected registry address via runtime config,
 - verifies local files against an integrity manifest,
 - blocks DB writes immediately on RPC quorum loss,
 - allows reads (including key reads) only until `max_stale_sec`, then fails closed.

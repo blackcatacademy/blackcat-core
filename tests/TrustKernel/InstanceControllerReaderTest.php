@@ -111,4 +111,35 @@ final class InstanceControllerReaderTest extends TestCase
 
         self::assertSame($addr, $got);
     }
+
+    public function testReleaseRegistryDecodeAllowsZero(): void
+    {
+        $payload = '0x' . str_repeat('0', 64);
+
+        $transport = new class($payload) implements Web3TransportInterface {
+            public function __construct(private readonly string $hex) {}
+
+            public function postJson(string $url, string $jsonBody, int $timeoutSec): string
+            {
+                $req = json_decode($jsonBody, true);
+                $method = is_array($req) ? ($req['method'] ?? null) : null;
+
+                if ($method === 'eth_chainId') {
+                    return json_encode(['jsonrpc' => '2.0', 'id' => 1, 'result' => '0x106f'], JSON_THROW_ON_ERROR);
+                }
+
+                if ($method === 'eth_call') {
+                    return json_encode(['jsonrpc' => '2.0', 'id' => 1, 'result' => $this->hex], JSON_THROW_ON_ERROR);
+                }
+
+                throw new \RuntimeException('unexpected method');
+            }
+        };
+
+        $rpc = new Web3RpcQuorumClient(['https://a'], 4207, 1, $transport, 5);
+        $reader = new InstanceControllerReader($rpc);
+        $got = $reader->releaseRegistry('0x1111111111111111111111111111111111111111');
+
+        self::assertSame('0x0000000000000000000000000000000000000000', $got);
+    }
 }

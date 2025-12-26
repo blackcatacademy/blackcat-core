@@ -137,21 +137,25 @@ final class TrustKernel
                 $errors[] = $e->getMessage();
             }
 
-            if ($this->config->releaseRegistry !== null) {
-                try {
-                    $rrOnController = $this->controller->releaseRegistry($this->config->instanceController);
-                    $rrConfigured = strtolower(trim($this->config->releaseRegistry));
-                    if ($rrConfigured !== strtolower($rrOnController)) {
-                        $errors[] = 'ReleaseRegistry mismatch between config and InstanceController.';
-                    } else {
-                        $activeRoot = Bytes32::normalizeHex($snapshot->activeRoot);
-                        if (!$this->releaseRegistry->isTrustedRoot($rrOnController, $activeRoot)) {
-                            $errors[] = 'Active root is not trusted in ReleaseRegistry.';
-                        }
-                    }
-                } catch (\Throwable $e) {
-                    $errors[] = 'ReleaseRegistry check failed: ' . $e->getMessage();
+            // ReleaseRegistry trust check:
+            // - the source of truth is the on-chain pointer stored in the InstanceController
+            // - runtime config may additionally *pin* the expected registry address (optional)
+            try {
+                $rrOnController = strtolower($this->controller->releaseRegistry($this->config->instanceController));
+                $rrConfigured = $this->config->releaseRegistry !== null ? strtolower(trim($this->config->releaseRegistry)) : null;
+
+                if ($rrConfigured !== null && $rrConfigured !== $rrOnController) {
+                    $errors[] = 'ReleaseRegistry mismatch between config and InstanceController.';
                 }
+
+                if ($rrOnController !== '0x0000000000000000000000000000000000000000') {
+                    $activeRoot = Bytes32::normalizeHex($snapshot->activeRoot);
+                    if (!$this->releaseRegistry->isTrustedRoot($rrOnController, $activeRoot)) {
+                        $errors[] = 'Active root is not trusted in ReleaseRegistry.';
+                    }
+                }
+            } catch (\Throwable $e) {
+                $errors[] = 'ReleaseRegistry check failed: ' . $e->getMessage();
             }
 
             // Optional sanity check: if the InstanceController is an EIP-1167 clone, ensure it points to a live implementation.
