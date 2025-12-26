@@ -55,9 +55,15 @@ Notes:
 
 If you install `blackcat-config` and configure `trust.web3` + `trust.integrity`, core can enforce an external trust authority:
 - reads on-chain state from the per-install `InstanceController`,
+- (optional) validates the active root against `ReleaseRegistry` (`isTrustedRoot`) when configured,
 - verifies local files against an integrity manifest,
 - blocks DB writes immediately on RPC quorum loss,
 - allows reads (including key reads) only until `max_stale_sec`, then fails closed.
+
+Policy hash notes:
+- `TrustPolicyV1` (schema v1): `mode` + `max_stale_sec` (treated as **strict** enforcement).
+- `TrustPolicyV2` (schema v2): adds `enforcement` (`strict` | `warn`).
+  - `warn` is a **dev-only** posture and emits loud warnings; production policy should commit to `strict`.
 
 Bootstrap helper:
 

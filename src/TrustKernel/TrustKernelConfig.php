@@ -20,21 +20,21 @@ final class TrustKernelConfig
 
     public readonly string $instanceController;
 
+    public readonly ?string $releaseRegistry;
+
     public readonly string $integrityRootDir;
 
     public readonly string $integrityManifestPath;
 
-    /** @var 'strict'|'warn' */
-    public readonly string $enforcement;
-
     public readonly int $rpcTimeoutSec;
 
-    public readonly string $expectedPolicyHash;
+    public readonly string $policyHashV1;
+    public readonly string $policyHashV2Strict;
+    public readonly string $policyHashV2Warn;
 
     /**
      * @param list<string> $rpcEndpoints
      * @param 'root_uri'|'full' $mode
-     * @param 'strict'|'warn' $enforcement
      */
     public function __construct(
         int $chainId,
@@ -43,9 +43,9 @@ final class TrustKernelConfig
         int $maxStaleSec,
         string $mode,
         string $instanceController,
+        ?string $releaseRegistry,
         string $integrityRootDir,
         string $integrityManifestPath,
-        string $enforcement,
         int $rpcTimeoutSec,
     )
     {
@@ -65,9 +65,6 @@ final class TrustKernelConfig
         if (!in_array($mode, ['root_uri', 'full'], true)) {
             throw new \InvalidArgumentException('Invalid mode (expected root_uri|full).');
         }
-        if (!in_array($enforcement, ['strict', 'warn'], true)) {
-            throw new \InvalidArgumentException('Invalid enforcement (expected strict|warn).');
-        }
         if ($rpcTimeoutSec < 1 || $rpcTimeoutSec > 60) {
             throw new \InvalidArgumentException('Invalid rpcTimeoutSec (expected 1..60).');
         }
@@ -78,11 +75,13 @@ final class TrustKernelConfig
         $this->maxStaleSec = $maxStaleSec;
         $this->mode = $mode;
         $this->instanceController = $instanceController;
+        $this->releaseRegistry = $releaseRegistry;
         $this->integrityRootDir = $integrityRootDir;
         $this->integrityManifestPath = $integrityManifestPath;
-        $this->enforcement = $enforcement;
         $this->rpcTimeoutSec = $rpcTimeoutSec;
-        $this->expectedPolicyHash = (new TrustPolicyV1($mode, $maxStaleSec))->hashBytes32();
+        $this->policyHashV1 = (new TrustPolicyV1($mode, $maxStaleSec))->hashBytes32();
+        $this->policyHashV2Strict = (new TrustPolicyV2($mode, $maxStaleSec, 'strict'))->hashBytes32();
+        $this->policyHashV2Warn = (new TrustPolicyV2($mode, $maxStaleSec, 'warn'))->hashBytes32();
     }
 
     public static function fromRuntimeConfig(RuntimeConfigRepositoryInterface $repo): ?self
@@ -144,17 +143,18 @@ final class TrustKernelConfig
         $controller = $repo->requireString('trust.web3.contracts.instance_controller');
         self::assertEvmAddress($controller, 'trust.web3.contracts.instance_controller');
 
+        $releaseRegistry = $repo->get('trust.web3.contracts.release_registry');
+        if ($releaseRegistry !== null && $releaseRegistry !== '') {
+            if (!is_string($releaseRegistry)) {
+                throw new \RuntimeException('Invalid config type for trust.web3.contracts.release_registry (expected string).');
+            }
+            self::assertEvmAddress($releaseRegistry, 'trust.web3.contracts.release_registry');
+        } else {
+            $releaseRegistry = null;
+        }
+
         $integrityRootDir = $repo->resolvePath($repo->requireString('trust.integrity.root_dir'));
         $integrityManifestPath = $repo->resolvePath($repo->requireString('trust.integrity.manifest'));
-
-        $enforcementRaw = $repo->get('trust.enforcement', 'strict');
-        if (!is_string($enforcementRaw)) {
-            throw new \RuntimeException('Invalid config type for trust.enforcement (expected string).');
-        }
-        $enforcement = strtolower(trim($enforcementRaw));
-        if ($enforcement === '' || !in_array($enforcement, ['strict', 'warn'], true)) {
-            throw new \RuntimeException('Invalid config value for trust.enforcement (expected "strict" or "warn").');
-        }
 
         $timeoutSec = self::parseIntLike($repo->get('trust.web3.timeout_sec', 5), 'trust.web3.timeout_sec');
         if ($timeoutSec < 1 || $timeoutSec > 60) {
@@ -168,9 +168,9 @@ final class TrustKernelConfig
             maxStaleSec: $maxStaleSec,
             mode: $mode,
             instanceController: $controller,
+            releaseRegistry: $releaseRegistry,
             integrityRootDir: $integrityRootDir,
             integrityManifestPath: $integrityManifestPath,
-            enforcement: $enforcement,
             rpcTimeoutSec: $timeoutSec,
         );
     }

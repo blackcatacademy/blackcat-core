@@ -53,5 +53,37 @@ final class Web3RpcQuorumClientTest extends TestCase
         $res = $client->ethCallQuorum('0x1111111111111111111111111111111111111111', '0x9711715a');
         self::assertSame(strtolower($snapshotHex), $res);
     }
-}
 
+    public function testEthGetCodeQuorumReturnsLowercaseHex(): void
+    {
+        $transport = new class implements Web3TransportInterface {
+            public function postJson(string $url, string $jsonBody, int $timeoutSec): string
+            {
+                $req = json_decode($jsonBody, true);
+                $method = is_array($req) ? ($req['method'] ?? null) : null;
+
+                if ($method === 'eth_chainId') {
+                    return json_encode([
+                        'jsonrpc' => '2.0',
+                        'id' => 1,
+                        'result' => '0x106f', // 4207
+                    ], JSON_THROW_ON_ERROR);
+                }
+
+                if ($method === 'eth_getCode') {
+                    return json_encode([
+                        'jsonrpc' => '2.0',
+                        'id' => 1,
+                        'result' => '0xABcd',
+                    ], JSON_THROW_ON_ERROR);
+                }
+
+                throw new \RuntimeException('unexpected method');
+            }
+        };
+
+        $client = new Web3RpcQuorumClient(['https://a'], 4207, 1, $transport, 5);
+        $code = $client->ethGetCodeQuorum('0x1111111111111111111111111111111111111111');
+        self::assertSame('0xabcd', $code);
+    }
+}

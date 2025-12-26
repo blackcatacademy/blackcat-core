@@ -12,6 +12,7 @@ final class TrustKernel
 {
     private Web3RpcQuorumClient $rpc;
     private InstanceControllerReader $controller;
+    private ReleaseRegistryReader $releaseRegistry;
     private LocalIntegrityVerifier $integrity;
 
     private ?IntegrityManifestV1 $manifest = null;
@@ -22,6 +23,10 @@ final class TrustKernel
 
     private ?TrustKernelStatus $lastOkStatus = null;
     private ?int $lastOkAt = null;
+
+    /** @var 'strict'|'warn' */
+    private string $effectiveEnforcement = 'strict';
+    private bool $warnBannerEmitted = false;
 
     public function __construct(
         private readonly TrustKernelConfig $config,
@@ -36,6 +41,7 @@ final class TrustKernel
             $config->rpcTimeoutSec,
         );
         $this->controller = new InstanceControllerReader($this->rpc);
+        $this->releaseRegistry = new ReleaseRegistryReader($this->rpc);
         $this->integrity = new LocalIntegrityVerifier($config->integrityRootDir);
     }
 
@@ -77,15 +83,36 @@ final class TrustKernel
         }
 
         if ($rpcOkNow && $snapshot !== null) {
+            if ($snapshot->version !== 1) {
+                $errors[] = 'Unsupported instance controller snapshot version.';
+            }
+
             $paused = $snapshot->paused;
             if ($paused) {
                 $errors[] = 'Instance controller is paused.';
             }
 
-            $expectedPolicyHash = Bytes32::normalizeHex($this->config->expectedPolicyHash);
             $activePolicyHash = Bytes32::normalizeHex($snapshot->activePolicyHash);
-            if (!hash_equals($expectedPolicyHash, $activePolicyHash)) {
+            $policyOk = false;
+            /** @var 'strict'|'warn' $derivedEnforcement */
+            $derivedEnforcement = 'strict';
+            if (hash_equals(Bytes32::normalizeHex($this->config->policyHashV1), $activePolicyHash)) {
+                $policyOk = true;
+                $derivedEnforcement = 'strict';
+            } elseif (hash_equals(Bytes32::normalizeHex($this->config->policyHashV2Strict), $activePolicyHash)) {
+                $policyOk = true;
+                $derivedEnforcement = 'strict';
+            } elseif (hash_equals(Bytes32::normalizeHex($this->config->policyHashV2Warn), $activePolicyHash)) {
+                $policyOk = true;
+                $derivedEnforcement = 'warn';
+            }
+
+            if (!$policyOk) {
                 $errors[] = 'Policy hash mismatch.';
+                // If the policy hash is unknown, do not allow any non-strict behavior even in dev.
+                $this->effectiveEnforcement = 'strict';
+            } else {
+                $this->effectiveEnforcement = $derivedEnforcement;
             }
 
             try {
@@ -110,6 +137,41 @@ final class TrustKernel
                 $errors[] = $e->getMessage();
             }
 
+            if ($this->config->releaseRegistry !== null) {
+                try {
+                    $rrOnController = $this->controller->releaseRegistry($this->config->instanceController);
+                    $rrConfigured = strtolower(trim($this->config->releaseRegistry));
+                    if ($rrConfigured !== strtolower($rrOnController)) {
+                        $errors[] = 'ReleaseRegistry mismatch between config and InstanceController.';
+                    } else {
+                        $activeRoot = Bytes32::normalizeHex($snapshot->activeRoot);
+                        if (!$this->releaseRegistry->isTrustedRoot($rrOnController, $activeRoot)) {
+                            $errors[] = 'Active root is not trusted in ReleaseRegistry.';
+                        }
+                    }
+                } catch (\Throwable $e) {
+                    $errors[] = 'ReleaseRegistry check failed: ' . $e->getMessage();
+                }
+            }
+
+            // Optional sanity check: if the InstanceController is an EIP-1167 clone, ensure it points to a live implementation.
+            try {
+                $code = $this->rpc->ethGetCodeQuorum($this->config->instanceController, 'latest');
+                $proxyImpl = self::tryParseEip1167Implementation($code);
+                if ($proxyImpl !== null) {
+                    $implCode = $this->rpc->ethGetCodeQuorum($proxyImpl, 'latest');
+                    if ($implCode === '0x' || $implCode === '0x0') {
+                        $errors[] = 'InstanceController EIP-1167 implementation has no code.';
+                    }
+                } else {
+                    if ($code === '0x' || $code === '0x0') {
+                        $errors[] = 'InstanceController has no code.';
+                    }
+                }
+            } catch (\Throwable $e) {
+                $errors[] = 'InstanceController code sanity check failed: ' . $e->getMessage();
+            }
+
             $trustedNow = $errors === [];
             if ($trustedNow) {
                 $this->lastOkAt = $now;
@@ -124,9 +186,34 @@ final class TrustKernel
             $writeAllowed = true;
         } else {
             // Only allow stale reads when the failure is RPC-related and we have a recent OK state.
-            if (!$rpcOkNow && $this->lastOkAt !== null && ($now - $this->lastOkAt) <= $this->config->maxStaleSec) {
-                if ($this->lastOkStatus?->paused === false) {
-                    $readAllowed = true;
+            if (
+                !$rpcOkNow
+                && $this->lastOkAt !== null
+                && ($now - $this->lastOkAt) <= $this->config->maxStaleSec
+                && $this->lastOkStatus?->paused === false
+            ) {
+                // Still re-check local integrity against the last known good on-chain root to prevent
+                // "RPC outage + local tamper" from becoming a read bypass.
+                try {
+                    $manifest = $this->loadManifestIfNeeded();
+                    $freshRoot = $this->integrity->computeAndVerifyRoot($manifest);
+                    $lastOkRoot = $this->lastOkStatus->snapshot?->activeRoot;
+                    $lastOkUriHash = $this->lastOkStatus->snapshot?->activeUriHash;
+
+                    $rootOk = is_string($lastOkRoot)
+                        && hash_equals(Bytes32::normalizeHex($lastOkRoot), Bytes32::normalizeHex($freshRoot));
+
+                    $uriOk = true;
+                    $manifestUriHash = $manifest->uriHashBytes32();
+                    if ($manifestUriHash !== null && is_string($lastOkUriHash)) {
+                        $uriOk = hash_equals(Bytes32::normalizeHex($manifestUriHash), Bytes32::normalizeHex($lastOkUriHash));
+                    }
+
+                    if ($rootOk && $uriOk) {
+                        $readAllowed = true;
+                    }
+                } catch (\Throwable $e) {
+                    $errors[] = 'Stale-mode integrity recheck failed: ' . $e->getMessage();
                 }
             }
         }
@@ -180,7 +267,11 @@ final class TrustKernel
             $msg .= ' (' . implode(' | ', $status->errors) . ')';
         }
 
-        if ($this->config->enforcement === 'warn') {
+        if ($this->effectiveEnforcement === 'warn') {
+            if (!$this->warnBannerEmitted) {
+                $this->warnBannerEmitted = true;
+                $this->logger?->warning('[trust-kernel] WARNING MODE enabled. Do not use this policy in production.');
+            }
             $this->logger?->warning($msg);
             return;
         }
@@ -207,5 +298,41 @@ final class TrustKernel
         $this->manifest = $manifest;
         $this->manifestMtime = $mtime;
         return $manifest;
+    }
+
+    private static function tryParseEip1167Implementation(string $codeHex): ?string
+    {
+        $codeHex = strtolower(trim($codeHex));
+        if ($codeHex === '' || !str_starts_with($codeHex, '0x')) {
+            return null;
+        }
+
+        $payload = substr($codeHex, 2);
+        if ($payload === '') {
+            return null;
+        }
+
+        // EIP-1167 runtime: 0x363d3d373d3d3d363d73<20-byte-impl>5af43d82803e903d91602b57fd5bf3
+        $prefix = '363d3d373d3d3d363d73';
+        $suffix = '5af43d82803e903d91602b57fd5bf3';
+
+        if (strlen($payload) !== (strlen($prefix) + 40 + strlen($suffix))) {
+            return null;
+        }
+        if (!str_starts_with($payload, $prefix) || !str_ends_with($payload, $suffix)) {
+            return null;
+        }
+
+        $impl = substr($payload, strlen($prefix), 40);
+        if (!is_string($impl) || strlen($impl) !== 40 || !ctype_xdigit($impl)) {
+            return null;
+        }
+
+        $addr = '0x' . $impl;
+        if ($addr === '0x0000000000000000000000000000000000000000') {
+            return null;
+        }
+
+        return $addr;
     }
 }

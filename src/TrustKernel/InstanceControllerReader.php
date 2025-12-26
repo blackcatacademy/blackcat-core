@@ -7,6 +7,7 @@ namespace BlackCat\Core\TrustKernel;
 final class InstanceControllerReader
 {
     private const SNAPSHOT_SELECTOR = '0x9711715a'; // snapshot()
+    private const RELEASE_REGISTRY_SELECTOR = '0x19ee073e'; // releaseRegistry()
 
     public function __construct(
         private readonly Web3RpcQuorumClient $rpc,
@@ -17,6 +18,12 @@ final class InstanceControllerReader
     {
         $hex = $this->rpc->ethCallQuorum($instanceControllerAddress, self::SNAPSHOT_SELECTOR, 'latest');
         return self::decodeSnapshot($hex);
+    }
+
+    public function releaseRegistry(string $instanceControllerAddress): string
+    {
+        $hex = $this->rpc->ethCallQuorum($instanceControllerAddress, self::RELEASE_REGISTRY_SELECTOR, 'latest');
+        return self::decodeAddress($hex);
     }
 
     private static function decodeSnapshot(string $hex): InstanceControllerSnapshot
@@ -71,5 +78,31 @@ final class InstanceControllerReader
             $genesisAt,
             $lastUpgradeAt,
         );
+    }
+
+    private static function decodeAddress(string $hex): string
+    {
+        $hex = trim($hex);
+        if ($hex === '' || !str_starts_with($hex, '0x')) {
+            throw new \RuntimeException('Invalid address result.');
+        }
+
+        $payload = substr(strtolower($hex), 2);
+        if (strlen($payload) < 64) {
+            throw new \RuntimeException('Invalid address result length.');
+        }
+
+        $word = substr($payload, 0, 64);
+        if (!is_string($word) || strlen($word) !== 64 || !ctype_xdigit($word)) {
+            throw new \RuntimeException('Invalid address ABI word.');
+        }
+
+        $addr = '0x' . substr($word, 24, 40);
+        // normalize to lowercase + validate.
+        Bytes32::normalizeHex('0x' . substr($word, 0, 64));
+        if ($addr === '0x0000000000000000000000000000000000000000') {
+            throw new \RuntimeException('Invalid address (zero).');
+        }
+        return $addr;
     }
 }

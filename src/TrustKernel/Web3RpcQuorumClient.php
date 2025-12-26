@@ -77,6 +77,26 @@ final class Web3RpcQuorumClient
         return $result;
     }
 
+    public function ethGetCodeQuorum(string $address, string $blockTag = 'latest'): string
+    {
+        $address = self::normalizeEvmAddress($address);
+
+        $params = [
+            $address,
+            $blockTag,
+        ];
+
+        /** @var string $result */
+        $result = $this->callQuorum('eth_getCode', $params, static function (mixed $result): string {
+            if (!is_string($result) || !str_starts_with($result, '0x')) {
+                throw new \RuntimeException('Invalid eth_getCode result type/value.');
+            }
+            return strtolower($result);
+        });
+
+        return $result;
+    }
+
     /**
      * @param array<int,mixed> $params
      * @param callable(mixed):string $normalize
