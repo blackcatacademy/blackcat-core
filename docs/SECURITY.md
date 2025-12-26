@@ -71,6 +71,14 @@ Bootstrap helper:
 ```php
 use BlackCat\Core\TrustKernel\TrustKernelBootstrap;
 
-// Best-effort: returns null if blackcat-config is not installed or trust.web3 is not configured.
-$trust = TrustKernelBootstrap::tryBootFromBlackCatConfig();
+// Production (trust required): fail-closed.
+// Throws if config is missing/invalid or trust.web3 is not configured.
+$trust = TrustKernelBootstrap::bootFromBlackCatConfigOrFail();
+
+// Library/optional: returns null only when trust.web3 is not configured.
+// Throws on invalid config (fail-closed).
+$trustOptional = TrustKernelBootstrap::bootIfConfiguredFromBlackCatConfig();
+
+// Legacy best-effort: returns null on any error (NOT recommended for production).
+$trustLegacy = TrustKernelBootstrap::tryBootFromBlackCatConfig();
 ```
