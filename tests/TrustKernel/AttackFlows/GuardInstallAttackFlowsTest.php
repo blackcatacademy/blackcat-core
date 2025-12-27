@@ -288,7 +288,12 @@ final class GuardInstallAttackFlowsTest extends TestCase
         /** @var callable(string):void $dbGuard */
         $dbGuard('UPDATE example SET x=1');
         /** @var callable(string):void $pdoGuard */
-        $pdoGuard('db.raw_pdo');
+        try {
+            $pdoGuard('db.raw_pdo');
+            self::fail('Expected TrustKernelException for raw PDO bypass (always forbidden, even in warn mode).');
+        } catch (TrustKernelException) {
+            // ok
+        }
 
         $keys = KeyManager::getAllRawKeys('APP_SALT', $keysDir, 'app_salt', 32);
         self::assertCount(1, $keys);

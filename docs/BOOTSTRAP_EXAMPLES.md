@@ -83,7 +83,7 @@ use BlackCat\Core\Database;
 use BlackCat\Database\Crypto\IngressLocator;
 use BlackCat\Core\TrustKernel\TrustKernelBootstrap;
 
-// Optional: installs DB/key access guards if `trust.web3` is configured via blackcat-config runtime config.
+// Optional: installs DB/key access guards when runtime config is available and `trust.web3` is configured.
 // For "trust required" production deployments, prefer `bootFromBlackCatConfigOrFail()`.
 $trust = TrustKernelBootstrap::bootIfConfiguredFromBlackCatConfig();
 

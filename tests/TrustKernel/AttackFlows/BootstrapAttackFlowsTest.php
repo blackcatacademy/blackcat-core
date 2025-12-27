@@ -7,6 +7,11 @@ namespace BlackCat\Config\Runtime {
     {
         private static ?object $repo = null;
 
+        public static function isInitialized(): bool
+        {
+            return self::$repo !== null;
+        }
+
         public static function initFromFirstAvailableJsonFileIfNeeded(): void
         {
             // no-op for tests
@@ -23,6 +28,11 @@ namespace BlackCat\Config\Runtime {
         public static function _setRepo(object $repo): void
         {
             self::$repo = $repo;
+        }
+
+        public static function _clearRepo(): void
+        {
+            self::$repo = null;
         }
     }
 }
@@ -54,6 +64,14 @@ namespace BlackCat\Core\Tests\TrustKernel\AttackFlows {
         public function testBootIfConfiguredReturnsNullWhenTrustIsNotConfigured(): void
         {
             Config::_setRepo(new FakeRepo([]));
+
+            $kernel = TrustKernelBootstrap::bootIfConfiguredFromBlackCatConfig();
+            self::assertNull($kernel);
+        }
+
+        public function testBootIfConfiguredReturnsNullWhenRuntimeConfigIsMissing(): void
+        {
+            Config::_clearRepo();
 
             $kernel = TrustKernelBootstrap::bootIfConfiguredFromBlackCatConfig();
             self::assertNull($kernel);

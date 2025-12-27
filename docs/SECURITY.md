@@ -79,7 +79,7 @@ use BlackCat\Core\TrustKernel\TrustKernelBootstrap;
 // Throws if config is missing/invalid or trust.web3 is not configured.
 $trust = TrustKernelBootstrap::bootFromBlackCatConfigOrFail();
 
-// Library/optional: returns null only when trust.web3 is not configured.
+// Library/optional: returns null when runtime config is missing or trust.web3 is not configured.
 // Throws on invalid config (fail-closed).
 $trustOptional = TrustKernelBootstrap::bootIfConfiguredFromBlackCatConfig();
 
