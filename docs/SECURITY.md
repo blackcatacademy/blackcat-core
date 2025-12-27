@@ -65,6 +65,10 @@ Policy hash notes:
 - `TrustPolicyV1` (schema v1): `mode` + `max_stale_sec` (treated as **strict** enforcement).
 - `TrustPolicyV2` (schema v2): adds `enforcement` (`strict` | `warn`).
   - `warn` is a **dev-only** posture and emits loud warnings; production policy should commit to `strict`.
+- `TrustPolicyV3` (schema v3): adds **runtime config attestation** (binds the runtime config to an on-chain bytes32 slot).
+  - in `strict` mode, a mismatched / missing attestation fails closed
+  - the attestation key is `sha256("blackcat.runtime_config.canonical_sha256.v1")`
+  - the recommended value is `sha256(canonical_json(runtime_config))` (see `blackcat-config` `runtime:attestation:runtime-config`)
 
 Bootstrap helper:
 
@@ -89,6 +93,7 @@ The Trust Kernel installs guards at the **kernel primitive level** (`KeyManager`
 To keep this security model intact across the ecosystem, bypass paths must be forbidden:
 
 - Do not instantiate raw `PDO` (use `BlackCat\Core\Database`).
+- Do not call `Database::getPdo()` (raw PDO access is guarded/denied; use wrapper methods).
 - Do not read `*.key` files directly (use `BlackCat\Core\Security\KeyManager`).
 
 Recommended CI check (requires `blackcatacademy/blackcat-config`):
