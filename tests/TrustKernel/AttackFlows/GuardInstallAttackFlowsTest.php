@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace BlackCat\Core\Tests\TrustKernel\AttackFlows;
 
 use BlackCat\Core\Database;
+use BlackCat\Core\DatabaseException;
 use BlackCat\Core\Security\KeyManager;
+use BlackCat\Core\Security\KeyManagerException;
 use BlackCat\Core\Tests\TrustKernel\AttackFlows\Support\Abi;
 use BlackCat\Core\Tests\TrustKernel\AttackFlows\Support\IntegrityFixture;
 use BlackCat\Core\Tests\TrustKernel\AttackFlows\Support\ScenarioTransport;
@@ -19,10 +21,15 @@ final class GuardInstallAttackFlowsTest extends TestCase
 {
     protected function tearDown(): void
     {
-        // Avoid leaking guards into other tests.
-        KeyManager::setAccessGuard(null);
-        Database::setWriteGuard(null);
-        Database::setPdoAccessGuard(null);
+        // Avoid leaking guards/locks into other tests.
+        self::writePrivateStatic(KeyManager::class, 'accessGuardLocked', false);
+        self::writePrivateStatic(KeyManager::class, 'accessGuard', null);
+        self::writePrivateStatic(KeyManager::class, 'cache', []);
+
+        self::writePrivateStatic(Database::class, 'writeGuardLocked', false);
+        self::writePrivateStatic(Database::class, 'writeGuard', null);
+        self::writePrivateStatic(Database::class, 'pdoAccessGuardLocked', false);
+        self::writePrivateStatic(Database::class, 'pdoAccessGuard', null);
     }
 
     public function testInstallGuardsDeniesKeyReadsAndDbWritesInStrictMode(): void
@@ -111,6 +118,26 @@ final class GuardInstallAttackFlowsTest extends TestCase
 
         $pdoGuard = self::readPrivateStatic(Database::class, 'pdoAccessGuard');
         self::assertIsCallable($pdoGuard);
+
+        // Guards must not be disable-able at runtime.
+        try {
+            KeyManager::setAccessGuard(null);
+            self::fail('Expected KeyManagerException when disabling the access guard.');
+        } catch (KeyManagerException) {
+            // ok
+        }
+        try {
+            Database::setWriteGuard(null);
+            self::fail('Expected DatabaseException when disabling the DB write guard.');
+        } catch (DatabaseException) {
+            // ok
+        }
+        try {
+            Database::setPdoAccessGuard(null);
+            self::fail('Expected DatabaseException when disabling the PDO access guard.');
+        } catch (DatabaseException) {
+            // ok
+        }
 
         try {
             KeyManager::getAllRawKeys('APP_SALT', $keysDir, 'app_salt', 32);
@@ -234,6 +261,26 @@ final class GuardInstallAttackFlowsTest extends TestCase
         $pdoGuard = self::readPrivateStatic(Database::class, 'pdoAccessGuard');
         self::assertIsCallable($pdoGuard);
 
+        // Guards must not be disable-able at runtime.
+        try {
+            KeyManager::setAccessGuard(null);
+            self::fail('Expected KeyManagerException when disabling the access guard.');
+        } catch (KeyManagerException) {
+            // ok
+        }
+        try {
+            Database::setWriteGuard(null);
+            self::fail('Expected DatabaseException when disabling the DB write guard.');
+        } catch (DatabaseException) {
+            // ok
+        }
+        try {
+            Database::setPdoAccessGuard(null);
+            self::fail('Expected DatabaseException when disabling the PDO access guard.');
+        } catch (DatabaseException) {
+            // ok
+        }
+
         // Must NOT throw (warn mode).
         /** @var callable(string):void $keyGuard */
         $keyGuard('read');
@@ -270,5 +317,12 @@ final class GuardInstallAttackFlowsTest extends TestCase
         $ref = new \ReflectionProperty($class, $property);
         $ref->setAccessible(true);
         return $ref->getValue();
+    }
+
+    private static function writePrivateStatic(string $class, string $property, mixed $value): void
+    {
+        $ref = new \ReflectionProperty($class, $property);
+        $ref->setAccessible(true);
+        $ref->setValue(null, $value);
     }
 }

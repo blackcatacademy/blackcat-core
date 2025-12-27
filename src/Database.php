@@ -19,8 +19,10 @@ final class Database
     private static ?self $instance = null;
     /** @var null|callable(string):void */
     private static $writeGuard = null;
+    private static bool $writeGuardLocked = false;
     /** @var null|callable(string):void */
     private static $pdoAccessGuard = null;
+    private static bool $pdoAccessGuardLocked = false;
     private ?\PDO $pdo = null;
     /** Optional read-replica PDO */
     private ?\PDO $pdoRead = null;
@@ -2057,7 +2059,20 @@ final class Database
 
     public static function setWriteGuard(?callable $guard): void
     {
+        if (self::$writeGuardLocked) {
+            throw new DatabaseException('Database write guard is locked.');
+        }
         self::$writeGuard = $guard;
+    }
+
+    public static function lockWriteGuard(): void
+    {
+        self::$writeGuardLocked = true;
+    }
+
+    public static function isWriteGuardLocked(): bool
+    {
+        return self::$writeGuardLocked;
     }
 
     /**
@@ -2069,7 +2084,20 @@ final class Database
      */
     public static function setPdoAccessGuard(?callable $guard): void
     {
+        if (self::$pdoAccessGuardLocked) {
+            throw new DatabaseException('Database PDO access guard is locked.');
+        }
         self::$pdoAccessGuard = $guard;
+    }
+
+    public static function lockPdoAccessGuard(): void
+    {
+        self::$pdoAccessGuardLocked = true;
+    }
+
+    public static function isPdoAccessGuardLocked(): bool
+    {
+        return self::$pdoAccessGuardLocked;
     }
 
     public static function encodeCursor(array $cursor): string {

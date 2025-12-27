@@ -13,6 +13,7 @@ final class KeyManager
     private static ?LoggerInterface $logger = null;
     /** @var null|callable(string):void */
     private static $accessGuard = null;
+    private static bool $accessGuardLocked = false;
     private static array $cache = []; // simple per-request cache ['key_<env>_<basename>[_vN]'=> ['raw'=>..., 'version'=>...]]
     
     public static function setLogger(?LoggerInterface $logger): void
@@ -31,7 +32,20 @@ final class KeyManager
      */
     public static function setAccessGuard(?callable $guard): void
     {
+        if (self::$accessGuardLocked) {
+            throw new KeyManagerException('KeyManager access guard is locked.');
+        }
         self::$accessGuard = $guard;
+    }
+
+    public static function lockAccessGuard(): void
+    {
+        self::$accessGuardLocked = true;
+    }
+
+    public static function isAccessGuardLocked(): bool
+    {
+        return self::$accessGuardLocked;
     }
 
     private static function guard(string $operation): void

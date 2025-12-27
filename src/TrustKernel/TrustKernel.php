@@ -47,6 +47,21 @@ final class TrustKernel
 
     public function installGuards(): void
     {
+        $alreadyLocked = KeyManager::isAccessGuardLocked()
+            || Database::isWriteGuardLocked()
+            || Database::isPdoAccessGuardLocked();
+
+        if ($alreadyLocked) {
+            if (
+                KeyManager::isAccessGuardLocked()
+                && Database::isWriteGuardLocked()
+                && Database::isPdoAccessGuardLocked()
+            ) {
+                return;
+            }
+            throw new TrustKernelException('Kernel guards are partially locked; restart the process.');
+        }
+
         KeyManager::setAccessGuard(function (string $operation): void {
             if ($operation === 'write') {
                 $this->assertWriteAllowed('secrets.write');
@@ -63,6 +78,11 @@ final class TrustKernel
         Database::setPdoAccessGuard(function (string $context): void {
             $this->denyBypass($context);
         });
+
+        // Hard lock: prevent runtime code from disabling guards after bootstrap.
+        KeyManager::lockAccessGuard();
+        Database::lockWriteGuard();
+        Database::lockPdoAccessGuard();
     }
 
     public function check(): TrustKernelStatus
