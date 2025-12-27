@@ -40,19 +40,69 @@ final class LocalIntegrityVerifier
             $absolute = $this->absolutePathFor($path);
 
             if (!is_file($absolute)) {
-                throw new \RuntimeException('Integrity check failed: missing file: ' . $path);
+                throw new IntegrityViolationException('integrity_missing_file', 'Integrity check failed: missing file: ' . $path);
             }
             if (is_link($absolute)) {
-                throw new \RuntimeException('Integrity check failed: symlink is not allowed: ' . $path);
+                throw new IntegrityViolationException('integrity_symlink_file', 'Integrity check failed: symlink is not allowed: ' . $path);
             }
 
             $actualHash = $this->sha256Bytes32Cached($absolute);
             if (!hash_equals($expectedHash, $actualHash)) {
-                throw new \RuntimeException('Integrity check failed: hash mismatch: ' . $path);
+                throw new IntegrityViolationException('integrity_hash_mismatch', 'Integrity check failed: hash mismatch: ' . $path);
             }
         }
 
         return $manifest->rootBytes32();
+    }
+
+    /**
+     * Strict mode: also fails if there are unexpected files under the integrity root.
+     *
+     * Intended for production deployments where `rootDir` is immutable (no uploads, no caches).
+     */
+    public function computeAndVerifyRootStrict(IntegrityManifestV1 $manifest): string
+    {
+        $root = $this->computeAndVerifyRoot($manifest);
+        $this->assertNoUnexpectedFiles($manifest);
+        return $root;
+    }
+
+    private function assertNoUnexpectedFiles(IntegrityManifestV1 $manifest): void
+    {
+        $allowed = [];
+        foreach (array_keys($manifest->files) as $path) {
+            $allowed[Sha256Merkle::normalizePath($path)] = true;
+        }
+
+        $root = rtrim($this->rootDir, "/\\");
+        $prefix = $root . DIRECTORY_SEPARATOR;
+        $prefixLen = strlen($prefix);
+
+        $dirIt = new \RecursiveDirectoryIterator($root, \FilesystemIterator::SKIP_DOTS);
+        $it = new \RecursiveIteratorIterator($dirIt);
+
+        /** @var \SplFileInfo $file */
+        foreach ($it as $file) {
+            if ($file->isDir()) {
+                continue;
+            }
+            if ($file->isLink()) {
+                throw new IntegrityViolationException('integrity_symlink_file', 'Integrity check failed: symlink is not allowed: ' . $file->getPathname());
+            }
+
+            $abs = $file->getPathname();
+            if (!str_starts_with($abs, $prefix)) {
+                throw new IntegrityViolationException('integrity_check_failed', 'Integrity check failed: unexpected root path.');
+            }
+
+            $relFs = substr($abs, $prefixLen);
+            $rel = str_replace(DIRECTORY_SEPARATOR, '/', $relFs);
+            $rel = Sha256Merkle::normalizePath($rel);
+
+            if (!isset($allowed[$rel])) {
+                throw new IntegrityViolationException('integrity_unexpected_file', 'Integrity check failed: unexpected file: ' . $rel);
+            }
+        }
     }
 
     private function absolutePathFor(string $normalizedPath): string
@@ -69,7 +119,7 @@ final class LocalIntegrityVerifier
         $mtime = @filemtime($absolutePath);
         $size = @filesize($absolutePath);
         if (!is_int($mtime) || $mtime <= 0 || !is_int($size)) {
-            throw new \RuntimeException('Integrity check failed: unable to stat file.');
+            throw new IntegrityViolationException('integrity_stat_failed', 'Integrity check failed: unable to stat file.');
         }
 
         $cached = $this->hashCache[$absolutePath] ?? null;
@@ -79,7 +129,7 @@ final class LocalIntegrityVerifier
 
         $hex = @hash_file('sha256', $absolutePath);
         if ($hex === false) {
-            throw new \RuntimeException('Integrity check failed: unable to hash file.');
+            throw new IntegrityViolationException('integrity_hash_failed', 'Integrity check failed: unable to hash file.');
         }
 
         $hash = Bytes32::normalizeHex('0x' . $hex);

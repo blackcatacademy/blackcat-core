@@ -61,6 +61,12 @@ If you install `blackcat-config` and configure `trust.web3` + `trust.integrity`,
 - blocks DB writes immediately on RPC quorum loss,
 - allows reads (including key reads) only until `max_stale_sec`, then fails closed.
 
+Integrity notes:
+- If the on-chain `activeUriHash` is non-zero, the local integrity manifest must include a matching `uri`.
+  Removing `uri` from the manifest must not become a bypass.
+- When `trust.web3.mode="full"`, the integrity root is treated as **immutable**: unexpected files under `trust.integrity.root_dir`
+  fail the trust check (prevents “upload a new backdoor file that is not in the manifest”).
+
 Policy hash notes:
 - `TrustPolicyV1` (schema v1): `mode` + `max_stale_sec` (treated as **strict** enforcement).
 - `TrustPolicyV2` (schema v2): adds `enforcement` (`strict` | `warn`).

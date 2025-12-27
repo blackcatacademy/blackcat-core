@@ -47,7 +47,7 @@ final class IntegrityFixture
             $hashes[$rel] = '0x' . $hex;
         }
 
-        $manifestPath = $rootDir . DIRECTORY_SEPARATOR . 'integrity.manifest.json';
+        $manifestPath = $base . DIRECTORY_SEPARATOR . 'blackcat-core-tk-' . $id . '.integrity.manifest.json';
         $json = json_encode([
             'schema_version' => 1,
             'type' => 'blackcat.integrity.manifest',
@@ -82,6 +82,7 @@ final class IntegrityFixture
 
     public function cleanup(): void
     {
+        @unlink($this->manifestPath);
         self::rmTree($this->rootDir);
     }
 
@@ -110,4 +111,3 @@ final class IntegrityFixture
         @rmdir($path);
     }
 }
-

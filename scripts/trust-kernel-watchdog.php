@@ -106,7 +106,15 @@ $recommendActions = static function (TrustKernelStatus $status): array {
 
     $critical = [
         'integrity_root_mismatch',
+        'integrity_missing_file',
+        'integrity_symlink_file',
+        'integrity_hash_mismatch',
+        'integrity_unexpected_file',
+        'integrity_stat_failed',
+        'integrity_hash_failed',
+        'integrity_check_failed',
         'uri_hash_mismatch',
+        'uri_hash_missing',
         'policy_hash_mismatch',
         'runtime_config_commitment_missing',
         'runtime_config_commitment_mismatch',
@@ -204,4 +212,3 @@ while (true) {
 
     sleep($interval);
 }
-

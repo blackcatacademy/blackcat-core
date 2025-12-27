@@ -160,7 +160,9 @@ final class TrustKernel
 
             try {
                 $manifest = $this->loadManifestIfNeeded();
-                $computedRoot = $this->integrity->computeAndVerifyRoot($manifest);
+                $computedRoot = $this->config->mode === 'full'
+                    ? $this->integrity->computeAndVerifyRootStrict($manifest)
+                    : $this->integrity->computeAndVerifyRoot($manifest);
 
                 $activeRoot = Bytes32::normalizeHex($snapshot->activeRoot);
                 $computedRootNorm = Bytes32::normalizeHex($computedRoot);
@@ -168,14 +170,28 @@ final class TrustKernel
                     $addError('integrity_root_mismatch', 'Integrity root mismatch.');
                 }
 
-                $uriHash = $manifest->uriHashBytes32();
-                if ($uriHash !== null) {
-                    $expectedUriHash = Bytes32::normalizeHex($uriHash);
-                    $activeUriHash = Bytes32::normalizeHex($snapshot->activeUriHash);
-                    if (!hash_equals($expectedUriHash, $activeUriHash)) {
+                $activeUriHash = Bytes32::normalizeHex($snapshot->activeUriHash);
+                $manifestUriHash = $manifest->uriHashBytes32();
+                $zero = '0x' . str_repeat('00', 32);
+
+                // URI hash is part of the on-chain snapshot. If the chain commits to a non-zero URI hash,
+                // the local manifest must provide a matching `uri` (do NOT allow skipping by removing it).
+                if ($activeUriHash === $zero) {
+                    if ($manifestUriHash !== null) {
                         $addError('uri_hash_mismatch', 'URI hash mismatch.');
                     }
+                } else {
+                    if ($manifestUriHash === null) {
+                        $addError('uri_hash_missing', 'URI hash is missing from integrity manifest.');
+                    } else {
+                        $expectedUriHash = Bytes32::normalizeHex($manifestUriHash);
+                        if (!hash_equals($expectedUriHash, $activeUriHash)) {
+                            $addError('uri_hash_mismatch', 'URI hash mismatch.');
+                        }
+                    }
                 }
+            } catch (IntegrityViolationException $e) {
+                $addError($e->violationCode, $e->getMessage());
             } catch (\Throwable $e) {
                 $addError('integrity_check_failed', $e->getMessage());
             }
@@ -263,13 +279,15 @@ final class TrustKernel
                 && ($now - $this->lastOkAt) <= $this->config->maxStaleSec
                 && $this->lastOkStatus?->paused === false
             ) {
-                // Still re-check local integrity against the last known good on-chain root to prevent
-                // "RPC outage + local tamper" from becoming a read bypass.
-                try {
-                    $manifest = $this->loadManifestIfNeeded();
-                    $freshRoot = $this->integrity->computeAndVerifyRoot($manifest);
-                    $lastOkRoot = $this->lastOkStatus->snapshot?->activeRoot;
-                    $lastOkUriHash = $this->lastOkStatus->snapshot?->activeUriHash;
+                    // Still re-check local integrity against the last known good on-chain root to prevent
+                    // "RPC outage + local tamper" from becoming a read bypass.
+                    try {
+                        $manifest = $this->loadManifestIfNeeded();
+                        $freshRoot = $this->config->mode === 'full'
+                            ? $this->integrity->computeAndVerifyRootStrict($manifest)
+                            : $this->integrity->computeAndVerifyRoot($manifest);
+                        $lastOkRoot = $this->lastOkStatus->snapshot?->activeRoot;
+                        $lastOkUriHash = $this->lastOkStatus->snapshot?->activeUriHash;
 
                     $rootOk = is_string($lastOkRoot)
                         && hash_equals(Bytes32::normalizeHex($lastOkRoot), Bytes32::normalizeHex($freshRoot));
