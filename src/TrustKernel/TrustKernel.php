@@ -58,6 +58,11 @@ final class TrustKernel
         Database::setWriteGuard(function (string $sql): void {
             $this->assertWriteAllowed('db.write');
         });
+
+        // Prevent bypass: raw PDO access would skip kernel guards (SQL comment guard, write guard, etc.).
+        Database::setPdoAccessGuard(function (string $context): void {
+            $this->denyBypass($context);
+        });
     }
 
     public function check(): TrustKernelStatus
@@ -270,6 +275,26 @@ final class TrustKernel
         if ($status->errors !== []) {
             $msg .= ' (' . implode(' | ', $status->errors) . ')';
         }
+
+        if ($this->effectiveEnforcement === 'warn') {
+            if (!$this->warnBannerEmitted) {
+                $this->warnBannerEmitted = true;
+                $this->logger?->warning('[trust-kernel] WARNING MODE enabled. Do not use this policy in production.');
+            }
+            $this->logger?->warning($msg);
+            return;
+        }
+
+        $this->logger?->error($msg);
+        throw new TrustKernelException($msg);
+    }
+
+    private function denyBypass(string $context): void
+    {
+        // Ensure enforcement is derived from the on-chain policy hash (strict vs warn).
+        $this->check();
+
+        $msg = '[trust-kernel] bypass denied: ' . $context;
 
         if ($this->effectiveEnforcement === 'warn') {
             if (!$this->warnBannerEmitted) {

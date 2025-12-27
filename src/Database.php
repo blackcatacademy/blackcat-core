@@ -19,6 +19,8 @@ final class Database
     private static ?self $instance = null;
     /** @var null|callable(string):void */
     private static $writeGuard = null;
+    /** @var null|callable(string):void */
+    private static $pdoAccessGuard = null;
     private ?\PDO $pdo = null;
     /** Optional read-replica PDO */
     private ?\PDO $pdoRead = null;
@@ -332,37 +334,37 @@ final class Database
     private function choosePdoFor(string $sql): \PDO
     {
         // Scoped override
-        if ($this->routeOverride === 'primary') return $this->getPdo();
+        if ($this->routeOverride === 'primary') return $this->pdoPrimary();
         if ($this->routeOverride === 'replica' && $this->pdoRead !== null) {
             $s = ltrim($sql);
             if ($this->isSimpleSelectForReplica($s) && $this->isReplicaHealthy()) return $this->pdoRead;
-            return $this->getPdo();
+            return $this->pdoPrimary();
         }
 
-        if ($this->pdoRead === null) return $this->getPdo();
+        if ($this->pdoRead === null) return $this->pdoPrimary();
         // in transaction? always primary
-        if ($this->inTransaction()) return $this->getPdo();
+        if ($this->inTransaction()) return $this->pdoPrimary();
 
         // Inline hints
         $u = strtoupper($sql);
-        if (str_contains($u, '/*FORCE:PRIMARY*/')) { return $this->getPdo(); }
+        if (str_contains($u, '/*FORCE:PRIMARY*/')) { return $this->pdoPrimary(); }
         if (str_contains($u, '/*FORCE:REPLICA*/')) {
             if ($this->isSimpleSelectForReplica($sql) && $this->isReplicaHealthy()) {
-                return $this->pdoRead ?? $this->getPdo();
+                return $this->pdoRead ?? $this->pdoPrimary();
             }
-            return $this->getPdo();
+            return $this->pdoPrimary();
         }
 
         // Replica in cooldown?
         if ($this->replicaDownUntil && time() < $this->replicaDownUntil) {
-            return $this->getPdo();
+            return $this->pdoPrimary();
         }
 
         // stick-to-primary window after write
         if ($this->stickAfterWriteMs > 0 && $this->lastWriteAtMs > 0) {
             $delta = (int)round(microtime(true) * 1000.0 - $this->lastWriteAtMs);
             if ($delta < $this->stickAfterWriteMs) {
-                return $this->getPdo();
+                return $this->pdoPrimary();
             }
         }
 
@@ -370,29 +372,29 @@ final class Database
         // strip simple comments
         if (str_starts_with($s, '/*')) { $s = preg_replace('~/\*.*?\*/~s', '', $s) ?? $s; $s = ltrim($s); }
         if (str_starts_with($s, '--')) { $s = preg_replace('~--.*?$~m', '', $s) ?? $s; $s = ltrim($s); }
-        if (!preg_match('~^([A-Z]+)~i', $s, $m)) return $this->getPdo();
+        if (!preg_match('~^([A-Z]+)~i', $s, $m)) return $this->pdoPrimary();
         $verb = strtoupper($m[1]);
 
         // "WITH" can be SELECT or DML; route to primary unless it is clearly a simple SELECT (no locks).
         if ($verb === 'WITH') {
             if ($this->isSimpleSelectForReplica($s) && $this->isReplicaHealthy()) {
-                return $this->pdoRead ?? $this->getPdo();
+                return $this->pdoRead ?? $this->pdoPrimary();
             }
-            return $this->getPdo();
+            return $this->pdoPrimary();
         }
 
         // Route SELECT to replica only if there are no locks and no SELECT ... INTO.
         if ($verb === 'SELECT') {
             if ($this->isSelectNeedingPrimary($s)) {
-                return $this->getPdo();
+                return $this->pdoPrimary();
             }
-            if (!$this->isReplicaHealthy()) return $this->getPdo();
-            return $this->pdoRead ?? $this->getPdo();
+            if (!$this->isReplicaHealthy()) return $this->pdoPrimary();
+            return $this->pdoRead ?? $this->pdoPrimary();
         }
 
         // SHOW is read-only -> replica OK.
         if ($verb === 'SHOW') {
-            return $this->pdoRead ?? $this->getPdo();
+            return $this->pdoRead ?? $this->pdoPrimary();
         }
 
         // EXPLAIN: default to replica, but for PG EXPLAIN ANALYZE with DML prefer primary (it actually executes the DML).
@@ -404,11 +406,11 @@ final class Database
                 $innerVerb = $mm[1];
             }
             if ($this->isPg() && $hasAnalyze && $innerVerb !== 'SELECT') {
-                return $this->getPdo();
+                return $this->pdoPrimary();
             }
-            return $this->pdoRead ?? $this->getPdo();
+            return $this->pdoRead ?? $this->pdoPrimary();
         }
-        return $this->getPdo();
+        return $this->pdoPrimary();
     }
 
     // SELECT requiring primary (FOR UPDATE/SHARE, LOCK IN SHARE MODE, SELECT INTO).
@@ -448,12 +450,20 @@ final class Database
         return self::$instance;
     }
 
-    public function getPdo(): \PDO
+    private function pdoPrimary(): \PDO
     {
         if ($this->pdo === null) {
             throw new DatabaseException('Database not initialized properly (PDO missing).');
         }
         return $this->pdo;
+    }
+
+    public function getPdo(): \PDO
+    {
+        if (self::$pdoAccessGuard !== null) {
+            (self::$pdoAccessGuard)('db.raw_pdo');
+        }
+        return $this->pdoPrimary();
     }
 
     public function hasReplica(): bool { return $this->pdoRead !== null; }
@@ -745,12 +755,12 @@ final class Database
     public function id(): string { return $this->dsnId; }
 
     public function serverVersion(): ?string {
-        try { return (string)$this->getPdo()->getAttribute(\PDO::ATTR_SERVER_VERSION); }
+        try { return (string)$this->pdoPrimary()->getAttribute(\PDO::ATTR_SERVER_VERSION); }
         catch (\Throwable $_) { return null; }
     }
 
     public function quote(string $value): string {
-        $q = $this->getPdo()->quote($value);
+        $q = $this->pdoPrimary()->quote($value);
         return $q === false ? "'" . str_replace("'", "''", $value) . "'" : $q;
     }
 
@@ -874,7 +884,7 @@ final class Database
         }
 
         if ($this->isMysql()) {
-            $pdo = $this->getPdo();
+            $pdo = $this->pdoPrimary();
             if ($pdo->inTransaction()) {
                 return $fn($this);
             }
@@ -900,7 +910,7 @@ final class Database
      */
     public function withIsolationLevelStrict(string $level, callable $fn): mixed
     {
-        if ($this->isMysql() && $this->getPdo()->inTransaction()) {
+        if ($this->isMysql() && $this->pdoPrimary()->inTransaction()) {
             throw new DatabaseException('withIsolationLevelStrict: cannot change isolation inside active transaction on MySQL; call before BEGIN or wrap your workload.');
         }
         return $this->withIsolationLevel($level, $fn);
@@ -949,7 +959,7 @@ final class Database
 
     public function transactionReadOnly(callable $fn): mixed
     {
-        $pdo = $this->getPdo();
+        $pdo = $this->pdoPrimary();
 
         if ($this->isPg()) {
             return $this->transaction(function() use($fn) {
@@ -1400,7 +1410,7 @@ final class Database
 
     public function driver(): ?string
     {
-        try { return (string)$this->getPdo()->getAttribute(\PDO::ATTR_DRIVER_NAME); }
+        try { return (string)$this->pdoPrimary()->getAttribute(\PDO::ATTR_DRIVER_NAME); }
         catch (\Throwable $_) { return null; }
     }
 
@@ -1765,7 +1775,7 @@ final class Database
 
     public function transaction(callable $fn): mixed
     {
-        $pdo = $this->getPdo();
+        $pdo = $this->pdoPrimary();
 
         if (!$pdo->inTransaction()) {
             $this->beginTransaction();
@@ -1805,7 +1815,7 @@ final class Database
 
     public function inTransaction(): bool
     {
-        try { return $this->getPdo()->inTransaction(); }
+        try { return $this->pdoPrimary()->inTransaction(); }
         catch (\Throwable $_) { return false; }
     }
 
@@ -1864,7 +1874,7 @@ final class Database
 
     public function beginTransaction(): bool
     {
-        try { return $this->getPdo()->beginTransaction(); }
+        try { return $this->pdoPrimary()->beginTransaction(); }
         catch (\PDOException $e) {
             if ($this->logger !== null) {
                 try { $this->logger->error('Failed to begin transaction', ['exception' => $e, 'phase' => 'beginTransaction']); } catch (\Throwable $_) {}
@@ -1875,7 +1885,7 @@ final class Database
 
     public function commit(): bool
     {
-        try { return $this->getPdo()->commit(); }
+        try { return $this->pdoPrimary()->commit(); }
         catch (\PDOException $e) {
             if ($this->logger !== null) {
                 try { $this->logger->error('Failed to commit transaction', ['exception' => $e, 'phase' => 'commit']); } catch (\Throwable $_) {}
@@ -1886,7 +1896,7 @@ final class Database
 
     public function rollback(): bool
     {
-        try { return $this->getPdo()->rollBack(); }
+        try { return $this->pdoPrimary()->rollBack(); }
         catch (\PDOException $e) {
             if ($this->logger !== null) {
                 try { $this->logger->error('Failed to rollback transaction', ['exception' => $e, 'phase' => 'rollback']); } catch (\Throwable $_) {}
@@ -1898,7 +1908,7 @@ final class Database
     public function lastInsertId(?string $name = null): ?string
     {
         try {
-            $id = $this->getPdo()->lastInsertId($name);
+            $id = $this->pdoPrimary()->lastInsertId($name);
             return $id === false ? null : $id;
         } catch (\Throwable $e) {
             $this->logger?->warning('lastInsertId() failed', [
@@ -1911,7 +1921,7 @@ final class Database
     private function supportsSavepoints(): bool
     {
         try {
-            $driver = $this->getPdo()->getAttribute(\PDO::ATTR_DRIVER_NAME);
+            $driver = $this->pdoPrimary()->getAttribute(\PDO::ATTR_DRIVER_NAME);
             return in_array($driver, ['mysql', 'pgsql', 'sqlite'], true);
         } catch (\Throwable $_) {
             return false;
@@ -1925,7 +1935,7 @@ final class Database
 
     public function ping(): bool
     {
-        try { $this->getPdo()->query('SELECT 1'); return true; }
+        try { $this->pdoPrimary()->query('SELECT 1'); return true; }
         catch (\Throwable $e) { return false; }
     }
 
@@ -1991,7 +2001,7 @@ final class Database
     }
 
     public function withEmulation(bool $on, callable $fn): mixed {
-        $pdo = $this->getPdo();
+        $pdo = $this->pdoPrimary();
         $orig = $pdo->getAttribute(\PDO::ATTR_EMULATE_PREPARES);
         try {
             $pdo->setAttribute(\PDO::ATTR_EMULATE_PREPARES, $on);
@@ -2048,6 +2058,18 @@ final class Database
     public static function setWriteGuard(?callable $guard): void
     {
         self::$writeGuard = $guard;
+    }
+
+    /**
+     * Optional security hook: called before exposing raw PDO via {@see self::getPdo()}.
+     *
+     * This is intended to prevent bypassing kernel guards by calling `$db->getPdo()->exec(...)` directly.
+     *
+     * The callable receives a context string (currently: "db.raw_pdo").
+     */
+    public static function setPdoAccessGuard(?callable $guard): void
+    {
+        self::$pdoAccessGuard = $guard;
     }
 
     public static function encodeCursor(array $cursor): string {

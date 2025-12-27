@@ -22,6 +22,7 @@ final class GuardInstallAttackFlowsTest extends TestCase
         // Avoid leaking guards into other tests.
         KeyManager::setAccessGuard(null);
         Database::setWriteGuard(null);
+        Database::setPdoAccessGuard(null);
     }
 
     public function testInstallGuardsDeniesKeyReadsAndDbWritesInStrictMode(): void
@@ -108,6 +109,9 @@ final class GuardInstallAttackFlowsTest extends TestCase
         $dbGuard = self::readPrivateStatic(Database::class, 'writeGuard');
         self::assertIsCallable($dbGuard);
 
+        $pdoGuard = self::readPrivateStatic(Database::class, 'pdoAccessGuard');
+        self::assertIsCallable($pdoGuard);
+
         try {
             KeyManager::getAllRawKeys('APP_SALT', $keysDir, 'app_salt', 32);
             self::fail('Expected TrustKernelException for KeyManager::getAllRawKeys().');
@@ -127,6 +131,14 @@ final class GuardInstallAttackFlowsTest extends TestCase
             /** @var callable(string):void $dbGuard */
             $dbGuard('UPDATE example SET x=1');
             self::fail('Expected TrustKernelException for DB writes.');
+        } catch (TrustKernelException) {
+            // ok
+        }
+
+        try {
+            /** @var callable(string):void $pdoGuard */
+            $pdoGuard('db.raw_pdo');
+            self::fail('Expected TrustKernelException for raw PDO access.');
         } catch (TrustKernelException) {
             // ok
         } finally {
@@ -219,12 +231,17 @@ final class GuardInstallAttackFlowsTest extends TestCase
         $dbGuard = self::readPrivateStatic(Database::class, 'writeGuard');
         self::assertIsCallable($dbGuard);
 
+        $pdoGuard = self::readPrivateStatic(Database::class, 'pdoAccessGuard');
+        self::assertIsCallable($pdoGuard);
+
         // Must NOT throw (warn mode).
         /** @var callable(string):void $keyGuard */
         $keyGuard('read');
         // Must NOT throw (warn mode).
         /** @var callable(string):void $dbGuard */
         $dbGuard('UPDATE example SET x=1');
+        /** @var callable(string):void $pdoGuard */
+        $pdoGuard('db.raw_pdo');
 
         $keys = KeyManager::getAllRawKeys('APP_SALT', $keysDir, 'app_salt', 32);
         self::assertCount(1, $keys);
