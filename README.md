@@ -52,6 +52,18 @@ New code should depend on the dedicated module directly.
 composer require blackcatacademy/blackcat-core
 ```
 
+## Kernel bootstrap (Trust Kernel)
+
+For kernel-only deployments where Web3 integrity enforcement is mandatory, use:
+
+```php
+use BlackCat\Core\Kernel\KernelBootstrap;
+
+KernelBootstrap::bootOrFail(); // fail-closed
+```
+
+This requires `blackcatacademy/blackcat-config` + a runtime config that includes `trust.web3` + `trust.integrity`.
+
 ## Quick start (Database)
 
 ```php

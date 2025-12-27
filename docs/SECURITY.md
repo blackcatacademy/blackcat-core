@@ -82,3 +82,17 @@ $trustOptional = TrustKernelBootstrap::bootIfConfiguredFromBlackCatConfig();
 // Legacy best-effort: returns null on any error (NOT recommended for production).
 $trustLegacy = TrustKernelBootstrap::tryBootFromBlackCatConfig();
 ```
+
+## Bypass resistance (policy)
+
+The Trust Kernel installs guards at the **kernel primitive level** (`KeyManager`, `Database`).
+To keep this security model intact across the ecosystem, bypass paths must be forbidden:
+
+- Do not instantiate raw `PDO` (use `BlackCat\Core\Database`).
+- Do not read `*.key` files directly (use `BlackCat\Core\Security\KeyManager`).
+
+Recommended CI check (requires `blackcatacademy/blackcat-config`):
+
+```bash
+php vendor/bin/config security:scan .
+```
