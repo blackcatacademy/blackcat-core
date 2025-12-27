@@ -66,6 +66,7 @@ This requires `blackcatacademy/blackcat-config` + a runtime config that includes
 
 Note:
 - As a safety net, kernel primitives (`KeyManager`, `Database`) attempt a **one-time** Trust Kernel auto-bootstrap when a guard is missing.
+- When `blackcatacademy/blackcat-config` is installed, auto-bootstrap is **trust-required** (missing runtime config / missing `trust.web3` fails closed).
 - Production should still call `KernelBootstrap::bootOrFail()` as early as possible (before any app logic runs).
 
 ## Quick start (Database)

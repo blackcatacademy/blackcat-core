@@ -97,6 +97,9 @@ Auto-bootstrap uses `BlackCat\Core\Kernel\KernelBootstrap::bootIfConfigured()`:
 - returns `null` when the Trust Kernel is not configured,
 - throws (fail-closed) on invalid runtime config / TrustKernel config.
 
+If `blackcatacademy/blackcat-config` is installed, auto-bootstrap is **trust-required** and will use
+`KernelBootstrap::bootOrFail()` (missing runtime config / missing `trust.web3` becomes a hard failure).
+
 For production, always prefer an explicit, early bootstrap via `KernelBootstrap::bootOrFail()`.
 
 ## Bypass resistance (policy)

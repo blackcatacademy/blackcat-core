@@ -86,3 +86,13 @@ Core owns only the **runtime enforcement surface**. Contracts, installers, and C
   - local integrity inputs (`trust.integrity.root_dir`, `trust.integrity.manifest`),
   - the chosen trust mode (root+URI vs full detail),
   - strict production policy defaults.
+
+## Stage 5 — Trust Watchdog (“security grid”) (planned)
+
+Goal: add an optional worker/sentinel layer that:
+- detects missing check-ins / RPC quorum loss / suspicious state changes,
+- triggers emergency actions (pause / incident reporting) via a remote trust anchor,
+- minimizes the attacker’s time window and makes incidents auditable.
+
+Design notes:
+- [Trust Watchdog](TRUST_WATCHDOG.md)

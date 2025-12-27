@@ -40,6 +40,8 @@ KernelBootstrap::bootOrFail(); // fail-closed
 As a safety net, `KeyManager` and `Database` will attempt a one-time Trust Kernel auto-bootstrap when guards are missing,
 but production should still bootstrap explicitly at process start.
 
+When `blackcatacademy/blackcat-config` is installed, this safety net is **trust-required** and will fail closed if the Trust Kernel is not configured.
+
 ## Bootstrap: Database
 
 ```php
