@@ -30,6 +30,8 @@ namespace BlackCat\Config\Runtime {
 namespace BlackCat\Core\Tests\TrustKernel\AttackFlows {
 
     use BlackCat\Config\Runtime\Config;
+    use BlackCat\Core\Database;
+    use BlackCat\Core\Security\KeyManager;
     use BlackCat\Core\Tests\TrustKernel\AttackFlows\Support\IntegrityFixture;
     use BlackCat\Core\Tests\TrustKernel\AttackFlows\Support\ScenarioTransport;
     use BlackCat\Core\TrustKernel\TrustKernel;
@@ -38,6 +40,17 @@ namespace BlackCat\Core\Tests\TrustKernel\AttackFlows {
 
     final class BootstrapAttackFlowsTest extends TestCase
     {
+        protected function tearDown(): void
+        {
+            self::writePrivateStatic(KeyManager::class, 'accessGuardLocked', false);
+            self::writePrivateStatic(KeyManager::class, 'accessGuard', null);
+
+            self::writePrivateStatic(Database::class, 'writeGuardLocked', false);
+            self::writePrivateStatic(Database::class, 'writeGuard', null);
+            self::writePrivateStatic(Database::class, 'pdoAccessGuardLocked', false);
+            self::writePrivateStatic(Database::class, 'pdoAccessGuard', null);
+        }
+
         public function testBootIfConfiguredReturnsNullWhenTrustIsNotConfigured(): void
         {
             Config::_setRepo(new FakeRepo([]));
@@ -92,6 +105,13 @@ namespace BlackCat\Core\Tests\TrustKernel\AttackFlows {
             } finally {
                 $fixture->cleanup();
             }
+        }
+
+        private static function writePrivateStatic(string $class, string $property, mixed $value): void
+        {
+            $ref = new \ReflectionProperty($class, $property);
+            $ref->setAccessible(true);
+            $ref->setValue(null, $value);
         }
     }
 

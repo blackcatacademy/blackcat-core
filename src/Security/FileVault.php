@@ -145,20 +145,18 @@ final class FileVault
 
         // If specific version requested, attempt to load exact file
         if ($specificVersion !== null && $specificVersion !== '') {
-            $verNum = ltrim($specificVersion, 'vV');
-            if ($verNum === '') $verNum = '1';
-            $path = rtrim($keysDir, '/\\') . '/filevault_key_v' . $verNum . '.key';
-            if (is_readable($path)) {
-                $raw = @file_get_contents($path);
-                if ($raw !== false && strlen($raw) === SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_KEYBYTES) {
-                    return ['raw' => $raw, 'version' => 'v' . $verNum, 'id' => 'v' . $verNum];
-                }
-            }
-
-            if (isset($raw) && is_string($raw) && strlen($raw) !== SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_KEYBYTES) {
-                throw new \RuntimeException('Invalid key length for FileVault');
-            }
-            // else fallthrough to KeyManager locateLatest
+            $info = KeyManager::getRawKeyBytesByVersion(
+                'FILEVAULT_KEY',
+                $keysDir,
+                'filevault_key',
+                $specificVersion,
+                SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_KEYBYTES,
+            );
+            return [
+                'raw' => $info['raw'],
+                'version' => $info['version'],
+                'id' => $info['version'],
+            ];
         }
 
         // Use KeyManager (pass explicit keys dir)

@@ -74,6 +74,9 @@ final class Crypto
      */
     public static function hmac(string $data, string $keyName, string $basename, ?string $keysDir = null, bool $allCandidates = false): array|string
     {
+        // Even when using the crypto bridge, enforce kernel-level "secrets.read" access.
+        KeyManager::assertAccessAllowed('read');
+
         $keysDir = $keysDir ?? self::$keysDir;
         $bridgeClass = 'BlackCat\\Crypto\\Bridge\\CoreCryptoBridge';
         if (self::$bridgeEnabled && !$allCandidates && $keysDir === self::$keysDir && class_exists($bridgeClass)) {
@@ -200,6 +203,7 @@ final class Crypto
     public static function encrypt(string $plaintext, string $outFormat = 'binary'): string
     {
         KeyManager::requireSodium();
+        KeyManager::assertAccessAllowed('read');
         if (self::$primaryKey === null) {
             throw new RuntimeException('Crypto::encrypt called but Crypto not initialized.');
         }
@@ -247,6 +251,7 @@ final class Crypto
     public static function decrypt(string $payload): ?string
     {
         KeyManager::requireSodium();
+        KeyManager::assertAccessAllowed('read');
 
         if (empty(self::$keys) || self::$primaryKey === null) {
             throw new RuntimeException('Crypto::decrypt called but Crypto not initialized.');
@@ -394,6 +399,7 @@ final class Crypto
     public static function encryptWithKeyBytes(string $plaintext, string $keyRaw, string $outFormat = 'binary'): string
     {
         KeyManager::requireSodium();
+        KeyManager::assertAccessAllowed('read');
         $expectedLen = KeyManager::keyByteLen();
         if (!is_string($keyRaw) || strlen($keyRaw) !== $expectedLen) {
             throw new RuntimeException('encryptWithKeyBytes: invalid key length.');
@@ -425,6 +431,7 @@ final class Crypto
     public static function decryptWithKeyCandidates(string $payload, array $candidateKeys): ?string
     {
         KeyManager::requireSodium();
+        KeyManager::assertAccessAllowed('read');
         if ($payload === '') return null;
 
         $expectedLen = KeyManager::keyByteLen();

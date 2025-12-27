@@ -57,6 +57,19 @@ final class KeyManager
         (self::$accessGuard)($operation);
     }
 
+    /**
+     * Assert that access is allowed for a security-sensitive operation.
+     *
+     * This is useful for call sites that use cached key material (e.g. Crypto) and still want
+     * fail-closed behavior when the Trust Kernel denies reads/writes.
+     *
+     * @param 'read'|'write' $operation
+     */
+    public static function assertAccessAllowed(string $operation): void
+    {
+        self::guard($operation);
+    }
+
     private static function getLogger(): ?LoggerInterface
     {
         if (self::$logger !== null) {
