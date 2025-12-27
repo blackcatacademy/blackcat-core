@@ -9,6 +9,7 @@ use Psr\Log\LoggerInterface;
 final class TrustKernelBootstrap
 {
     private static ?Web3TransportInterface $defaultTransport = null;
+    private static ?TrustKernel $cachedKernel = null;
 
     /**
      * Default transport used when boot methods are called with `$transport=null`.
@@ -18,6 +19,17 @@ final class TrustKernelBootstrap
     public static function setDefaultTransport(?Web3TransportInterface $transport): void
     {
         self::$defaultTransport = $transport;
+        self::reset();
+    }
+
+    /**
+     * Reset cached kernel instance (intended for tests).
+     *
+     * In production, the TrustKernel should be booted once per process and then reused.
+     */
+    public static function reset(): void
+    {
+        self::$cachedKernel = null;
     }
 
     /**
@@ -31,6 +43,10 @@ final class TrustKernelBootstrap
         ?Web3TransportInterface $transport = null,
     ): ?TrustKernel
     {
+        if (self::$cachedKernel !== null) {
+            return self::$cachedKernel;
+        }
+
         $configClass = implode('\\', ['BlackCat', 'Config', 'Runtime', 'Config']);
         if (!class_exists($configClass)) {
             return null;
@@ -120,6 +136,8 @@ final class TrustKernelBootstrap
 
         $kernel = new TrustKernel($cfg, $logger, $transport ?? self::$defaultTransport);
         $kernel->installGuards();
+
+        self::$cachedKernel = $kernel;
         return $kernel;
     }
 
