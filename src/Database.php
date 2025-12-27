@@ -465,9 +465,7 @@ final class Database
         if (self::$pdoAccessGuard !== null) {
             (self::$pdoAccessGuard)('db.raw_pdo');
         }
-        throw new DatabaseException(
-            'Raw PDO access is disabled by design; use BlackCat\\Core\\Database wrapper methods instead of getPdo().'
-        );
+        return $this->pdoPrimary();
     }
 
     public function hasReplica(): bool { return $this->pdoRead !== null; }
