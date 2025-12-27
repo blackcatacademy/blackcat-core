@@ -121,6 +121,7 @@ final class TrustKernel
             $policyOk = false;
             /** @var 'strict'|'warn' $derivedEnforcement */
             $derivedEnforcement = 'strict';
+            $requiresRuntimeConfigAttestation = false;
             if (hash_equals(Bytes32::normalizeHex($this->config->policyHashV1), $activePolicyHash)) {
                 $policyOk = true;
                 $derivedEnforcement = 'strict';
@@ -130,6 +131,14 @@ final class TrustKernel
             } elseif (hash_equals(Bytes32::normalizeHex($this->config->policyHashV2Warn), $activePolicyHash)) {
                 $policyOk = true;
                 $derivedEnforcement = 'warn';
+            } elseif (hash_equals(Bytes32::normalizeHex($this->config->policyHashV3Strict), $activePolicyHash)) {
+                $policyOk = true;
+                $derivedEnforcement = 'strict';
+                $requiresRuntimeConfigAttestation = true;
+            } elseif (hash_equals(Bytes32::normalizeHex($this->config->policyHashV3Warn), $activePolicyHash)) {
+                $policyOk = true;
+                $derivedEnforcement = 'warn';
+                $requiresRuntimeConfigAttestation = true;
             }
 
             if (!$policyOk) {
@@ -160,6 +169,30 @@ final class TrustKernel
                 }
             } catch (\Throwable $e) {
                 $errors[] = $e->getMessage();
+            }
+
+            // Optional hardening (policy v3): bind runtime config to on-chain attestation.
+            if ($requiresRuntimeConfigAttestation) {
+                try {
+                    $expected = $this->config->runtimeConfigCanonicalSha256;
+                    if ($expected === null) {
+                        $errors[] = 'Runtime config commitment is not available (missing sourcePath).';
+                    } else {
+                        $key = Bytes32::normalizeHex($this->config->runtimeConfigAttestationKey);
+                        $expectedNorm = Bytes32::normalizeHex($expected);
+                        $onChain = Bytes32::normalizeHex($this->controller->attestation($this->config->instanceController, $key));
+
+                        if (!hash_equals($expectedNorm, $onChain)) {
+                            $errors[] = 'Runtime config commitment mismatch.';
+                        }
+
+                        if (!$this->controller->attestationLocked($this->config->instanceController, $key)) {
+                            $errors[] = 'Runtime config commitment key is not locked.';
+                        }
+                    }
+                } catch (\Throwable $e) {
+                    $errors[] = 'Runtime config attestation check failed: ' . $e->getMessage();
+                }
             }
 
             // ReleaseRegistry trust check:

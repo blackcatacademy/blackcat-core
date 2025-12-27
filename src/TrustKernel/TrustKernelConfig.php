@@ -6,6 +6,8 @@ namespace BlackCat\Core\TrustKernel;
 
 final class TrustKernelConfig
 {
+    private const RUNTIME_CONFIG_ATTESTATION_KEY_LABEL_V1 = 'blackcat.runtime_config.canonical_sha256.v1';
+
     /** @var list<string> */
     public readonly array $rpcEndpoints;
 
@@ -31,6 +33,15 @@ final class TrustKernelConfig
     public readonly string $policyHashV1;
     public readonly string $policyHashV2Strict;
     public readonly string $policyHashV2Warn;
+    public readonly string $policyHashV3Strict;
+    public readonly string $policyHashV3Warn;
+
+    /** On-chain key (bytes32) used for runtime config commitment. */
+    public readonly string $runtimeConfigAttestationKey;
+    /** Canonical SHA-256 (bytes32) of the loaded runtime config (optional; only available when sourcePath is known). */
+    public readonly ?string $runtimeConfigCanonicalSha256;
+    /** Path of the runtime config file used to compute {@see self::$runtimeConfigCanonicalSha256}. */
+    public readonly ?string $runtimeConfigSourcePath;
 
     /**
      * @param list<string> $rpcEndpoints
@@ -47,6 +58,8 @@ final class TrustKernelConfig
         string $integrityRootDir,
         string $integrityManifestPath,
         int $rpcTimeoutSec,
+        ?string $runtimeConfigCanonicalSha256 = null,
+        ?string $runtimeConfigSourcePath = null,
     )
     {
         if ($chainId <= 0) {
@@ -82,6 +95,18 @@ final class TrustKernelConfig
         $this->policyHashV1 = (new TrustPolicyV1($mode, $maxStaleSec))->hashBytes32();
         $this->policyHashV2Strict = (new TrustPolicyV2($mode, $maxStaleSec, 'strict'))->hashBytes32();
         $this->policyHashV2Warn = (new TrustPolicyV2($mode, $maxStaleSec, 'warn'))->hashBytes32();
+        $runtimeConfigAttestationKey = Bytes32::normalizeHex(
+            '0x' . hash('sha256', self::RUNTIME_CONFIG_ATTESTATION_KEY_LABEL_V1)
+        );
+        $this->runtimeConfigAttestationKey = $runtimeConfigAttestationKey;
+
+        $this->policyHashV3Strict = (new TrustPolicyV3($mode, $maxStaleSec, 'strict', $this->runtimeConfigAttestationKey))->hashBytes32();
+        $this->policyHashV3Warn = (new TrustPolicyV3($mode, $maxStaleSec, 'warn', $this->runtimeConfigAttestationKey))->hashBytes32();
+
+        $this->runtimeConfigCanonicalSha256 = $runtimeConfigCanonicalSha256 !== null
+            ? Bytes32::normalizeHex($runtimeConfigCanonicalSha256)
+            : null;
+        $this->runtimeConfigSourcePath = $runtimeConfigSourcePath;
     }
 
     public static function fromRuntimeConfig(RuntimeConfigRepositoryInterface $repo): ?self
@@ -161,6 +186,29 @@ final class TrustKernelConfig
             throw new \RuntimeException('Invalid config value for trust.web3.timeout_sec (expected 1..60).');
         }
 
+        $runtimeConfigCanonicalSha256 = null;
+        $runtimeConfigSourcePath = $repo->sourcePath();
+        if ($runtimeConfigSourcePath !== null && is_file($runtimeConfigSourcePath)) {
+            $raw = @file_get_contents($runtimeConfigSourcePath);
+            if ($raw === false) {
+                throw new \RuntimeException('Unable to read runtime config file: ' . $runtimeConfigSourcePath);
+            }
+
+            try {
+                /** @var mixed $decoded */
+                $decoded = json_decode($raw, true, 512, JSON_THROW_ON_ERROR);
+            } catch (\JsonException $e) {
+                throw new \RuntimeException('Invalid JSON runtime config file: ' . $runtimeConfigSourcePath, 0, $e);
+            }
+
+            if (!is_array($decoded)) {
+                throw new \RuntimeException('Runtime config JSON must decode to an object/array: ' . $runtimeConfigSourcePath);
+            }
+
+            /** @var array<string,mixed> $decoded */
+            $runtimeConfigCanonicalSha256 = CanonicalJson::sha256Bytes32($decoded);
+        }
+
         return new self(
             chainId: $chainId,
             rpcEndpoints: $normalizedEndpoints,
@@ -172,6 +220,8 @@ final class TrustKernelConfig
             integrityRootDir: $integrityRootDir,
             integrityManifestPath: $integrityManifestPath,
             rpcTimeoutSec: $timeoutSec,
+            runtimeConfigCanonicalSha256: $runtimeConfigCanonicalSha256,
+            runtimeConfigSourcePath: $runtimeConfigSourcePath,
         );
     }
 

@@ -8,6 +8,9 @@ final class InstanceControllerReader
 {
     private const SNAPSHOT_SELECTOR = '0x9711715a'; // snapshot()
     private const RELEASE_REGISTRY_SELECTOR = '0x19ee073e'; // releaseRegistry()
+    private const ATTESTATIONS_SELECTOR = '0x940992a3'; // attestations(bytes32)
+    private const ATTESTATION_UPDATED_AT_SELECTOR = '0xb54917aa'; // attestationUpdatedAt(bytes32)
+    private const ATTESTATION_LOCKED_SELECTOR = '0xa93a4e86'; // attestationLocked(bytes32)
 
     public function __construct(
         private readonly Web3RpcQuorumClient $rpc,
@@ -24,6 +27,27 @@ final class InstanceControllerReader
     {
         $hex = $this->rpc->ethCallQuorum($instanceControllerAddress, self::RELEASE_REGISTRY_SELECTOR, 'latest');
         return self::decodeAddress($hex);
+    }
+
+    public function attestation(string $instanceControllerAddress, string $keyBytes32): string
+    {
+        $data = self::ATTESTATIONS_SELECTOR . substr(Bytes32::normalizeHex($keyBytes32), 2);
+        $hex = $this->rpc->ethCallQuorum($instanceControllerAddress, $data, 'latest');
+        return self::decodeBytes32($hex);
+    }
+
+    public function attestationUpdatedAt(string $instanceControllerAddress, string $keyBytes32): int
+    {
+        $data = self::ATTESTATION_UPDATED_AT_SELECTOR . substr(Bytes32::normalizeHex($keyBytes32), 2);
+        $hex = $this->rpc->ethCallQuorum($instanceControllerAddress, $data, 'latest');
+        return self::decodeUint64($hex);
+    }
+
+    public function attestationLocked(string $instanceControllerAddress, string $keyBytes32): bool
+    {
+        $data = self::ATTESTATION_LOCKED_SELECTOR . substr(Bytes32::normalizeHex($keyBytes32), 2);
+        $hex = $this->rpc->ethCallQuorum($instanceControllerAddress, $data, 'latest');
+        return self::decodeBool($hex);
     }
 
     private static function decodeSnapshot(string $hex): InstanceControllerSnapshot
@@ -101,5 +125,65 @@ final class InstanceControllerReader
         // normalize to lowercase + validate.
         Bytes32::normalizeHex('0x' . substr($word, 0, 64));
         return $addr;
+    }
+
+    private static function decodeBytes32(string $hex): string
+    {
+        $hex = trim($hex);
+        if ($hex === '' || !str_starts_with($hex, '0x')) {
+            throw new \RuntimeException('Invalid bytes32 result.');
+        }
+
+        $payload = substr(strtolower($hex), 2);
+        if (strlen($payload) < 64) {
+            throw new \RuntimeException('Invalid bytes32 result length.');
+        }
+
+        $word = substr($payload, 0, 64);
+        if (!is_string($word) || strlen($word) !== 64 || !ctype_xdigit($word)) {
+            throw new \RuntimeException('Invalid bytes32 ABI word.');
+        }
+
+        return Bytes32::normalizeHex('0x' . $word);
+    }
+
+    private static function decodeUint64(string $hex): int
+    {
+        $hex = trim($hex);
+        if ($hex === '' || !str_starts_with($hex, '0x')) {
+            throw new \RuntimeException('Invalid uint64 result.');
+        }
+
+        $payload = substr(strtolower($hex), 2);
+        if (strlen($payload) < 64) {
+            throw new \RuntimeException('Invalid uint64 result length.');
+        }
+
+        $word = substr($payload, 0, 64);
+        if (!is_string($word) || strlen($word) !== 64 || !ctype_xdigit($word)) {
+            throw new \RuntimeException('Invalid uint64 ABI word.');
+        }
+
+        return (int) hexdec(substr($word, 48, 16));
+    }
+
+    private static function decodeBool(string $hex): bool
+    {
+        $hex = trim($hex);
+        if ($hex === '' || !str_starts_with($hex, '0x')) {
+            throw new \RuntimeException('Invalid bool result.');
+        }
+
+        $payload = substr(strtolower($hex), 2);
+        if (strlen($payload) < 64) {
+            throw new \RuntimeException('Invalid bool result length.');
+        }
+
+        $word = substr($payload, 0, 64);
+        if (!is_string($word) || strlen($word) !== 64 || !ctype_xdigit($word)) {
+            throw new \RuntimeException('Invalid bool ABI word.');
+        }
+
+        return ((int) hexdec(substr($word, 62, 2))) !== 0;
     }
 }
