@@ -37,6 +37,9 @@ use BlackCat\Core\Kernel\KernelBootstrap;
 KernelBootstrap::bootOrFail(); // fail-closed
 ```
 
+As a safety net, `KeyManager` and `Database` will attempt a one-time Trust Kernel auto-bootstrap when guards are missing,
+but production should still bootstrap explicitly at process start.
+
 ## Bootstrap: Database
 
 ```php

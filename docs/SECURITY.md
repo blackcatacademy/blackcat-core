@@ -87,6 +87,18 @@ $trustOptional = TrustKernelBootstrap::bootIfConfiguredFromBlackCatConfig();
 $trustLegacy = TrustKernelBootstrap::tryBootFromBlackCatConfig();
 ```
 
+### Auto-bootstrap (guard safety net)
+
+To reduce accidental misconfiguration (e.g., forgetting to bootstrap), core primitives attempt a one-time auto-bootstrap:
+- `KeyManager` will attempt to boot the Trust Kernel before reading/rotating key material.
+- `Database` will attempt to boot the Trust Kernel before DB writes and before raw PDO access checks.
+
+Auto-bootstrap uses `BlackCat\Core\Kernel\KernelBootstrap::bootIfConfigured()`:
+- returns `null` when the Trust Kernel is not configured,
+- throws (fail-closed) on invalid runtime config / TrustKernel config.
+
+For production, always prefer an explicit, early bootstrap via `KernelBootstrap::bootOrFail()`.
+
 ## Bypass resistance (policy)
 
 The Trust Kernel installs guards at the **kernel primitive level** (`KeyManager`, `Database`).

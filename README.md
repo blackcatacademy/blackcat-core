@@ -64,6 +64,10 @@ KernelBootstrap::bootOrFail(); // fail-closed
 
 This requires `blackcatacademy/blackcat-config` + a runtime config that includes `trust.web3` + `trust.integrity`.
 
+Note:
+- As a safety net, kernel primitives (`KeyManager`, `Database`) attempt a **one-time** Trust Kernel auto-bootstrap when a guard is missing.
+- Production should still call `KernelBootstrap::bootOrFail()` as early as possible (before any app logic runs).
+
 ## Quick start (Database)
 
 ```php
