@@ -2,10 +2,6 @@
 
 declare(strict_types=1);
 
-namespace {
-    require_once __DIR__ . '/Support/BlackCatConfigRuntimeStub.php';
-}
-
 namespace BlackCat\Core\Tests\TrustKernel\AttackFlows {
 
     use BlackCat\Config\Runtime\Config;
@@ -17,8 +13,18 @@ namespace BlackCat\Core\Tests\TrustKernel\AttackFlows {
     use BlackCat\Core\TrustKernel\TrustKernelBootstrap;
     use PHPUnit\Framework\TestCase;
 
+    /**
+     * This test defines blackcat-config stubs and must not leak them into other test cases.
+     *
+     * @runClassInSeparateProcess
+     */
     final class BootstrapAttackFlowsTest extends TestCase
     {
+        protected function setUp(): void
+        {
+            require_once __DIR__ . '/Support/BlackCatConfigRuntimeStub.php';
+        }
+
         protected function tearDown(): void
         {
             self::writePrivateStatic(KeyManager::class, 'accessGuardLocked', false);

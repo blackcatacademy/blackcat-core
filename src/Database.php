@@ -2139,8 +2139,16 @@ final class Database
         self::$trustKernelAutoBootAttempted = true;
 
         try {
-            // Optional dependency: when blackcat-config is installed and trust.web3 is configured,
-            // this installs and locks the kernel guards.
+            // Security-first:
+            // - If blackcat-config is installed, treat it as a trust-required deployment and fail-closed.
+            // - Otherwise (legacy stacks), best-effort boot when configured.
+            $configClass = implode('\\', ['BlackCat', 'Config', 'Runtime', 'Config']);
+            $repoClass = implode('\\', ['BlackCat', 'Config', 'Runtime', 'ConfigRepository']);
+            if (class_exists($configClass) && class_exists($repoClass)) {
+                \BlackCat\Core\Kernel\KernelBootstrap::bootOrFail($this->logger);
+                return;
+            }
+
             \BlackCat\Core\Kernel\KernelBootstrap::bootIfConfigured($this->logger);
         } catch (\Throwable $e) {
             throw new DatabaseException('TrustKernel auto-boot failed: ' . $e->getMessage(), 0, $e);

@@ -46,3 +46,11 @@ final class Config
     }
 }
 
+/**
+ * Minimal stub to let blackcat-core detect "blackcat-config is installed" in isolated tests.
+ *
+ * In real deployments, this is a fully-featured repository class.
+ */
+final class ConfigRepository
+{
+}

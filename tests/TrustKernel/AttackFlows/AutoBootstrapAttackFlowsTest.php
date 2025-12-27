@@ -2,10 +2,6 @@
 
 declare(strict_types=1);
 
-namespace {
-    require_once __DIR__ . '/Support/BlackCatConfigRuntimeStub.php';
-}
-
 namespace BlackCat\Core\Tests\TrustKernel\AttackFlows {
 
 use BlackCat\Config\Runtime\Config;
@@ -22,10 +18,17 @@ use BlackCat\Core\TrustKernel\TrustKernelConfig;
 use BlackCat\Core\TrustKernel\TrustKernelException;
 use PHPUnit\Framework\TestCase;
 
+/**
+ * This test defines blackcat-config stubs and must not leak them into other test cases.
+ *
+ * @runClassInSeparateProcess
+ */
 final class AutoBootstrapAttackFlowsTest extends TestCase
 {
     protected function setUp(): void
     {
+        require_once __DIR__ . '/Support/BlackCatConfigRuntimeStub.php';
+
         // Ensure a clean baseline even if earlier tests triggered auto-boot without the stub loaded.
         self::writePrivateStatic(KeyManager::class, 'accessGuardLocked', false);
         self::writePrivateStatic(KeyManager::class, 'accessGuard', null);
@@ -196,6 +199,32 @@ final class AutoBootstrapAttackFlowsTest extends TestCase
             'trust' => [
                 // Wrong type: should be an object/array.
                 'web3' => 'invalid',
+            ],
+        ]));
+
+        $this->expectException(KeyManagerException::class);
+        $this->expectExceptionMessage('TrustKernel auto-boot failed');
+        KeyManager::assertAccessAllowed('read');
+    }
+
+    public function testAutoBootFailsClosedWhenRuntimeConfigIsMissing(): void
+    {
+        Config::_clearRepo();
+
+        $this->expectException(KeyManagerException::class);
+        $this->expectExceptionMessage('TrustKernel auto-boot failed');
+        KeyManager::assertAccessAllowed('read');
+    }
+
+    public function testAutoBootFailsClosedWhenTrustIsNotConfigured(): void
+    {
+        Config::_setRepo(new ArrayRuntimeConfigRepository([
+            // trust.web3 missing → TrustKernel is not configured
+            'trust' => [
+                'integrity' => [
+                    'root_dir' => '/srv/blackcat',
+                    'manifest' => '/etc/blackcat/integrity.manifest.json',
+                ],
             ],
         ]));
 
