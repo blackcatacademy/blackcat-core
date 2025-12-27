@@ -22,6 +22,15 @@ php scripts/trust-kernel-status.php --pretty
 - `2` untrusted (fail-closed signal for production)
 - `1` bootstrap/runtime error (missing config, invalid config, etc.)
 
+## Enforcement
+
+The JSON output contains `enforcement` (`strict` | `warn`) derived from the **on-chain policy hash**.
+
+- `strict`: deny by throwing exceptions (fail-closed)
+- `warn`: logs loud warnings and continues (dev-only)
+
+For “production readiness” checks (reject `warn`), use `blackcat-core/scripts/trust-kernel-install-verify.php`.
+
 ## Dev-mode
 
 If you explicitly want to *observe* failures in dev without failing the command, use:
@@ -29,4 +38,3 @@ If you explicitly want to *observe* failures in dev without failing the command,
 ```bash
 php scripts/trust-kernel-status.php --allow-untrusted
 ```
-

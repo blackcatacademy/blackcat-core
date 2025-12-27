@@ -58,13 +58,38 @@ at the web server level.
 Use:
 - `blackcat-core/scripts/trust-kernel-watchdog.php` (JSON-lines output + optional outbox).
 - `blackcat-core/scripts/trust-kernel-status.php` (single-shot health output).
+- `blackcat-core/scripts/trust-kernel-install-verify.php` (post-install verification: trust + bypass scan + permission sanity).
 
 The long-term “actuator” (sending on-chain `pause()` / `reportIncident()`) is recommended to run **off-host** so
 your emergency signer keys are not on the compromised machine.
+
+## Cheap hosting / FTP install ceremony
+
+If the hosting provider forces an FTP-style workflow (no separate worker, limited shell access), treat FTP as a
+**temporary installer transport**:
+
+1) Upload files.
+2) Immediately disable/remove FTP access.
+3) Verify the install matches the expected Web3 state.
+
+Recommended steps:
+
+- After upload, remove/disable any installer script and immediately disable FTP.
+- Make the code tree read-only if possible (at least prevent group/world write).
+- Run a post-install verification:
+
+```bash
+php scripts/trust-kernel-install-verify.php --pretty
+```
+
+This verification fails (exit code `2`) when:
+- Trust Kernel is untrusted (root mismatch, policy mismatch, ReleaseRegistry mismatch, etc.)
+- on-chain policy is not `strict` (unless you pass `--allow-warn`)
+- bypass scan finds forbidden patterns (raw PDO, direct `*.key` reads)
+- integrity root contains symlinks or group/world writable files (POSIX)
 
 ## What this does not solve
 
 - A fully compromised host can still cause DoS (kill processes, delete files).
 - If the attacker gets root on the app VM, all bets are off unless you have an off-host sentinel and off-host signers.
 - If your web server executes code from writable directories, integrity guarantees collapse.
-

@@ -11,6 +11,8 @@ final class TrustKernelStatus implements \JsonSerializable
      * @param list<string> $errorCodes
      */
     public function __construct(
+        /** @var 'strict'|'warn' */
+        public readonly string $enforcement,
         public readonly bool $trustedNow,
         public readonly bool $readAllowed,
         public readonly bool $writeAllowed,
@@ -27,6 +29,7 @@ final class TrustKernelStatus implements \JsonSerializable
 
     /**
      * @return array{
+     *   enforcement:'strict'|'warn',
      *   trusted_now:bool,
      *   read_allowed:bool,
      *   write_allowed:bool,
@@ -56,6 +59,7 @@ final class TrustKernelStatus implements \JsonSerializable
     public function toArray(): array
     {
         return [
+            'enforcement' => $this->enforcement,
             'trusted_now' => $this->trustedNow,
             'read_allowed' => $this->readAllowed,
             'write_allowed' => $this->writeAllowed,

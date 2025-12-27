@@ -308,6 +308,7 @@ final class TrustKernel
         }
 
         $status = new TrustKernelStatus(
+            $this->effectiveEnforcement,
             $trustedNow,
             $readAllowed,
             $writeAllowed,
