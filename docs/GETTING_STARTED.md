@@ -26,15 +26,39 @@ Optional:
 composer require blackcatacademy/blackcat-core
 ```
 
+## Kernel bootstrap (Trust Kernel)
+
+If you use `blackcatacademy/blackcat-config` and enable the Trust Kernel (`trust.web3` + `trust.integrity`),
+prefer booting the kernel **before any app code runs**:
+
+```php
+use BlackCat\Core\Kernel\KernelBootstrap;
+
+KernelBootstrap::bootOrFail(); // fail-closed
+```
+
 ## Bootstrap: Database
 
 ```php
 use BlackCat\Core\Database;
+// Optional: if env/getenv is blocked, initialize config from a secure runtime config file.
+// (only when blackcat-config is installed)
+$runtimeConfigClass = implode('\\\\', ['BlackCat', 'Config', 'Runtime', 'Config']);
+if (class_exists($runtimeConfigClass) && is_callable([$runtimeConfigClass, 'initFromFirstAvailableJsonFileIfNeeded'])) {
+  $m = 'initFromFirstAvailableJsonFileIfNeeded';
+  $runtimeConfigClass::$m();
+}
 
 Database::init([
-  'dsn'  => $_ENV['DB_DSN'] ?? 'mysql:host=127.0.0.1;dbname=app;charset=utf8mb4',
-  'user' => $_ENV['DB_USER'] ?? null,
-  'pass' => $_ENV['DB_PASS'] ?? null,
+  'dsn'  => class_exists($runtimeConfigClass) && is_callable([$runtimeConfigClass, 'get'])
+    ? $runtimeConfigClass::get('db.dsn', $_ENV['DB_DSN'] ?? 'mysql:host=127.0.0.1;dbname=app;charset=utf8mb4')
+    : ($_ENV['DB_DSN'] ?? 'mysql:host=127.0.0.1;dbname=app;charset=utf8mb4'),
+  'user' => class_exists($runtimeConfigClass) && is_callable([$runtimeConfigClass, 'get'])
+    ? $runtimeConfigClass::get('db.user', $_ENV['DB_USER'] ?? null)
+    : ($_ENV['DB_USER'] ?? null),
+  'pass' => class_exists($runtimeConfigClass) && is_callable([$runtimeConfigClass, 'get'])
+    ? $runtimeConfigClass::get('db.pass', $_ENV['DB_PASS'] ?? null)
+    : ($_ENV['DB_PASS'] ?? null),
   'appName' => 'my-service',
 ]);
 
