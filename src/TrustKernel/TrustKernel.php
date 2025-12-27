@@ -96,6 +96,12 @@ final class TrustKernel
         }
 
         $errors = [];
+        $errorCodes = [];
+
+        $addError = static function (string $code, string $message) use (&$errors, &$errorCodes): void {
+            $errorCodes[] = $code;
+            $errors[] = $message;
+        };
         $rpcOkNow = false;
         $snapshot = null;
         $computedRoot = null;
@@ -106,18 +112,18 @@ final class TrustKernel
             $snapshot = $this->controller->snapshot($this->config->instanceController);
             $rpcOkNow = true;
         } catch (\Throwable $e) {
-            $errors[] = $e->getMessage();
+            $addError('rpc_error', $e->getMessage());
             $rpcOkNow = false;
         }
 
         if ($rpcOkNow && $snapshot !== null) {
             if ($snapshot->version !== 1) {
-                $errors[] = 'Unsupported instance controller snapshot version.';
+                $addError('unsupported_snapshot_version', 'Unsupported instance controller snapshot version.');
             }
 
             $paused = $snapshot->paused;
             if ($paused) {
-                $errors[] = 'Instance controller is paused.';
+                $addError('paused', 'Instance controller is paused.');
             }
 
             $activePolicyHash = Bytes32::normalizeHex($snapshot->activePolicyHash);
@@ -145,7 +151,7 @@ final class TrustKernel
             }
 
             if (!$policyOk) {
-                $errors[] = 'Policy hash mismatch.';
+                $addError('policy_hash_mismatch', 'Policy hash mismatch.');
                 // If the policy hash is unknown, do not allow any non-strict behavior even in dev.
                 $this->effectiveEnforcement = 'strict';
             } else {
@@ -159,7 +165,7 @@ final class TrustKernel
                 $activeRoot = Bytes32::normalizeHex($snapshot->activeRoot);
                 $computedRootNorm = Bytes32::normalizeHex($computedRoot);
                 if (!hash_equals($activeRoot, $computedRootNorm)) {
-                    $errors[] = 'Integrity root mismatch.';
+                    $addError('integrity_root_mismatch', 'Integrity root mismatch.');
                 }
 
                 $uriHash = $manifest->uriHashBytes32();
@@ -167,11 +173,11 @@ final class TrustKernel
                     $expectedUriHash = Bytes32::normalizeHex($uriHash);
                     $activeUriHash = Bytes32::normalizeHex($snapshot->activeUriHash);
                     if (!hash_equals($expectedUriHash, $activeUriHash)) {
-                        $errors[] = 'URI hash mismatch.';
+                        $addError('uri_hash_mismatch', 'URI hash mismatch.');
                     }
                 }
             } catch (\Throwable $e) {
-                $errors[] = $e->getMessage();
+                $addError('integrity_check_failed', $e->getMessage());
             }
 
             // Optional hardening (policy v3): bind runtime config to on-chain attestation.
@@ -179,22 +185,22 @@ final class TrustKernel
                 try {
                     $expected = $this->config->runtimeConfigCanonicalSha256;
                     if ($expected === null) {
-                        $errors[] = 'Runtime config commitment is not available (missing sourcePath).';
+                        $addError('runtime_config_commitment_missing', 'Runtime config commitment is not available (missing sourcePath).');
                     } else {
                         $key = Bytes32::normalizeHex($this->config->runtimeConfigAttestationKey);
                         $expectedNorm = Bytes32::normalizeHex($expected);
                         $onChain = Bytes32::normalizeHex($this->controller->attestation($this->config->instanceController, $key));
 
                         if (!hash_equals($expectedNorm, $onChain)) {
-                            $errors[] = 'Runtime config commitment mismatch.';
+                            $addError('runtime_config_commitment_mismatch', 'Runtime config commitment mismatch.');
                         }
 
                         if (!$this->controller->attestationLocked($this->config->instanceController, $key)) {
-                            $errors[] = 'Runtime config commitment key is not locked.';
+                            $addError('runtime_config_commitment_unlocked', 'Runtime config commitment key is not locked.');
                         }
                     }
                 } catch (\Throwable $e) {
-                    $errors[] = 'Runtime config attestation check failed: ' . $e->getMessage();
+                    $addError('runtime_config_attestation_failed', 'Runtime config attestation check failed: ' . $e->getMessage());
                 }
             }
 
@@ -206,17 +212,17 @@ final class TrustKernel
                 $rrConfigured = $this->config->releaseRegistry !== null ? strtolower(trim($this->config->releaseRegistry)) : null;
 
                 if ($rrConfigured !== null && $rrConfigured !== $rrOnController) {
-                    $errors[] = 'ReleaseRegistry mismatch between config and InstanceController.';
+                    $addError('release_registry_mismatch', 'ReleaseRegistry mismatch between config and InstanceController.');
                 }
 
                 if ($rrOnController !== '0x0000000000000000000000000000000000000000') {
                     $activeRoot = Bytes32::normalizeHex($snapshot->activeRoot);
                     if (!$this->releaseRegistry->isTrustedRoot($rrOnController, $activeRoot)) {
-                        $errors[] = 'Active root is not trusted in ReleaseRegistry.';
+                        $addError('untrusted_release_root', 'Active root is not trusted in ReleaseRegistry.');
                     }
                 }
             } catch (\Throwable $e) {
-                $errors[] = 'ReleaseRegistry check failed: ' . $e->getMessage();
+                $addError('release_registry_check_failed', 'ReleaseRegistry check failed: ' . $e->getMessage());
             }
 
             // Optional sanity check: if the InstanceController is an EIP-1167 clone, ensure it points to a live implementation.
@@ -226,15 +232,15 @@ final class TrustKernel
                 if ($proxyImpl !== null) {
                     $implCode = $this->rpc->ethGetCodeQuorum($proxyImpl, 'latest');
                     if ($implCode === '0x' || $implCode === '0x0') {
-                        $errors[] = 'InstanceController EIP-1167 implementation has no code.';
+                        $addError('controller_impl_no_code', 'InstanceController EIP-1167 implementation has no code.');
                     }
                 } else {
                     if ($code === '0x' || $code === '0x0') {
-                        $errors[] = 'InstanceController has no code.';
+                        $addError('controller_no_code', 'InstanceController has no code.');
                     }
                 }
             } catch (\Throwable $e) {
-                $errors[] = 'InstanceController code sanity check failed: ' . $e->getMessage();
+                $addError('controller_code_sanity_failed', 'InstanceController code sanity check failed: ' . $e->getMessage());
             }
 
             $trustedNow = $errors === [];
@@ -278,7 +284,7 @@ final class TrustKernel
                         $readAllowed = true;
                     }
                 } catch (\Throwable $e) {
-                    $errors[] = 'Stale-mode integrity recheck failed: ' . $e->getMessage();
+                    $addError('stale_integrity_recheck_failed', 'Stale-mode integrity recheck failed: ' . $e->getMessage());
                 }
             }
         }
@@ -294,6 +300,7 @@ final class TrustKernel
             $now,
             $this->lastOkAt,
             $errors,
+            $errorCodes,
         );
 
         $this->lastStatus = $status;

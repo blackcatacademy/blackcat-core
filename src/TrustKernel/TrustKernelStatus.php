@@ -8,6 +8,7 @@ final class TrustKernelStatus implements \JsonSerializable
 {
     /**
      * @param list<string> $errors
+     * @param list<string> $errorCodes
      */
     public function __construct(
         public readonly bool $trustedNow,
@@ -20,6 +21,7 @@ final class TrustKernelStatus implements \JsonSerializable
         public readonly int $checkedAt,
         public readonly ?int $lastOkAt,
         public readonly array $errors = [],
+        public readonly array $errorCodes = [],
     ) {
     }
 
@@ -47,7 +49,8 @@ final class TrustKernelStatus implements \JsonSerializable
      *   computed_root:?string,
      *   checked_at:int,
      *   last_ok_at:?int,
-     *   errors:list<string>
+     *   errors:list<string>,
+     *   error_codes:list<string>
      * }
      */
     public function toArray(): array
@@ -63,6 +66,7 @@ final class TrustKernelStatus implements \JsonSerializable
             'checked_at' => $this->checkedAt,
             'last_ok_at' => $this->lastOkAt,
             'errors' => $this->errors,
+            'error_codes' => $this->errorCodes,
         ];
     }
 

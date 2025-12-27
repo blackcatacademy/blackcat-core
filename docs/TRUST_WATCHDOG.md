@@ -52,9 +52,22 @@ The Watchdog adds operational glue:
 - DB writes are blocked immediately when trust fails (`Database`),
 - raw PDO access is denied to avoid bypass (`Database::getPdo()` guarded).
 
+### 1.5) “Kernel enclave” topology (high security, optional)
+
+If you want to make “app host compromise ⇒ DB read/exfil” significantly harder, split the system:
+
+- **Public app runtime** (PHP/JS/workers): has *no* direct access to DB sockets/credentials and no key material.
+- **Kernel enclave / runner** (trusted internal runtime): runs `blackcat-core` + `blackcat-config` + Trust Kernel, holds keys,
+  and is the only component allowed to talk to the database (DB listens on `localhost` only inside this enclave).
+
+This pushes the enforcement boundary deeper than “library guards in the same process”.
+
 ### 2) Local Watchdog (optional)
 
 Runs on the same host (systemd container/cron worker).
+
+Reference script:
+- `blackcat-core/scripts/trust-kernel-watchdog.php` (JSON-lines + optional outbox of recommended actions)
 
 Pros:
 - can react quickly,
@@ -102,4 +115,3 @@ The Watchdog should only rely on stable kernel interfaces:
 - `BlackCat\Core\TrustKernel\TrustKernel::check()` (status + errors),
 - `BlackCat\Core\TrustKernel\InstanceControllerReader` (low-level reads),
 - deterministic status output for monitoring (JSON).
-
