@@ -54,12 +54,12 @@ final class IntegrityManifestBuilder
 
         /** @var \SplFileInfo $file */
         foreach ($it as $file) {
-            if ($file->isDir()) {
-                continue;
-            }
-
             if ($file->isLink()) {
                 throw new \RuntimeException('Integrity manifest build failed: symlink is not allowed: ' . $file->getPathname());
+            }
+
+            if ($file->isDir()) {
+                continue;
             }
 
             $abs = $file->getPathname();
@@ -116,4 +116,3 @@ final class IntegrityManifestBuilder
         return (bool) preg_match('~^[a-zA-Z]:[\\\\/]~', $path);
     }
 }
-

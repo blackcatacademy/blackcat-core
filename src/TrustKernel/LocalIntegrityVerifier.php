@@ -83,11 +83,11 @@ final class LocalIntegrityVerifier
 
         /** @var \SplFileInfo $file */
         foreach ($it as $file) {
-            if ($file->isDir()) {
-                continue;
-            }
             if ($file->isLink()) {
                 throw new IntegrityViolationException('integrity_symlink_file', 'Integrity check failed: symlink is not allowed: ' . $file->getPathname());
+            }
+            if ($file->isDir()) {
+                continue;
             }
 
             $abs = $file->getPathname();
