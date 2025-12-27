@@ -29,6 +29,9 @@ If you use Nginx/Caddy, implement equivalent rules:
 - deny direct access to `*.php` except `index.php`,
 - route all requests to `index.php`.
 
+Legacy references (not supported, app-specific):
+- `blackcat-core/templates/http/legacy/`
+
 ## Runtime hardening checks
 
 During install / audits, inspect PHP hardening posture:
@@ -52,4 +55,3 @@ BlackCat’s defense-in-depth is:
 - optional off-host watchdog/relayer design.
 
 For high assurance, keep emergency keys off-host and treat the on-chain authority as the final source of truth.
-
