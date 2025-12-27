@@ -24,6 +24,11 @@ BlackCat’s TrustKernel can block secrets/DB writes when integrity is violated,
 BlackCat ships templates you can copy into your web root:
 - `blackcat-core/templates/http/index.php`
 - `blackcat-core/templates/http/.htaccess` (Apache)
+- `blackcat-core/templates/http/nginx.conf.snippet` (Nginx)
+- `blackcat-core/templates/http/Caddyfile.snippet` (Caddy)
+
+The template `index.php` uses the reusable kernel entrypoint:
+- `BlackCat\Core\Kernel\HttpKernel`
 
 If you use Nginx/Caddy, implement equivalent rules:
 - deny direct access to `*.php` except `index.php`,

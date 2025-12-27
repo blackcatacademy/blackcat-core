@@ -1,0 +1,28 @@
+# BlackCat kernel-only front controller (Caddy snippet)
+#
+# Goals:
+# - deny direct execution of arbitrary *.php files (only allow /index.php)
+# - route all requests through /index.php (single entrypoint)
+# - block common sensitive directories if they exist under web root
+#
+# IMPORTANT:
+# - adjust php_fastcgi target to your setup (unix socket or host:port)
+# - keep config/keys outside the web root (recommended)
+
+@forbiddenDirs {
+  path /vendor/* /config/* /docs/* /tests/* /scripts/* /sql/* /var/*
+}
+respond @forbiddenDirs "Forbidden" 403
+
+@notIndexPhp {
+  path *.php
+  not path /index.php
+}
+respond @notIndexPhp "Forbidden" 403
+
+try_files {path} {path}/ /index.php?{query}
+
+# Adjust this to your PHP-FPM
+php_fastcgi unix//run/php/php-fpm.sock
+file_server
+
