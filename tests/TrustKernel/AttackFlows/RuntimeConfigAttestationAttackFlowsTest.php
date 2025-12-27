@@ -44,6 +44,12 @@ final class RuntimeConfigAttestationAttackFlowsTest extends TestCase
 
         $canonical = CanonicalJson::sha256Bytes32($runtimeConfig);
 
+        $runtimeConfigPath = $fixture->rootDir . DIRECTORY_SEPARATOR . 'config.runtime.json';
+        $json = json_encode($runtimeConfig, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+        if (!is_string($json) || @file_put_contents($runtimeConfigPath, $json) === false) {
+            throw new \RuntimeException('Unable to write runtime config fixture file.');
+        }
+
         $cfg = new TrustKernelConfig(
             chainId: 4207,
             rpcEndpoints: ['https://a'],
@@ -56,7 +62,7 @@ final class RuntimeConfigAttestationAttackFlowsTest extends TestCase
             integrityManifestPath: $fixture->manifestPath,
             rpcTimeoutSec: 5,
             runtimeConfigCanonicalSha256: $canonical,
-            runtimeConfigSourcePath: '/etc/blackcat/config.runtime.json',
+            runtimeConfigSourcePath: $runtimeConfigPath,
         );
 
         $key = strtolower($cfg->runtimeConfigAttestationKey);
@@ -163,6 +169,12 @@ final class RuntimeConfigAttestationAttackFlowsTest extends TestCase
 
         $canonical = CanonicalJson::sha256Bytes32($runtimeConfig);
 
+        $runtimeConfigPath = $fixture->rootDir . DIRECTORY_SEPARATOR . 'config.runtime.json';
+        $json = json_encode($runtimeConfig, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+        if (!is_string($json) || @file_put_contents($runtimeConfigPath, $json) === false) {
+            throw new \RuntimeException('Unable to write runtime config fixture file.');
+        }
+
         $cfg = new TrustKernelConfig(
             chainId: 4207,
             rpcEndpoints: ['https://a'],
@@ -175,7 +187,7 @@ final class RuntimeConfigAttestationAttackFlowsTest extends TestCase
             integrityManifestPath: $fixture->manifestPath,
             rpcTimeoutSec: 5,
             runtimeConfigCanonicalSha256: $canonical,
-            runtimeConfigSourcePath: '/etc/blackcat/config.runtime.json',
+            runtimeConfigSourcePath: $runtimeConfigPath,
         );
 
         $key = strtolower($cfg->runtimeConfigAttestationKey);
@@ -251,4 +263,3 @@ final class RuntimeConfigAttestationAttackFlowsTest extends TestCase
         }
     }
 }
-

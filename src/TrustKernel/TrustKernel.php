@@ -200,11 +200,37 @@ final class TrustKernel
             if ($requiresRuntimeConfigAttestation) {
                 try {
                     $expected = $this->config->runtimeConfigCanonicalSha256;
-                    if ($expected === null) {
+                    $sourcePath = $this->config->runtimeConfigSourcePath;
+
+                    if ($expected === null || $sourcePath === null) {
                         $addError('runtime_config_commitment_missing', 'Runtime config commitment is not available (missing sourcePath).');
                     } else {
                         $key = Bytes32::normalizeHex($this->config->runtimeConfigAttestationKey);
                         $expectedNorm = Bytes32::normalizeHex($expected);
+
+                        // Detect runtime config tamper: the on-disk file must remain equal to the config used for boot.
+                        clearstatcache(true, $sourcePath);
+                        $rawNow = @file_get_contents($sourcePath);
+                        if ($rawNow === false) {
+                            $addError('runtime_config_source_unreadable', 'Runtime config file is not readable: ' . $sourcePath);
+                        } else {
+                            try {
+                                /** @var mixed $decodedNow */
+                                $decodedNow = json_decode($rawNow, true, 512, JSON_THROW_ON_ERROR);
+                                if (!is_array($decodedNow)) {
+                                    $addError('runtime_config_source_invalid', 'Runtime config JSON must decode to an object/array: ' . $sourcePath);
+                                } else {
+                                    /** @var array<string,mixed> $decodedNow */
+                                    $current = CanonicalJson::sha256Bytes32($decodedNow);
+                                    if (!hash_equals($expectedNorm, Bytes32::normalizeHex($current))) {
+                                        $addError('runtime_config_source_changed', 'Runtime config file differs from the booted config (restart required).');
+                                    }
+                                }
+                            } catch (\JsonException $e) {
+                                $addError('runtime_config_source_invalid', 'Runtime config file JSON is invalid: ' . $sourcePath . ' (' . $e->getMessage() . ')');
+                            }
+                        }
+
                         $onChain = Bytes32::normalizeHex($this->controller->attestation($this->config->instanceController, $key));
 
                         if (!hash_equals($expectedNorm, $onChain)) {
