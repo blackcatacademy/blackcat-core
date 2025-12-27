@@ -309,6 +309,8 @@ final class TrustKernel
 
         $status = new TrustKernelStatus(
             $this->effectiveEnforcement,
+            $this->config->mode,
+            $this->config->maxStaleSec,
             $trustedNow,
             $readAllowed,
             $writeAllowed,

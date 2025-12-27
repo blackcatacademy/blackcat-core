@@ -85,6 +85,7 @@ php scripts/trust-kernel-install-verify.php --pretty
 This verification fails (exit code `2`) when:
 - Trust Kernel is untrusted (root mismatch, policy mismatch, ReleaseRegistry mismatch, etc.)
 - on-chain policy is not `strict` (unless you pass `--allow-warn`)
+- `trust.web3.mode` is not `full` (unless you pass `--allow-root-uri`)
 - bypass scan finds forbidden patterns (raw PDO, direct `*.key` reads)
 - integrity root contains symlinks or group/world writable files (POSIX)
 

@@ -13,6 +13,9 @@ final class TrustKernelStatus implements \JsonSerializable
     public function __construct(
         /** @var 'strict'|'warn' */
         public readonly string $enforcement,
+        /** @var 'root_uri'|'full' */
+        public readonly string $mode,
+        public readonly int $maxStaleSec,
         public readonly bool $trustedNow,
         public readonly bool $readAllowed,
         public readonly bool $writeAllowed,
@@ -30,6 +33,8 @@ final class TrustKernelStatus implements \JsonSerializable
     /**
      * @return array{
      *   enforcement:'strict'|'warn',
+     *   mode:'root_uri'|'full',
+     *   max_stale_sec:int,
      *   trusted_now:bool,
      *   read_allowed:bool,
      *   write_allowed:bool,
@@ -60,6 +65,8 @@ final class TrustKernelStatus implements \JsonSerializable
     {
         return [
             'enforcement' => $this->enforcement,
+            'mode' => $this->mode,
+            'max_stale_sec' => $this->maxStaleSec,
             'trusted_now' => $this->trustedNow,
             'read_allowed' => $this->readAllowed,
             'write_allowed' => $this->writeAllowed,

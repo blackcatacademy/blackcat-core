@@ -29,6 +29,10 @@ The JSON output contains `enforcement` (`strict` | `warn`) derived from the **on
 - `strict`: deny by throwing exceptions (fail-closed)
 - `warn`: logs loud warnings and continues (dev-only)
 
+The JSON output also contains:
+- `mode` (`root_uri` | `full`) (derived from runtime config / policy)
+- `max_stale_sec` (runtime config)
+
 For “production readiness” checks (reject `warn`), use `blackcat-core/scripts/trust-kernel-install-verify.php`.
 
 ## Dev-mode

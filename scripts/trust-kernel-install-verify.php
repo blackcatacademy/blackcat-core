@@ -28,11 +28,12 @@ $options = getopt('', [
     'pretty',
     'allow-untrusted',
     'allow-warn',
+    'allow-root-uri',
     'help',
 ]);
 if ($options === false || isset($options['help'])) {
     fwrite(STDERR, "Usage:\n");
-    fwrite(STDERR, "  trust-kernel-install-verify.php [--pretty] [--allow-untrusted] [--allow-warn]\n");
+    fwrite(STDERR, "  trust-kernel-install-verify.php [--pretty] [--allow-untrusted] [--allow-warn] [--allow-root-uri]\n");
     exit(0);
 }
 
@@ -58,6 +59,9 @@ try {
         $failed = true;
     }
     if ($status->enforcement !== 'strict' && !isset($options['allow-warn'])) {
+        $failed = true;
+    }
+    if ($status->mode !== 'full' && !isset($options['allow-root-uri'])) {
         $failed = true;
     }
 
@@ -196,4 +200,3 @@ try {
     }
     exit(1);
 }
-
