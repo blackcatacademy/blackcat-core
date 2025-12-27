@@ -8,10 +8,22 @@ use Psr\Log\LoggerInterface;
 
 final class TrustKernelBootstrap
 {
+    private static ?Web3TransportInterface $defaultTransport = null;
+
+    /**
+     * Default transport used when boot methods are called with `$transport=null`.
+     *
+     * Intended mainly for tests / controlled environments.
+     */
+    public static function setDefaultTransport(?Web3TransportInterface $transport): void
+    {
+        self::$defaultTransport = $transport;
+    }
+
     /**
      * Strict bootstrap for applications.
      *
-     * - Returns `null` only when `trust.web3` is not configured.
+     * - Returns `null` when no runtime config is available, or when `trust.web3` is not configured.
      * - Throws on any initialization/config error (fail-closed).
      */
     public static function bootIfConfiguredFromBlackCatConfig(
@@ -24,9 +36,69 @@ final class TrustKernelBootstrap
             return null;
         }
 
-        if (is_callable([$configClass, 'initFromFirstAvailableJsonFileIfNeeded'])) {
-            $method = 'initFromFirstAvailableJsonFileIfNeeded';
-            $configClass::$method();
+        $isInitialized = false;
+        if (is_callable([$configClass, 'isInitialized'])) {
+            $method = 'isInitialized';
+            $isInitialized = (bool) $configClass::$method();
+        }
+
+        if (!$isInitialized) {
+            $bootstrapClass = implode('\\', ['BlackCat', 'Config', 'Runtime', 'ConfigBootstrap']);
+            if (class_exists($bootstrapClass) && is_callable([$bootstrapClass, 'scanFirstAvailableJsonFile'])) {
+                $scanMethod = 'scanFirstAvailableJsonFile';
+                /** @var mixed $scan */
+                $scan = $bootstrapClass::$scanMethod();
+
+                $selected = is_array($scan) ? ($scan['selected'] ?? null) : null;
+                $rejected = is_array($scan) ? ($scan['rejected'] ?? null) : null;
+                $repoObj = is_array($scan) ? ($scan['repo'] ?? null) : null;
+
+                if (!is_string($selected) || trim($selected) === '') {
+                    if (is_array($rejected) && $rejected !== []) {
+                        $lines = [];
+                        foreach ($rejected as $path => $reason) {
+                            if (!is_string($path) || !is_string($reason)) {
+                                continue;
+                            }
+                            $lines[] = sprintf('- %s: %s', $path, $reason);
+                        }
+
+                        throw new \RuntimeException(sprintf(
+                            "No usable runtime config file found.\nRejected files:\n%s",
+                            $lines !== [] ? implode("\n", $lines) : '(unknown)',
+                        ));
+                    }
+
+                    return null;
+                }
+
+                // Prefer using the already-loaded repository (avoids a second read).
+                if (is_object($repoObj) && is_callable([$configClass, 'initIfNeeded'])) {
+                    $initMethod = 'initIfNeeded';
+                    $configClass::$initMethod($repoObj);
+                } elseif (is_callable([$configClass, 'initFromJsonFileIfNeeded'])) {
+                    $initMethod = 'initFromJsonFileIfNeeded';
+                    $configClass::$initMethod($selected);
+                } elseif (is_callable([$configClass, 'initFromFirstAvailableJsonFileIfNeeded'])) {
+                    // Legacy fallback.
+                    $initMethod = 'initFromFirstAvailableJsonFileIfNeeded';
+                    $configClass::$initMethod();
+                }
+            } elseif (is_callable([$configClass, 'tryInitFromFirstAvailableJsonFile'])) {
+                $method = 'tryInitFromFirstAvailableJsonFile';
+                $configClass::$method();
+            } elseif (is_callable([$configClass, 'initFromFirstAvailableJsonFileIfNeeded'])) {
+                // Legacy fallback.
+                $method = 'initFromFirstAvailableJsonFileIfNeeded';
+                $configClass::$method();
+            }
+        }
+
+        if (is_callable([$configClass, 'isInitialized'])) {
+            $method = 'isInitialized';
+            if (!(bool) $configClass::$method()) {
+                return null;
+            }
         }
 
         if (!is_callable([$configClass, 'repo'])) {
@@ -46,7 +118,7 @@ final class TrustKernelBootstrap
             return null;
         }
 
-        $kernel = new TrustKernel($cfg, $logger, $transport);
+        $kernel = new TrustKernel($cfg, $logger, $transport ?? self::$defaultTransport);
         $kernel->installGuards();
         return $kernel;
     }
@@ -68,7 +140,7 @@ final class TrustKernelBootstrap
 
         $kernel = self::bootIfConfiguredFromBlackCatConfig($logger, $transport);
         if ($kernel === null) {
-            throw new \RuntimeException('TrustKernel is not configured (missing trust.web3).');
+            throw new \RuntimeException('TrustKernel is not configured (missing runtime config or trust.web3).');
         }
 
         return $kernel;
@@ -82,36 +154,7 @@ final class TrustKernelBootstrap
         }
 
         try {
-            if (is_callable([$configClass, 'initFromFirstAvailableJsonFileIfNeeded'])) {
-                $method = 'initFromFirstAvailableJsonFileIfNeeded';
-                $configClass::$method();
-            }
-        } catch (\Throwable $e) {
-            $logger?->warning('[trust-kernel] unable to init runtime config: ' . $e->getMessage());
-            return null;
-        }
-
-        if (!is_callable([$configClass, 'repo'])) {
-            return null;
-        }
-
-        try {
-            $repoMethod = 'repo';
-            /** @var mixed $repoRaw */
-            $repoRaw = $configClass::$repoMethod();
-            if (!is_object($repoRaw)) {
-                return null;
-            }
-
-            $repo = new BlackCatConfigRepositoryAdapter($repoRaw);
-            $cfg = TrustKernelConfig::fromRuntimeConfig($repo);
-            if ($cfg === null) {
-                return null;
-            }
-
-            $kernel = new TrustKernel($cfg, $logger);
-            $kernel->installGuards();
-            return $kernel;
+            return self::bootIfConfiguredFromBlackCatConfig($logger, self::$defaultTransport);
         } catch (\Throwable $e) {
             $logger?->warning('[trust-kernel] unable to boot: ' . $e->getMessage());
             return null;

@@ -465,7 +465,9 @@ final class Database
         if (self::$pdoAccessGuard !== null) {
             (self::$pdoAccessGuard)('db.raw_pdo');
         }
-        return $this->pdoPrimary();
+        throw new DatabaseException(
+            'Raw PDO access is disabled by design; use BlackCat\\Core\\Database wrapper methods instead of getPdo().'
+        );
     }
 
     public function hasReplica(): bool { return $this->pdoRead !== null; }
@@ -2067,12 +2069,20 @@ final class Database
 
     public static function lockWriteGuard(): void
     {
+        if (self::$writeGuard === null) {
+            throw new DatabaseException('Database write guard cannot be locked when not set.');
+        }
         self::$writeGuardLocked = true;
     }
 
     public static function isWriteGuardLocked(): bool
     {
         return self::$writeGuardLocked;
+    }
+
+    public static function hasWriteGuard(): bool
+    {
+        return self::$writeGuard !== null;
     }
 
     /**
@@ -2092,12 +2102,20 @@ final class Database
 
     public static function lockPdoAccessGuard(): void
     {
+        if (self::$pdoAccessGuard === null) {
+            throw new DatabaseException('Database PDO access guard cannot be locked when not set.');
+        }
         self::$pdoAccessGuardLocked = true;
     }
 
     public static function isPdoAccessGuardLocked(): bool
     {
         return self::$pdoAccessGuardLocked;
+    }
+
+    public static function hasPdoAccessGuard(): bool
+    {
+        return self::$pdoAccessGuard !== null;
     }
 
     public static function encodeCursor(array $cursor): string {

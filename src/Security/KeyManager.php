@@ -40,12 +40,20 @@ final class KeyManager
 
     public static function lockAccessGuard(): void
     {
+        if (self::$accessGuard === null) {
+            throw new KeyManagerException('KeyManager access guard cannot be locked when not set.');
+        }
         self::$accessGuardLocked = true;
     }
 
     public static function isAccessGuardLocked(): bool
     {
         return self::$accessGuardLocked;
+    }
+
+    public static function hasAccessGuard(): bool
+    {
+        return self::$accessGuard !== null;
     }
 
     private static function guard(string $operation): void

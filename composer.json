@@ -55,7 +55,7 @@
   },
   "scripts": {
     "test": "vendor/bin/phpunit --colors=always",
-    "stan": "vendor/bin/phpstan analyse"
+    "stan": "vendor/bin/phpstan analyse --memory-limit=512M"
   },
   "config": {
     "optimize-autoloader": true,

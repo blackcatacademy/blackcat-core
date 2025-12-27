@@ -40,7 +40,7 @@ final class KernelBootstrap
     /**
      * Optional bootstrap for libraries and non-trust-required stacks.
      *
-     * Returns `null` only when `trust.web3` is not configured.
+     * Returns `null` when no runtime config is available or when `trust.web3` is not configured.
      * Throws on invalid runtime config (fail-closed).
      */
     public static function bootIfConfigured(
@@ -50,4 +50,3 @@ final class KernelBootstrap
         return TrustKernelBootstrap::bootIfConfiguredFromBlackCatConfig($logger, $transport);
     }
 }
-

@@ -57,6 +57,9 @@ final class TrustKernel
                 && Database::isWriteGuardLocked()
                 && Database::isPdoAccessGuardLocked()
             ) {
+                if (!KeyManager::hasAccessGuard() || !Database::hasWriteGuard() || !Database::hasPdoAccessGuard()) {
+                    throw new TrustKernelException('Kernel guards are locked but missing; restart the process.');
+                }
                 return;
             }
             throw new TrustKernelException('Kernel guards are partially locked; restart the process.');
@@ -344,20 +347,7 @@ final class TrustKernel
 
     private function denyBypass(string $context): void
     {
-        // Ensure enforcement is derived from the on-chain policy hash (strict vs warn).
-        $this->check();
-
         $msg = '[trust-kernel] bypass denied: ' . $context;
-
-        if ($this->effectiveEnforcement === 'warn') {
-            if (!$this->warnBannerEmitted) {
-                $this->warnBannerEmitted = true;
-                $this->logger?->warning('[trust-kernel] WARNING MODE enabled. Do not use this policy in production.');
-            }
-            $this->logger?->warning($msg);
-            return;
-        }
-
         $this->logger?->error($msg);
         throw new TrustKernelException($msg);
     }
