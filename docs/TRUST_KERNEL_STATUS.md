@@ -27,7 +27,7 @@ php scripts/trust-kernel-status.php --pretty
 The JSON output contains `enforcement` (`strict` | `warn`) derived from the **on-chain policy hash**.
 
 - `strict`: deny by throwing exceptions (fail-closed)
-- `warn`: logs loud warnings and continues (dev-only)
+- `warn`: logs loud warnings and continues (dev-only), but still respects hard-stop conditions (e.g. on-chain `paused`)
 
 The JSON output also contains:
 - `mode` (`root_uri` | `full`) (derived from runtime config / policy)

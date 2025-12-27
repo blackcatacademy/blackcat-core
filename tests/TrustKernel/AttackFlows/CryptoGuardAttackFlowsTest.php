@@ -219,10 +219,14 @@ final class CryptoGuardAttackFlowsTest extends TestCase
             // Snapshot #1: trusted => init OK.
             Crypto::initFromKeyManager($keysDir, $logger);
 
-            // Snapshot #2: paused => warn-only => Crypto proceeds, but should emit warnings.
+            // Snapshot #2: paused => PAUSE is absolute (must fail closed even in warn mode).
             usleep(1_100_000);
-            $cipher = Crypto::encrypt('hello');
-            self::assertNotSame('', $cipher);
+            try {
+                Crypto::encrypt('hello');
+                self::fail('Expected TrustKernelException due to paused controller.');
+            } catch (TrustKernelException) {
+                // OK
+            }
 
             $banner = array_values(array_filter(
                 $logger->records,

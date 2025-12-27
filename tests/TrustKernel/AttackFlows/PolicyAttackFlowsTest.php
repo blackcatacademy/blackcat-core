@@ -65,7 +65,7 @@ final class PolicyAttackFlowsTest extends TestCase
                         1, 2 => $cfg->policyHashV2Warn,
                         default => '0x' . str_repeat('11', 32),
                     };
-                    $paused = $step >= 2;
+                    $paused = $step === 2;
 
                     $snapshotHex = Abi::snapshotResult(
                         version: 1,
@@ -103,9 +103,14 @@ final class PolicyAttackFlowsTest extends TestCase
             $status1 = $kernel->check();
             self::assertTrue($status1->trustedNow);
 
-            // Step 2: warn policy + paused => not trusted, but warn-only (no throw).
+            // Step 2: warn policy + paused => PAUSE is absolute (must throw even in warn mode).
             usleep(1_100_000);
-            $kernel->assertWriteAllowed('db.write');
+            try {
+                $kernel->assertWriteAllowed('db.write');
+                self::fail('Expected TrustKernelException due to paused controller.');
+            } catch (TrustKernelException) {
+                // OK
+            }
             $banner = array_values(array_filter(
                 $logger->records,
                 static fn (array $r): bool => str_contains($r['message'], 'WARNING MODE enabled')

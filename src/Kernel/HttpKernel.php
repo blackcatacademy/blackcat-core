@@ -98,7 +98,12 @@ final class HttpKernel
         }
 
         $status = $kernel->check();
-        if ($options->checkTrustOnRequest && !$status->readAllowed) {
+        if ($status->paused) {
+            $logger?->error('[http-kernel] instance controller is paused.');
+            return self::genericErrorResponse(503);
+        }
+
+        if ($options->checkTrustOnRequest && $status->enforcement === 'strict' && !$status->readAllowed) {
             $logger?->error('[http-kernel] trust kernel denied read on request entry.');
             return self::genericErrorResponse(503);
         }

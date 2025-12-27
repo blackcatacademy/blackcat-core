@@ -360,11 +360,18 @@ final class TrustKernel
             $msg .= ' (' . implode(' | ', $status->errors) . ')';
         }
 
+        if ($this->effectiveEnforcement === 'warn' && !$this->warnBannerEmitted) {
+            $this->warnBannerEmitted = true;
+            $this->logger?->warning('[trust-kernel] WARNING MODE enabled. Do not use this policy in production.');
+        }
+
+        // Emergency stop is absolute, regardless of warn/strict mode.
+        if ($status->paused) {
+            $this->logger?->error('[trust-kernel] PAUSED: ' . $msg);
+            throw new TrustKernelException('[trust-kernel] PAUSED: ' . $msg);
+        }
+
         if ($this->effectiveEnforcement === 'warn') {
-            if (!$this->warnBannerEmitted) {
-                $this->warnBannerEmitted = true;
-                $this->logger?->warning('[trust-kernel] WARNING MODE enabled. Do not use this policy in production.');
-            }
             $this->logger?->warning($msg);
             return;
         }

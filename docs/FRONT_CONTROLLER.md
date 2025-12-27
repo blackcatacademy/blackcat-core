@@ -44,6 +44,7 @@ During install / audits, inspect PHP hardening posture:
 
 It highlights:
 - `allow_url_include=1` (hard error),
+- `cgi.fix_pathinfo=1` in FPM/CGI (hard error),
 - missing curl vs `allow_url_fopen` transport requirements (TrustKernel RPC),
 - `display_errors` / `auto_prepend_file` concerns,
 - missing `disable_functions` for process-exec primitives (recommendation).

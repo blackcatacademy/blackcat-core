@@ -222,8 +222,8 @@ final class GuardInstallAttackFlowsTest extends TestCase
                 if ($to === strtolower($instanceController) && $data === '0x9711715a') {
                     $snapshotHex = Abi::snapshotResult(
                         version: 1,
-                        paused: true,
-                        activeRoot: $fixture->rootBytes32,
+                        paused: false,
+                        activeRoot: '0x' . str_repeat('22', 32),
                         activeUriHash: $fixture->uriHashBytes32 ?? ('0x' . str_repeat('00', 32)),
                         activePolicyHash: $cfg->policyHashV2Warn,
                         pendingRoot: '0x' . str_repeat('00', 32),
