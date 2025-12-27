@@ -16,11 +16,15 @@ Goal: allow users to deploy **only**:
 
 ## What you must accept (truth)
 
-If an attacker gets arbitrary code execution in your app process, you cannot “win” purely in PHP.
-The goal is to:
-- make persistence detectable (integrity root),
-- make key theft harder (OS perms + no env fallbacks),
+If an attacker gets **arbitrary PHP code execution inside your app process**, no purely-PHP mechanism can provide absolute guarantees.
+BlackCat’s goal is **defense-in-depth**, to reduce the practical blast radius:
+- reduce HTTP entrypoints (strict front controller + web server deny rules),
+- make persistence detectable (`mode=full` integrity root),
+- make key theft harder (OS perms + no env fallbacks + guarded decrypt),
 - reduce the time window (watchdog + on-chain pause).
+
+Front controller hardening:
+- `blackcat-core/docs/FRONT_CONTROLLER.md`
 
 ## Recommended minimal ceremony (prod)
 
@@ -54,14 +58,16 @@ If you use policy v3, also set + lock the runtime config attestation key/value (
 Create runtime config (strict permissions):
 
 ```bash
-php vendor/bin/config runtime:init
-php vendor/bin/config runtime:template:trust-edgen > /etc/blackcat/config.runtime.json
+php vendor/bin/config runtime:init --template=trust-edgen
+# optional (explicit path):
+# php vendor/bin/config runtime:init --template=trust-edgen --out=/etc/blackcat/config.runtime.json
 ```
 
 Fill:
 - `trust.web3.contracts.instance_controller`
 - `trust.integrity.root_dir`
 - `trust.integrity.manifest`
+- keep `trust.web3.mode="full"` for production (compat option: `root_uri`)
 
 Validate (optional, but recommended):
 

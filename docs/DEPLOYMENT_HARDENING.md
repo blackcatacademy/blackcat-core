@@ -10,12 +10,19 @@ This document describes a **cheap-but-reasonable** baseline for a single VM, and
 
 ## Key principle
 
-If an attacker gets arbitrary code execution **inside your application process**, you cannot make them “unable to use the app”.
+If an attacker gets arbitrary code execution **inside your application process**, you cannot rely on PHP alone for absolute isolation.
 What you *can* do is make it much harder to:
 - persist (modify code/config without detection),
 - extract key material,
 - silently tamper with data,
 - keep a long attack window (watchdog + emergency pause).
+
+Practical add-ons that reduce attack surface on cheap hosting:
+- strict single front controller + deny rules for other `*.php` entrypoints
+- treat writable web dirs as non-executable
+
+See:
+- `blackcat-core/docs/FRONT_CONTROLLER.md`
 
 ## Recommended single-VM baseline
 
@@ -86,7 +93,9 @@ This verification fails (exit code `2`) when:
 - Trust Kernel is untrusted (root mismatch, policy mismatch, ReleaseRegistry mismatch, etc.)
 - on-chain policy is not `strict` (unless you pass `--allow-warn`)
 - `trust.web3.mode` is not `full` (unless you pass `--allow-root-uri`)
+- PHP runtime hardening has “error” findings (e.g., `allow_url_include=1`)
 - bypass scan finds forbidden patterns (raw PDO, direct `*.key` reads)
+- attack-surface scan finds “error” patterns (e.g., `eval`, `preg_replace /e`)
 - integrity root contains symlinks or group/world writable files (POSIX)
 
 ## What this does not solve

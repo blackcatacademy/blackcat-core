@@ -9,6 +9,7 @@
 - [Database](DATABASE.md) — `BlackCat\Core\Database` (safe PDO wrapper).
 - [Security](SECURITY.md) — key management, crypto primitives, CSRF, file vault.
 - [Minimal Security Stack](MINIMAL_SECURITY_STACK.md) — core + config + kernel contracts only.
+- [Front Controller Hardening](FRONT_CONTROLLER.md) — strict single-entrypoint web setup (cheap hosting baseline).
 - [Integrity Manifest](INTEGRITY_MANIFEST.md) — how to build/commit roots for tamper detection.
 - [Deployment Hardening](DEPLOYMENT_HARDENING.md) — practical baseline for single-VM reality.
 - [Live RPC smoke test](LIVE_RPC_SMOKE.md) — manual JSON-RPC check against a real chain.

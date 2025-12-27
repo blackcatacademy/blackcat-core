@@ -156,7 +156,7 @@ final class TrustKernelConfig
             throw new \RuntimeException('Invalid config value for trust.web3.max_stale_sec (expected 1..86400).');
         }
 
-        $modeRaw = $repo->get('trust.web3.mode', 'root_uri');
+        $modeRaw = $repo->get('trust.web3.mode', 'full');
         if (!is_string($modeRaw)) {
             throw new \RuntimeException('Invalid config type for trust.web3.mode (expected string).');
         }

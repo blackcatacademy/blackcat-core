@@ -9,6 +9,7 @@ if (is_file($autoload)) {
 }
 
 use BlackCat\Core\Kernel\KernelBootstrap;
+use BlackCat\Core\Security\PhpRuntimeInspector;
 
 /**
  * Post-install verification for “cheap hosting” deployments.
@@ -65,6 +66,28 @@ try {
         $failed = true;
     }
 
+    // 0) PHP runtime posture (best-effort). Fail on hard errors.
+    try {
+        $runtime = PhpRuntimeInspector::inspect();
+        $out['checks']['php_runtime'] = $runtime;
+
+        $findings = $runtime['findings'] ?? [];
+        if (is_array($findings)) {
+            foreach ($findings as $finding) {
+                if (!is_array($finding)) {
+                    continue;
+                }
+                if (($finding['severity'] ?? null) === 'error') {
+                    $failed = true;
+                }
+            }
+        }
+    } catch (\Throwable $e) {
+        $out['checks']['php_runtime'] = [
+            'error' => $e->getMessage(),
+        ];
+    }
+
     // Try to load runtime config repo (for extra checks). This is best-effort and must not break core validation.
     $repo = null;
     $configClass = implode('\\', ['BlackCat', 'Config', 'Runtime', 'Config']);
@@ -112,6 +135,56 @@ try {
         $out['checks']['bypass_scan'] = [
             'skipped' => true,
             'reason' => 'blackcat-config SourceCodePolicyScanner not available.',
+        ];
+    }
+
+    // 1b) Attack surface scan (best-effort). Fails only on "error" severity findings.
+    $attackScanClass = implode('\\', ['BlackCat', 'Config', 'Security', 'AttackSurfaceScanner']);
+    if (class_exists($attackScanClass) && is_callable([$attackScanClass, 'scan'])) {
+        $root = null;
+        if ($repo !== null && method_exists($repo, 'requireString') && method_exists($repo, 'resolvePath')) {
+            try {
+                /** @var string $rootRel */
+                $rootRel = $repo->requireString('trust.integrity.root_dir');
+                /** @var string $rootAbs */
+                $rootAbs = $repo->resolvePath($rootRel);
+                $root = $rootAbs;
+            } catch (\Throwable) {
+                $root = null;
+            }
+        }
+        $root ??= (string) (getcwd() ?: '.');
+
+        try {
+            /** @var array{findings?:mixed} $res */
+            $res = $attackScanClass::scan($root);
+            $findings = $res['findings'] ?? [];
+            $out['checks']['attack_surface_scan'] = [
+                'root' => $root,
+                'findings' => $findings,
+            ];
+
+            if (is_array($findings)) {
+                foreach ($findings as $finding) {
+                    if (!is_array($finding)) {
+                        continue;
+                    }
+                    if (($finding['severity'] ?? null) === 'error') {
+                        $failed = true;
+                        break;
+                    }
+                }
+            }
+        } catch (\Throwable $e) {
+            $out['checks']['attack_surface_scan'] = [
+                'root' => $root,
+                'error' => $e->getMessage(),
+            ];
+        }
+    } else {
+        $out['checks']['attack_surface_scan'] = [
+            'skipped' => true,
+            'reason' => 'blackcat-config AttackSurfaceScanner not available.',
         ];
     }
 
