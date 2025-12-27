@@ -8,6 +8,8 @@
 - [Bootstrap Examples](BOOTSTRAP_EXAMPLES.md) — copy-paste bootstrap snippets.
 - [Database](DATABASE.md) — `BlackCat\Core\Database` (safe PDO wrapper).
 - [Security](SECURITY.md) — key management, crypto primitives, CSRF, file vault.
+- [Minimal Security Stack](MINIMAL_SECURITY_STACK.md) — core + config + kernel contracts only.
+- [Integrity Manifest](INTEGRITY_MANIFEST.md) — how to build/commit roots for tamper detection.
 - [Deployment Hardening](DEPLOYMENT_HARDENING.md) — practical baseline for single-VM reality.
 - [Live RPC smoke test](LIVE_RPC_SMOKE.md) — manual JSON-RPC check against a real chain.
 - [Trust Kernel Status](TRUST_KERNEL_STATUS.md) — minimal health output (JSON) for monitoring/automation.
