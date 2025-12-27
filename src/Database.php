@@ -23,6 +23,7 @@ final class Database
     /** @var null|callable(string):void */
     private static $pdoAccessGuard = null;
     private static bool $pdoAccessGuardLocked = false;
+    private static bool $trustKernelAutoBootAttempted = false;
     private ?\PDO $pdo = null;
     /** Optional read-replica PDO */
     private ?\PDO $pdoRead = null;
@@ -462,6 +463,14 @@ final class Database
 
     public function getPdo(): \PDO
     {
+        if (self::$pdoAccessGuardLocked && self::$pdoAccessGuard === null) {
+            throw new DatabaseException('Database PDO access guard is locked but missing; restart the process.');
+        }
+
+        if (self::$pdoAccessGuard === null) {
+            $this->autoBootTrustKernelIfPossible();
+        }
+
         if (self::$pdoAccessGuard !== null) {
             (self::$pdoAccessGuard)('db.raw_pdo');
         }
@@ -1584,6 +1593,12 @@ final class Database
             if ($this->readOnlyGuard) {
                 throw new DatabaseException('Read-only guard: write statements are disabled');
             }
+            if (self::$writeGuardLocked && self::$writeGuard === null) {
+                throw new DatabaseException('Database write guard is locked but missing; restart the process.');
+            }
+            if (self::$writeGuard === null) {
+                $this->autoBootTrustKernelIfPossible();
+            }
             if (self::$writeGuard !== null) {
                 (self::$writeGuard)($sql);
             }
@@ -2114,6 +2129,22 @@ final class Database
     public static function hasPdoAccessGuard(): bool
     {
         return self::$pdoAccessGuard !== null;
+    }
+
+    private function autoBootTrustKernelIfPossible(): void
+    {
+        if (self::$trustKernelAutoBootAttempted) {
+            return;
+        }
+        self::$trustKernelAutoBootAttempted = true;
+
+        try {
+            // Optional dependency: when blackcat-config is installed and trust.web3 is configured,
+            // this installs and locks the kernel guards.
+            \BlackCat\Core\Kernel\KernelBootstrap::bootIfConfigured($this->logger);
+        } catch (\Throwable $e) {
+            throw new DatabaseException('TrustKernel auto-boot failed: ' . $e->getMessage(), 0, $e);
+        }
     }
 
     public static function encodeCursor(array $cursor): string {

@@ -14,6 +14,7 @@ final class KeyManager
     /** @var null|callable(string):void */
     private static $accessGuard = null;
     private static bool $accessGuardLocked = false;
+    private static bool $trustKernelAutoBootAttempted = false;
     private static array $cache = []; // simple per-request cache ['key_<env>_<basename>[_vN]'=> ['raw'=>..., 'version'=>...]]
     
     public static function setLogger(?LoggerInterface $logger): void
@@ -58,11 +59,35 @@ final class KeyManager
 
     private static function guard(string $operation): void
     {
+        if (self::$accessGuardLocked && self::$accessGuard === null) {
+            throw new KeyManagerException('KeyManager access guard is locked but missing; restart the process.');
+        }
+
+        if (self::$accessGuard === null) {
+            self::autoBootTrustKernelIfPossible();
+        }
+
         if (self::$accessGuard === null) {
             return;
         }
 
         (self::$accessGuard)($operation);
+    }
+
+    private static function autoBootTrustKernelIfPossible(): void
+    {
+        if (self::$trustKernelAutoBootAttempted) {
+            return;
+        }
+        self::$trustKernelAutoBootAttempted = true;
+
+        try {
+            // Optional dependency: when blackcat-config is installed and trust.web3 is configured,
+            // this installs and locks the kernel guards.
+            \BlackCat\Core\Kernel\KernelBootstrap::bootIfConfigured(self::getLogger());
+        } catch (\Throwable $e) {
+            throw new KeyManagerException('TrustKernel auto-boot failed: ' . $e->getMessage(), 0, $e);
+        }
     }
 
     /**

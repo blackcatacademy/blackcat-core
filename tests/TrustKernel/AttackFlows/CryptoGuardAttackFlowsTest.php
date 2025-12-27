@@ -28,12 +28,14 @@ final class CryptoGuardAttackFlowsTest extends TestCase
 
         self::writePrivateStatic(KeyManager::class, 'accessGuardLocked', false);
         self::writePrivateStatic(KeyManager::class, 'accessGuard', null);
+        self::writePrivateStatic(KeyManager::class, 'trustKernelAutoBootAttempted', false);
         self::writePrivateStatic(KeyManager::class, 'cache', []);
 
         self::writePrivateStatic(Database::class, 'writeGuardLocked', false);
         self::writePrivateStatic(Database::class, 'writeGuard', null);
         self::writePrivateStatic(Database::class, 'pdoAccessGuardLocked', false);
         self::writePrivateStatic(Database::class, 'pdoAccessGuard', null);
+        self::writePrivateStatic(Database::class, 'trustKernelAutoBootAttempted', false);
     }
 
     public function testCryptoOperationsFailClosedAfterTrustBecomesUntrustedInStrictPolicy(): void
@@ -245,4 +247,3 @@ final class CryptoGuardAttackFlowsTest extends TestCase
         $ref->setValue(null, $value);
     }
 }
-

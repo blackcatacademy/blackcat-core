@@ -2,39 +2,8 @@
 
 declare(strict_types=1);
 
-namespace BlackCat\Config\Runtime {
-    final class Config
-    {
-        private static ?object $repo = null;
-
-        public static function isInitialized(): bool
-        {
-            return self::$repo !== null;
-        }
-
-        public static function initFromFirstAvailableJsonFileIfNeeded(): void
-        {
-            // no-op for tests
-        }
-
-        public static function repo(): object
-        {
-            if (self::$repo === null) {
-                throw new \RuntimeException('Config is not initialized.');
-            }
-            return self::$repo;
-        }
-
-        public static function _setRepo(object $repo): void
-        {
-            self::$repo = $repo;
-        }
-
-        public static function _clearRepo(): void
-        {
-            self::$repo = null;
-        }
-    }
+namespace {
+    require_once __DIR__ . '/Support/BlackCatConfigRuntimeStub.php';
 }
 
 namespace BlackCat\Core\Tests\TrustKernel\AttackFlows {
@@ -54,11 +23,13 @@ namespace BlackCat\Core\Tests\TrustKernel\AttackFlows {
         {
             self::writePrivateStatic(KeyManager::class, 'accessGuardLocked', false);
             self::writePrivateStatic(KeyManager::class, 'accessGuard', null);
+            self::writePrivateStatic(KeyManager::class, 'trustKernelAutoBootAttempted', false);
 
             self::writePrivateStatic(Database::class, 'writeGuardLocked', false);
             self::writePrivateStatic(Database::class, 'writeGuard', null);
             self::writePrivateStatic(Database::class, 'pdoAccessGuardLocked', false);
             self::writePrivateStatic(Database::class, 'pdoAccessGuard', null);
+            self::writePrivateStatic(Database::class, 'trustKernelAutoBootAttempted', false);
         }
 
         public function testBootIfConfiguredReturnsNullWhenTrustIsNotConfigured(): void
