@@ -31,6 +31,8 @@ final class CryptoGuardAttackFlowsTest extends TestCase
         self::writePrivateStatic(KeyManager::class, 'trustKernelAutoBootAttempted', false);
         self::writePrivateStatic(KeyManager::class, 'cache', []);
 
+        self::writePrivateStatic(Database::class, 'readGuardLocked', false);
+        self::writePrivateStatic(Database::class, 'readGuard', null);
         self::writePrivateStatic(Database::class, 'writeGuardLocked', false);
         self::writePrivateStatic(Database::class, 'writeGuard', null);
         self::writePrivateStatic(Database::class, 'pdoAccessGuardLocked', false);

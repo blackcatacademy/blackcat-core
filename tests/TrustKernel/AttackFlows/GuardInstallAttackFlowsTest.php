@@ -26,6 +26,8 @@ final class GuardInstallAttackFlowsTest extends TestCase
         self::writePrivateStatic(KeyManager::class, 'accessGuard', null);
         self::writePrivateStatic(KeyManager::class, 'cache', []);
 
+        self::writePrivateStatic(Database::class, 'readGuardLocked', false);
+        self::writePrivateStatic(Database::class, 'readGuard', null);
         self::writePrivateStatic(Database::class, 'writeGuardLocked', false);
         self::writePrivateStatic(Database::class, 'writeGuard', null);
         self::writePrivateStatic(Database::class, 'pdoAccessGuardLocked', false);
@@ -113,6 +115,9 @@ final class GuardInstallAttackFlowsTest extends TestCase
         $keyGuard = self::readPrivateStatic(KeyManager::class, 'accessGuard');
         self::assertIsCallable($keyGuard);
 
+        $readGuard = self::readPrivateStatic(Database::class, 'readGuard');
+        self::assertIsCallable($readGuard);
+
         $dbGuard = self::readPrivateStatic(Database::class, 'writeGuard');
         self::assertIsCallable($dbGuard);
 
@@ -124,6 +129,12 @@ final class GuardInstallAttackFlowsTest extends TestCase
             KeyManager::setAccessGuard(null);
             self::fail('Expected KeyManagerException when disabling the access guard.');
         } catch (KeyManagerException) {
+            // ok
+        }
+        try {
+            Database::setReadGuard(null);
+            self::fail('Expected DatabaseException when disabling the DB read guard.');
+        } catch (DatabaseException) {
             // ok
         }
         try {
@@ -150,6 +161,14 @@ final class GuardInstallAttackFlowsTest extends TestCase
             /** @var callable(string):void $keyGuard */
             $keyGuard('read');
             self::fail('Expected TrustKernelException for key reads.');
+        } catch (TrustKernelException) {
+            // ok
+        }
+
+        try {
+            /** @var callable(string):void $readGuard */
+            $readGuard('SELECT 1');
+            self::fail('Expected TrustKernelException for DB reads.');
         } catch (TrustKernelException) {
             // ok
         }
@@ -255,6 +274,9 @@ final class GuardInstallAttackFlowsTest extends TestCase
         $keyGuard = self::readPrivateStatic(KeyManager::class, 'accessGuard');
         self::assertIsCallable($keyGuard);
 
+        $readGuard = self::readPrivateStatic(Database::class, 'readGuard');
+        self::assertIsCallable($readGuard);
+
         $dbGuard = self::readPrivateStatic(Database::class, 'writeGuard');
         self::assertIsCallable($dbGuard);
 
@@ -266,6 +288,12 @@ final class GuardInstallAttackFlowsTest extends TestCase
             KeyManager::setAccessGuard(null);
             self::fail('Expected KeyManagerException when disabling the access guard.');
         } catch (KeyManagerException) {
+            // ok
+        }
+        try {
+            Database::setReadGuard(null);
+            self::fail('Expected DatabaseException when disabling the DB read guard.');
+        } catch (DatabaseException) {
             // ok
         }
         try {
@@ -284,6 +312,9 @@ final class GuardInstallAttackFlowsTest extends TestCase
         // Must NOT throw (warn mode).
         /** @var callable(string):void $keyGuard */
         $keyGuard('read');
+        // Must NOT throw (warn mode).
+        /** @var callable(string):void $readGuard */
+        $readGuard('SELECT 1');
         // Must NOT throw (warn mode).
         /** @var callable(string):void $dbGuard */
         $dbGuard('UPDATE example SET x=1');

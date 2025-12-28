@@ -21,6 +21,9 @@ final class Database
     private static $writeGuard = null;
     private static bool $writeGuardLocked = false;
     /** @var null|callable(string):void */
+    private static $readGuard = null;
+    private static bool $readGuardLocked = false;
+    /** @var null|callable(string):void */
     private static $pdoAccessGuard = null;
     private static bool $pdoAccessGuardLocked = false;
     private static bool $trustKernelAutoBootAttempted = false;
@@ -1602,6 +1605,16 @@ final class Database
             if (self::$writeGuard !== null) {
                 (self::$writeGuard)($sql);
             }
+        } else {
+            if (self::$readGuardLocked && self::$readGuard === null) {
+                throw new DatabaseException('Database read guard is locked but missing; restart the process.');
+            }
+            if (self::$readGuard === null) {
+                $this->autoBootTrustKernelIfPossible();
+            }
+            if (self::$readGuard !== null) {
+                (self::$readGuard)($sql);
+            }
         }
         if ($this->dangerousSqlGuard && $this->isDangerousWriteWithoutWhere($sql)) {
             throw new DatabaseException('Dangerous write without WHERE/LIMIT detected');
@@ -2080,6 +2093,20 @@ final class Database
         self::$writeGuard = $guard;
     }
 
+    /**
+     * Optional security hook: called before executing read-only statements.
+     *
+     * In TrustKernel deployments this is used to fail-closed on DB reads when the
+     * kernel denies reads (e.g. integrity mismatch / paused controller / stale beyond max).
+     */
+    public static function setReadGuard(?callable $guard): void
+    {
+        if (self::$readGuardLocked) {
+            throw new DatabaseException('Database read guard is locked.');
+        }
+        self::$readGuard = $guard;
+    }
+
     public static function lockWriteGuard(): void
     {
         if (self::$writeGuard === null) {
@@ -2096,6 +2123,24 @@ final class Database
     public static function hasWriteGuard(): bool
     {
         return self::$writeGuard !== null;
+    }
+
+    public static function lockReadGuard(): void
+    {
+        if (self::$readGuard === null) {
+            throw new DatabaseException('Database read guard cannot be locked when not set.');
+        }
+        self::$readGuardLocked = true;
+    }
+
+    public static function isReadGuardLocked(): bool
+    {
+        return self::$readGuardLocked;
+    }
+
+    public static function hasReadGuard(): bool
+    {
+        return self::$readGuard !== null;
     }
 
     /**

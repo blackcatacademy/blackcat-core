@@ -66,16 +66,18 @@ final class TrustKernel
     public function installGuards(): void
     {
         $alreadyLocked = KeyManager::isAccessGuardLocked()
+            || Database::isReadGuardLocked()
             || Database::isWriteGuardLocked()
             || Database::isPdoAccessGuardLocked();
 
         if ($alreadyLocked) {
             if (
                 KeyManager::isAccessGuardLocked()
+                && Database::isReadGuardLocked()
                 && Database::isWriteGuardLocked()
                 && Database::isPdoAccessGuardLocked()
             ) {
-                if (!KeyManager::hasAccessGuard() || !Database::hasWriteGuard() || !Database::hasPdoAccessGuard()) {
+                if (!KeyManager::hasAccessGuard() || !Database::hasReadGuard() || !Database::hasWriteGuard() || !Database::hasPdoAccessGuard()) {
                     throw new TrustKernelException('Kernel guards are locked but missing; restart the process.');
                 }
                 return;
@@ -95,6 +97,10 @@ final class TrustKernel
             $this->assertWriteAllowed('db.write');
         });
 
+        Database::setReadGuard(function (string $sql): void {
+            $this->assertReadAllowed('db.read');
+        });
+
         // Prevent bypass: raw PDO access would skip kernel guards (SQL comment guard, write guard, etc.).
         Database::setPdoAccessGuard(function (string $context): void {
             $this->denyBypass($context);
@@ -102,6 +108,7 @@ final class TrustKernel
 
         // Hard lock: prevent runtime code from disabling guards after bootstrap.
         KeyManager::lockAccessGuard();
+        Database::lockReadGuard();
         Database::lockWriteGuard();
         Database::lockPdoAccessGuard();
     }
