@@ -7,6 +7,7 @@ namespace BlackCat\Core\TrustKernel;
 use Psr\Log\LoggerInterface;
 use BlackCat\Core\Database;
 use BlackCat\Core\Security\KeyManager;
+use BlackCat\Core\Security\PhpRuntimeInspector;
 
 final class TrustKernel
 {
@@ -35,6 +36,7 @@ final class TrustKernel
     /** @var 'strict'|'warn' */
     private string $effectiveEnforcement = 'strict';
     private bool $warnBannerEmitted = false;
+    private bool $phpHardeningWarnEmitted = false;
 
     public function __construct(
         private readonly TrustKernelConfig $config,
@@ -191,6 +193,80 @@ final class TrustKernel
             $endpointCount = count($this->config->rpcEndpoints);
             if ($this->effectiveEnforcement === 'strict' && ($endpointCount < 2 || $this->config->rpcQuorum < 2)) {
                 $addError('rpc_quorum_insecure', 'Strict mode requires at least 2 RPC endpoints and quorum >= 2.');
+            }
+
+            // PHP runtime hardening gate (strict-by-default).
+            // In strict mode we fail-closed on insecure PHP/ini posture.
+            // In warn mode we emit loud warnings but do not block.
+            //
+            // This is evaluated only for HTTP request contexts to avoid breaking CLI tooling/tests.
+            if ($requestId !== null && PHP_SAPI !== 'cli') {
+                $fatalStrict = [
+                    // Explicitly required hardening controls:
+                    'allow_url_include_enabled' => true,
+                    'phar_readonly_disabled' => true,
+                    'dangerous_functions_not_disabled' => true,
+                    'open_basedir_unset' => true,
+                    'cgi_fix_pathinfo_enabled' => true,
+                    'enable_dl_enabled' => true,
+                    'auto_prepend_file_set' => true,
+                    'auto_append_file_set' => true,
+
+                    // Web3 transport must exist.
+                    'no_transport_for_web3' => true,
+                ];
+
+                try {
+                    $report = PhpRuntimeInspector::inspect();
+                    $findings = $report['findings'] ?? null;
+                    if (is_array($findings)) {
+                        foreach ($findings as $f) {
+                            if (!is_array($f)) {
+                                continue;
+                            }
+                            $code = $f['code'] ?? null;
+                            $severity = $f['severity'] ?? null;
+                            $message = $f['message'] ?? null;
+
+                            if (!is_string($code) || $code === '' || str_contains($code, "\0")) {
+                                continue;
+                            }
+                            if (!is_string($severity) || !in_array($severity, ['info', 'warn', 'error'], true)) {
+                                $severity = 'warn';
+                            }
+
+                            $isFatal = ($severity === 'error') || isset($fatalStrict[$code]);
+
+                            if ($this->effectiveEnforcement === 'strict' && $isFatal) {
+                                $addError('php_runtime_' . $code, 'PHP runtime hardening violation: ' . $code);
+                                continue;
+                            }
+
+                            if ($this->effectiveEnforcement === 'warn') {
+                                if ($isFatal || $severity !== 'info') {
+                                    if (!$this->phpHardeningWarnEmitted) {
+                                        $this->phpHardeningWarnEmitted = true;
+                                        $this->logger?->warning('[trust-kernel] WARNING: PHP hardening findings present (dev/warn policy). Do not use this policy in production.');
+                                    }
+
+                                    $line = '[trust-kernel] php hardening: ' . $code;
+                                    if (is_string($message) && trim($message) !== '') {
+                                        $line .= ' - ' . trim($message);
+                                    }
+                                    $this->logger?->warning($line);
+                                    @error_log($line);
+                                }
+                            }
+                        }
+                    }
+                } catch (\Throwable $e) {
+                    if ($this->effectiveEnforcement === 'strict') {
+                        $addError('php_runtime_inspect_failed', 'PHP runtime hardening inspection failed.');
+                    } else {
+                        $this->logger?->warning('[trust-kernel] php runtime inspect failed: ' . $e->getMessage());
+                        @error_log('[trust-kernel] php runtime inspect failed: ' . $e->getMessage());
+                    }
+                }
             }
 
             try {
