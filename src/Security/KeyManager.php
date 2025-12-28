@@ -147,10 +147,9 @@ final class KeyManager
     /**
      * @return list<array{version:string,raw:string}>
      */
-    private static function agentGetAllKeyEntries(string $basename, int $wantedLen): array
+    private static function agentGetAllKeyEntries(?string $socketPath, string $basename, int $wantedLen): array
     {
-        $socket = self::cryptoAgentSocketPathFromRuntimeConfig();
-        if ($socket === null) {
+        if ($socketPath === null) {
             return [];
         }
 
@@ -162,7 +161,7 @@ final class KeyManager
             throw new KeyManagerException('Invalid key basename for crypto agent.');
         }
 
-        $res = self::agentCall($socket, [
+        $res = self::agentCall($socketPath, [
             'op' => 'get_all_keys',
             'basename' => $basename,
         ]);
@@ -202,7 +201,7 @@ final class KeyManager
 
         return $out;
     }
-    
+
     public static function setLogger(?LoggerInterface $logger): void
     {
         self::$logger = $logger;
@@ -337,12 +336,23 @@ final class KeyManager
         $wantedLen = $expectedByteLen ?? self::keyByteLen();
         $keys = [];
 
-        $agentEntries = self::agentGetAllKeyEntries($basename, $wantedLen);
-        if ($agentEntries !== []) {
+        $agentSocket = self::cryptoAgentSocketPathFromRuntimeConfig();
+        $agentEntries = self::agentGetAllKeyEntries($agentSocket, $basename, $wantedLen);
+
+        // Crypto-agent mode is authoritative (no file/env fallbacks).
+        if ($agentSocket !== null) {
+            if (trim($basename) === '') {
+                throw new KeyManagerException('Key basename is required in crypto-agent mode.');
+            }
+
             foreach ($agentEntries as $e) {
                 $keys[] = $e['raw'];
             }
-        } elseif ($keysDir !== null && $basename !== '') {
+
+            return $keys;
+        }
+
+        if ($keysDir !== null && $basename !== '') {
             $versions = self::listKeyVersions($keysDir, $basename);
             foreach ($versions as $ver => $path) {
                 $raw = @file_get_contents($path);
@@ -568,12 +578,21 @@ final class KeyManager
         self::requireSodium();
         $wantedLen = $expectedByteLen ?? self::keyByteLen();
 
-        $agentEntries = self::agentGetAllKeyEntries($basename, $wantedLen);
-        if ($agentEntries !== []) {
+        $agentSocket = self::cryptoAgentSocketPathFromRuntimeConfig();
+        $agentEntries = self::agentGetAllKeyEntries($agentSocket, $basename, $wantedLen);
+
+        // Crypto-agent mode is authoritative (no file/env fallbacks).
+        if ($agentSocket !== null) {
+            if (trim($basename) === '') {
+                throw new KeyManagerException('Key basename is required in crypto-agent mode.');
+            }
+
             $latest = $agentEntries[count($agentEntries) - 1] ?? null;
             if (is_array($latest) && isset($latest['raw']) && is_string($latest['raw']) && strlen($latest['raw']) === $wantedLen) {
                 return base64_encode($latest['raw']);
             }
+
+            throw new KeyManagerException('Key not configured via crypto agent: ' . $envName);
         }
 
         if ($keysDir !== null && $basename !== '') {
@@ -619,31 +638,38 @@ final class KeyManager
      */
     public static function getRawKeyBytes(string $envName, ?string $keysDir = null, string $basename = '', bool $generateIfMissing = false, ?int $expectedByteLen = null, ?string $version = null): array
     {
+        self::guard('read');
         $wantedLen = $expectedByteLen ?? self::keyByteLen();
 
-        if ($basename !== '') {
-            $agentEntries = self::agentGetAllKeyEntries($basename, $wantedLen);
-            if ($agentEntries !== []) {
-                if ($generateIfMissing) {
-                    throw new KeyManagerException('generateIfMissing is not supported in crypto-agent mode.');
-                }
+        $agentSocket = self::cryptoAgentSocketPathFromRuntimeConfig();
+        $agentEntries = self::agentGetAllKeyEntries($agentSocket, $basename, $wantedLen);
 
-                if ($version !== null) {
-                    $normalized = 'v' . (string) (int) ltrim($version, 'v');
-                    foreach ($agentEntries as $e) {
-                        if (($e['version'] ?? null) === $normalized) {
-                            return ['raw' => $e['raw'], 'version' => $normalized];
-                        }
-                    }
-
-                    throw new KeyManagerException('Requested key version not found via crypto agent: ' . $normalized);
-                }
-
-                $latest = $agentEntries[count($agentEntries) - 1] ?? null;
-                if (is_array($latest) && isset($latest['raw'], $latest['version']) && is_string($latest['raw']) && is_string($latest['version'])) {
-                    return ['raw' => $latest['raw'], 'version' => $latest['version']];
-                }
+        // Crypto-agent mode is authoritative (no file/env fallbacks).
+        if ($agentSocket !== null) {
+            if (trim($basename) === '') {
+                throw new KeyManagerException('Key basename is required in crypto-agent mode.');
             }
+            if ($generateIfMissing) {
+                throw new KeyManagerException('generateIfMissing is not supported in crypto-agent mode.');
+            }
+
+            if ($version !== null) {
+                $normalized = 'v' . (string) (int) ltrim($version, 'v');
+                foreach ($agentEntries as $e) {
+                    if (($e['version'] ?? null) === $normalized) {
+                        return ['raw' => $e['raw'], 'version' => $normalized];
+                    }
+                }
+
+                throw new KeyManagerException('Requested key version not found via crypto agent: ' . $normalized);
+            }
+
+            $latest = $agentEntries[count($agentEntries) - 1] ?? null;
+            if (is_array($latest) && isset($latest['raw'], $latest['version']) && is_string($latest['raw']) && is_string($latest['version'])) {
+                return ['raw' => $latest['raw'], 'version' => $latest['version']];
+            }
+
+            throw new KeyManagerException('Key not configured via crypto agent: ' . $envName);
         }
 
         if ($version !== null && $keysDir !== null && $basename !== '') {
@@ -681,16 +707,22 @@ final class KeyManager
         $verStr = 'v' . (string)(int)$version;
         $wantedLen = $expectedByteLen ?? self::keyByteLen();
 
-        if ($basename !== '') {
-            $agentEntries = self::agentGetAllKeyEntries($basename, $wantedLen);
-            if ($agentEntries !== []) {
-                foreach ($agentEntries as $e) {
-                    if (($e['version'] ?? null) === $verStr) {
-                        return ['raw' => $e['raw'], 'version' => $verStr];
-                    }
-                }
-                throw new KeyManagerException('Requested key version not found via crypto agent: ' . $verStr);
+        $agentSocket = self::cryptoAgentSocketPathFromRuntimeConfig();
+        $agentEntries = self::agentGetAllKeyEntries($agentSocket, $basename, $wantedLen);
+
+        // Crypto-agent mode is authoritative (no file/env fallbacks).
+        if ($agentSocket !== null) {
+            if (trim($basename) === '') {
+                throw new KeyManagerException('Key basename is required in crypto-agent mode.');
             }
+
+            foreach ($agentEntries as $e) {
+                if (($e['version'] ?? null) === $verStr) {
+                    return ['raw' => $e['raw'], 'version' => $verStr];
+                }
+            }
+
+            throw new KeyManagerException('Requested key version not found via crypto agent: ' . $verStr);
         }
 
         $path = rtrim($keysDir, '/\\') . '/' . $basename . '_' . $verStr . '.key';
@@ -836,8 +868,15 @@ final class KeyManager
         $out = [];
         $expectedLen = self::keyByteLen();
 
-        $agentEntries = self::agentGetAllKeyEntries($basename, $expectedLen);
-        if ($agentEntries !== []) {
+        $agentSocket = self::cryptoAgentSocketPathFromRuntimeConfig();
+        $agentEntries = self::agentGetAllKeyEntries($agentSocket, $basename, $expectedLen);
+
+        // Crypto-agent mode is authoritative (no file/env fallbacks).
+        if ($agentSocket !== null) {
+            if (trim($basename) === '') {
+                throw new KeyManagerException('Key basename is required in crypto-agent mode.');
+            }
+
             $count = 0;
             for ($i = count($agentEntries) - 1; $i >= 0; $i--) {
                 if ($maxCandidates !== null && $count >= $maxCandidates) {
