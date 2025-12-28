@@ -60,6 +60,8 @@ If you install `blackcat-config` and configure `trust.web3` + `trust.integrity`,
 - verifies local files against an integrity manifest,
 - blocks DB writes immediately on RPC quorum loss,
 - allows reads (including key reads) only until `max_stale_sec`, then fails closed.
+- optionally persists a `last OK` snapshot on disk to allow stale reads across process restarts,
+  but only consumes it when the file is protected from runtime writes (no symlink, not writable, not owned by the runtime user, not group/world-writable).
 
 Integrity notes:
 - If the on-chain `activeUriHash` is non-zero, the local integrity manifest must include a matching `uri`.
