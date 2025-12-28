@@ -81,6 +81,40 @@ final class TrustKernelStatus implements \JsonSerializable
         ];
     }
 
+    /**
+     * Safe monitoring payload (avoid leaking internal paths / RPC error details).
+     *
+     * @return array{
+     *   enforcement:'strict'|'warn',
+     *   mode:'root_uri'|'full',
+     *   max_stale_sec:int,
+     *   trusted_now:bool,
+     *   read_allowed:bool,
+     *   write_allowed:bool,
+     *   rpc_ok_now:bool,
+     *   paused:bool,
+     *   checked_at:int,
+     *   last_ok_at:?int,
+     *   error_codes:list<string>
+     * }
+     */
+    public function toMonitorArray(): array
+    {
+        return [
+            'enforcement' => $this->enforcement,
+            'mode' => $this->mode,
+            'max_stale_sec' => $this->maxStaleSec,
+            'trusted_now' => $this->trustedNow,
+            'read_allowed' => $this->readAllowed,
+            'write_allowed' => $this->writeAllowed,
+            'rpc_ok_now' => $this->rpcOkNow,
+            'paused' => $this->paused,
+            'checked_at' => $this->checkedAt,
+            'last_ok_at' => $this->lastOkAt,
+            'error_codes' => $this->errorCodes,
+        ];
+    }
+
     public function jsonSerialize(): mixed
     {
         return $this->toArray();
