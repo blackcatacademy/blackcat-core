@@ -11,34 +11,48 @@ final class DefaultWeb3TransportTest extends TestCase
 {
     public function testRejectsNonHttpSchemes(): void
     {
-        $t = new DefaultWeb3Transport();
-
         $this->expectException(\InvalidArgumentException::class);
-        $t->postJson('file:///etc/passwd', '{}', 1);
+        self::invokeAssertAllowedRpcUrl('file:///etc/passwd');
     }
 
     public function testRejectsPhpStreamWrapper(): void
     {
-        $t = new DefaultWeb3Transport();
-
         $this->expectException(\InvalidArgumentException::class);
-        $t->postJson('php://filter/resource=/etc/passwd', '{}', 1);
+        self::invokeAssertAllowedRpcUrl('php://filter/resource=/etc/passwd');
     }
 
     public function testRejectsMissingScheme(): void
     {
-        $t = new DefaultWeb3Transport();
-
         $this->expectException(\InvalidArgumentException::class);
-        $t->postJson('rpc.layeredge.io', '{}', 1);
+        self::invokeAssertAllowedRpcUrl('rpc.layeredge.io');
     }
 
     public function testRejectsUrlWithBasicAuth(): void
     {
-        $t = new DefaultWeb3Transport();
-
         $this->expectException(\InvalidArgumentException::class);
-        $t->postJson('https://user:pass@example.invalid', '{}', 1);
+        self::invokeAssertAllowedRpcUrl('https://user:pass@example.invalid');
+    }
+
+    public function testRejectsPlainHttpForNonLoopback(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        self::invokeAssertAllowedRpcUrl('http://rpc.layeredge.io');
+    }
+
+    public function testAllowsHttpForLoopback(): void
+    {
+        try {
+            self::invokeAssertAllowedRpcUrl('http://127.0.0.1:8545');
+            self::assertTrue(true);
+        } catch (\Throwable $e) {
+            self::fail('Expected loopback http to be allowed: ' . $e->getMessage());
+        }
+    }
+
+    private static function invokeAssertAllowedRpcUrl(string $url): void
+    {
+        $ref = new \ReflectionMethod(DefaultWeb3Transport::class, 'assertAllowedRpcUrl');
+        $ref->setAccessible(true);
+        $ref->invoke(null, $url);
     }
 }
-

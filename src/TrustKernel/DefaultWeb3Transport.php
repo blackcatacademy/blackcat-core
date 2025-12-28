@@ -70,6 +70,22 @@ final class DefaultWeb3Transport implements Web3TransportInterface
             return $out;
         }
 
+        /** @var array<string,mixed>|false $parsed */
+        $parsed = parse_url($url);
+        $host = is_array($parsed) ? ($parsed['host'] ?? null) : null;
+
+        $ssl = [
+            // Fail closed: do NOT allow bypassing TLS verification via global php.ini / stream defaults.
+            'verify_peer' => true,
+            'verify_peer_name' => true,
+            'allow_self_signed' => false,
+            'SNI_enabled' => true,
+            'disable_compression' => true,
+        ];
+        if (is_string($host) && $host !== '') {
+            $ssl['peer_name'] = $host;
+        }
+
         $context = stream_context_create([
             'http' => [
                 'method' => 'POST',
@@ -79,6 +95,7 @@ final class DefaultWeb3Transport implements Web3TransportInterface
                 'follow_location' => 0,
                 'max_redirects' => 0,
             ],
+            'ssl' => $ssl,
         ]);
 
         /** @var array<int,string>|null $http_response_header */
@@ -122,10 +139,31 @@ final class DefaultWeb3Transport implements Web3TransportInterface
         if (!is_string($host) || $host === '') {
             throw new \InvalidArgumentException('RPC URL must include a host.');
         }
+        $host = strtolower($host);
+
+        // Ban unencrypted RPC by default. Allow HTTP only for loopback (localhost dev nodes).
+        if ($scheme === 'http' && !self::isLoopbackHost($host)) {
+            throw new \InvalidArgumentException('RPC URL must use https (http is only allowed for localhost).');
+        }
 
         // Avoid accidental secret leaks via basic auth in URLs.
         if (is_string($user) || is_string($pass)) {
             throw new \InvalidArgumentException('RPC URL must not include username/password.');
         }
+    }
+
+    private static function isLoopbackHost(string $host): bool
+    {
+        $host = strtolower(trim($host));
+        if ($host === 'localhost' || $host === '127.0.0.1' || $host === '::1') {
+            return true;
+        }
+
+        // parse_url on IPv6 includes no brackets, but keep this tolerant.
+        if ($host === '[::1]') {
+            return true;
+        }
+
+        return false;
     }
 }
