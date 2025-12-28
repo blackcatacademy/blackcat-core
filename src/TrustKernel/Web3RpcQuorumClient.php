@@ -97,6 +97,26 @@ final class Web3RpcQuorumClient
         return $result;
     }
 
+    public function ethGetBalanceQuorum(string $address, string $blockTag = 'latest'): string
+    {
+        $address = self::normalizeEvmAddress($address);
+
+        $params = [
+            $address,
+            $blockTag,
+        ];
+
+        /** @var string $result */
+        $result = $this->callQuorum('eth_getBalance', $params, static function (mixed $result): string {
+            if (!is_string($result) || $result === '' || !str_starts_with($result, '0x') || str_contains($result, "\0")) {
+                throw new \RuntimeException('Invalid eth_getBalance result type/value.');
+            }
+            return strtolower($result);
+        });
+
+        return $result;
+    }
+
     /**
      * @param array<int,mixed> $params
      * @param callable(mixed):string $normalize
