@@ -29,6 +29,9 @@ final class TrustKernel
     private ?int $lastOkAt = null;
 
     private ?string $lastOkRuntimeConfigSha256 = null;
+    private ?string $lastOkComposerLockSha256 = null;
+    private ?string $lastOkPhpFingerprintSha256 = null;
+    private ?string $lastOkImageDigestSha256 = null;
 
     private ?string $lastOkStatePath = null;
     private ?int $lastOkStateMtime = null;
@@ -144,6 +147,9 @@ final class TrustKernel
         $computedRoot = null;
         $paused = false;
         $trustedNow = false;
+        $computedComposerLockSha256 = null;
+        $computedPhpFingerprintSha256 = null;
+        $computedImageDigestSha256 = null;
 
         try {
             $snapshot = $this->controller->snapshot($this->config->instanceController);
@@ -169,6 +175,9 @@ final class TrustKernel
             $derivedEnforcement = 'strict';
             $requiresRuntimeConfigAttestation = false;
             $runtimeConfigAttestationKeyForCheck = null;
+            $requiresComposerLockAttestation = false;
+            $requiresPhpFingerprintAttestation = false;
+            $requiresImageDigestAttestation = false;
             if (hash_equals(Bytes32::normalizeHex($this->config->policyHashV1), $activePolicyHash)) {
                 $policyOk = true;
                 $derivedEnforcement = 'strict';
@@ -198,6 +207,38 @@ final class TrustKernel
                 $derivedEnforcement = 'warn';
                 $requiresRuntimeConfigAttestation = true;
                 $runtimeConfigAttestationKeyForCheck = $this->config->runtimeConfigAttestationKeyV2;
+            } elseif (hash_equals(Bytes32::normalizeHex($this->config->policyHashV4Strict), $activePolicyHash)) {
+                $policyOk = true;
+                $derivedEnforcement = 'strict';
+                $requiresRuntimeConfigAttestation = true;
+                $runtimeConfigAttestationKeyForCheck = $this->config->runtimeConfigAttestationKey;
+                $requiresComposerLockAttestation = true;
+                $requiresPhpFingerprintAttestation = true;
+                $requiresImageDigestAttestation = true;
+            } elseif (hash_equals(Bytes32::normalizeHex($this->config->policyHashV4Warn), $activePolicyHash)) {
+                $policyOk = true;
+                $derivedEnforcement = 'warn';
+                $requiresRuntimeConfigAttestation = true;
+                $runtimeConfigAttestationKeyForCheck = $this->config->runtimeConfigAttestationKey;
+                $requiresComposerLockAttestation = true;
+                $requiresPhpFingerprintAttestation = true;
+                $requiresImageDigestAttestation = true;
+            } elseif (hash_equals(Bytes32::normalizeHex($this->config->policyHashV4StrictV2), $activePolicyHash)) {
+                $policyOk = true;
+                $derivedEnforcement = 'strict';
+                $requiresRuntimeConfigAttestation = true;
+                $runtimeConfigAttestationKeyForCheck = $this->config->runtimeConfigAttestationKeyV2;
+                $requiresComposerLockAttestation = true;
+                $requiresPhpFingerprintAttestation = true;
+                $requiresImageDigestAttestation = true;
+            } elseif (hash_equals(Bytes32::normalizeHex($this->config->policyHashV4WarnV2), $activePolicyHash)) {
+                $policyOk = true;
+                $derivedEnforcement = 'warn';
+                $requiresRuntimeConfigAttestation = true;
+                $runtimeConfigAttestationKeyForCheck = $this->config->runtimeConfigAttestationKeyV2;
+                $requiresComposerLockAttestation = true;
+                $requiresPhpFingerprintAttestation = true;
+                $requiresImageDigestAttestation = true;
             }
 
             if (!$policyOk) {
@@ -378,6 +419,58 @@ final class TrustKernel
                 }
             }
 
+            // Optional hardening (policy v4): bind additional provenance attestations.
+            if ($requiresComposerLockAttestation || $requiresPhpFingerprintAttestation || $requiresImageDigestAttestation) {
+                try {
+                    if ($requiresComposerLockAttestation) {
+                        $computedComposerLockSha256 = $this->computeComposerLockSha256Bytes32OrThrow();
+
+                        $key = Bytes32::normalizeHex($this->config->composerLockAttestationKeyV1);
+                        $onChain = Bytes32::normalizeHex(
+                            $this->controller->attestation($this->config->instanceController, $key)
+                        );
+                        if (!hash_equals(Bytes32::normalizeHex($computedComposerLockSha256), $onChain)) {
+                            $addError('composer_lock_commitment_mismatch', 'composer.lock commitment mismatch.');
+                        }
+                        if (!$this->controller->attestationLocked($this->config->instanceController, $key)) {
+                            $addError('composer_lock_commitment_unlocked', 'composer.lock commitment key is not locked.');
+                        }
+                    }
+
+                    if ($requiresPhpFingerprintAttestation) {
+                        $computedPhpFingerprintSha256 = $this->computePhpFingerprintSha256Bytes32();
+
+                        $key = Bytes32::normalizeHex($this->config->phpFingerprintAttestationKeyV2);
+                        $onChain = Bytes32::normalizeHex(
+                            $this->controller->attestation($this->config->instanceController, $key)
+                        );
+                        if (!hash_equals(Bytes32::normalizeHex($computedPhpFingerprintSha256), $onChain)) {
+                            $addError('php_fingerprint_commitment_mismatch', 'PHP fingerprint commitment mismatch.');
+                        }
+                        if (!$this->controller->attestationLocked($this->config->instanceController, $key)) {
+                            $addError('php_fingerprint_commitment_unlocked', 'PHP fingerprint commitment key is not locked.');
+                        }
+                    }
+
+                    if ($requiresImageDigestAttestation) {
+                        $computedImageDigestSha256 = $this->readImageDigestSha256Bytes32OrThrow();
+
+                        $key = Bytes32::normalizeHex($this->config->imageDigestAttestationKeyV1);
+                        $onChain = Bytes32::normalizeHex(
+                            $this->controller->attestation($this->config->instanceController, $key)
+                        );
+                        if (!hash_equals(Bytes32::normalizeHex($computedImageDigestSha256), $onChain)) {
+                            $addError('image_digest_commitment_mismatch', 'Image digest commitment mismatch.');
+                        }
+                        if (!$this->controller->attestationLocked($this->config->instanceController, $key)) {
+                            $addError('image_digest_commitment_unlocked', 'Image digest commitment key is not locked.');
+                        }
+                    }
+                } catch (\Throwable $e) {
+                    $addError('policy_v4_attestation_failed', 'Policy v4 attestation check failed: ' . $e->getMessage());
+                }
+            }
+
             // ReleaseRegistry trust check:
             // - the source of truth is the on-chain pointer stored in the InstanceController
             // - runtime config may additionally *pin* the expected registry address (optional)
@@ -457,49 +550,132 @@ final class TrustKernel
                     }
 
                     $runtimeConfigOk = true;
+                    $extraOk = true;
+
+                    $requiresRuntimeConfig = false;
+                    $requiresV4Extra = false;
+
                     $lastOkPolicyHash = $this->lastOkStatus->snapshot?->activePolicyHash;
-                    if (is_string($lastOkPolicyHash)) {
+                    if (is_string($lastOkPolicyHash) && trim($lastOkPolicyHash) !== '') {
                         $policyNorm = Bytes32::normalizeHex($lastOkPolicyHash);
-                        $v3Strict = Bytes32::normalizeHex($this->config->policyHashV3Strict);
-                        $v3Warn = Bytes32::normalizeHex($this->config->policyHashV3Warn);
-                        $requiresV3 = hash_equals($v3Strict, $policyNorm) || hash_equals($v3Warn, $policyNorm);
-                        if ($requiresV3) {
-                            $expectedCfgSha = $this->lastOkRuntimeConfigSha256;
-                            $sourcePath = $this->config->runtimeConfigSourcePath;
-                            if ($expectedCfgSha === null || !is_string($sourcePath) || $sourcePath === '' || !is_file($sourcePath)) {
+
+                        $v3 = [
+                            Bytes32::normalizeHex($this->config->policyHashV3Strict),
+                            Bytes32::normalizeHex($this->config->policyHashV3Warn),
+                            Bytes32::normalizeHex($this->config->policyHashV3StrictV2),
+                            Bytes32::normalizeHex($this->config->policyHashV3WarnV2),
+                        ];
+                        foreach ($v3 as $h) {
+                            if (hash_equals($h, $policyNorm)) {
+                                $requiresRuntimeConfig = true;
+                                break;
+                            }
+                        }
+
+                        $v4 = [
+                            Bytes32::normalizeHex($this->config->policyHashV4Strict),
+                            Bytes32::normalizeHex($this->config->policyHashV4Warn),
+                            Bytes32::normalizeHex($this->config->policyHashV4StrictV2),
+                            Bytes32::normalizeHex($this->config->policyHashV4WarnV2),
+                        ];
+                        foreach ($v4 as $h) {
+                            if (hash_equals($h, $policyNorm)) {
+                                $requiresRuntimeConfig = true;
+                                $requiresV4Extra = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if ($requiresRuntimeConfig) {
+                        $expectedCfgSha = $this->lastOkRuntimeConfigSha256;
+                        $sourcePath = $this->config->runtimeConfigSourcePath;
+                        if ($expectedCfgSha === null || !is_string($sourcePath) || $sourcePath === '' || !is_file($sourcePath)) {
+                            $runtimeConfigOk = false;
+                            $addError('stale_runtime_config_missing', 'Stale-mode runtime config commitment is not available.');
+                        } else {
+                            clearstatcache(true, $sourcePath);
+                            $rawNow = @file_get_contents($sourcePath);
+                            if ($rawNow === false) {
                                 $runtimeConfigOk = false;
-                                $addError('stale_runtime_config_missing', 'Stale-mode runtime config commitment is not available.');
+                                $addError('stale_runtime_config_unreadable', 'Stale-mode runtime config file is not readable: ' . $sourcePath);
                             } else {
-                                clearstatcache(true, $sourcePath);
-                                $rawNow = @file_get_contents($sourcePath);
-                                if ($rawNow === false) {
-                                    $runtimeConfigOk = false;
-                                    $addError('stale_runtime_config_unreadable', 'Stale-mode runtime config file is not readable: ' . $sourcePath);
-                                } else {
-                                    try {
-                                        /** @var mixed $decodedNow */
-                                        $decodedNow = json_decode($rawNow, true, 512, JSON_THROW_ON_ERROR);
-                                        if (!is_array($decodedNow)) {
-                                            $runtimeConfigOk = false;
-                                            $addError('stale_runtime_config_invalid', 'Stale-mode runtime config JSON must decode to an object/array: ' . $sourcePath);
-                                        } else {
-                                            /** @var array<string,mixed> $decodedNow */
-                                            $currentCfgSha = CanonicalJson::sha256Bytes32($decodedNow);
-                                            $runtimeConfigOk = hash_equals(Bytes32::normalizeHex($expectedCfgSha), Bytes32::normalizeHex($currentCfgSha));
-                                            if (!$runtimeConfigOk) {
-                                                $addError('stale_runtime_config_mismatch', 'Stale-mode runtime config commitment mismatch.');
-                                            }
-                                        }
-                                    } catch (\JsonException $e) {
+                                try {
+                                    /** @var mixed $decodedNow */
+                                    $decodedNow = json_decode($rawNow, true, 512, JSON_THROW_ON_ERROR);
+                                    if (!is_array($decodedNow)) {
                                         $runtimeConfigOk = false;
-                                        $addError('stale_runtime_config_invalid', 'Stale-mode runtime config JSON is invalid: ' . $sourcePath . ' (' . $e->getMessage() . ')');
+                                        $addError('stale_runtime_config_invalid', 'Stale-mode runtime config JSON must decode to an object/array: ' . $sourcePath);
+                                    } else {
+                                        /** @var array<string,mixed> $decodedNow */
+                                        $currentCfgSha = CanonicalJson::sha256Bytes32($decodedNow);
+                                        $runtimeConfigOk = hash_equals(Bytes32::normalizeHex($expectedCfgSha), Bytes32::normalizeHex($currentCfgSha));
+                                        if (!$runtimeConfigOk) {
+                                            $addError('stale_runtime_config_mismatch', 'Stale-mode runtime config commitment mismatch.');
+                                        }
                                     }
+                                } catch (\JsonException $e) {
+                                    $runtimeConfigOk = false;
+                                    $addError('stale_runtime_config_invalid', 'Stale-mode runtime config JSON is invalid: ' . $sourcePath . ' (' . $e->getMessage() . ')');
                                 }
                             }
                         }
                     }
 
-                    if ($rootOk && $uriOk && $runtimeConfigOk) {
+                    if ($requiresV4Extra) {
+                        $expectedComposer = $this->lastOkComposerLockSha256;
+                        if ($expectedComposer === null) {
+                            $extraOk = false;
+                            $addError('stale_composer_lock_missing', 'Stale-mode composer.lock commitment is not available.');
+                        } else {
+                            try {
+                                $current = $this->computeComposerLockSha256Bytes32OrThrow();
+                                if (!hash_equals(Bytes32::normalizeHex($expectedComposer), Bytes32::normalizeHex($current))) {
+                                    $extraOk = false;
+                                    $addError('stale_composer_lock_mismatch', 'Stale-mode composer.lock commitment mismatch.');
+                                }
+                            } catch (\Throwable $e) {
+                                $extraOk = false;
+                                $addError('stale_composer_lock_failed', 'Stale-mode composer.lock check failed: ' . $e->getMessage());
+                            }
+                        }
+
+                        $expectedPhp = $this->lastOkPhpFingerprintSha256;
+                        if ($expectedPhp === null) {
+                            $extraOk = false;
+                            $addError('stale_php_fingerprint_missing', 'Stale-mode PHP fingerprint commitment is not available.');
+                        } else {
+                            try {
+                                $current = $this->computePhpFingerprintSha256Bytes32();
+                                if (!hash_equals(Bytes32::normalizeHex($expectedPhp), Bytes32::normalizeHex($current))) {
+                                    $extraOk = false;
+                                    $addError('stale_php_fingerprint_mismatch', 'Stale-mode PHP fingerprint commitment mismatch.');
+                                }
+                            } catch (\Throwable $e) {
+                                $extraOk = false;
+                                $addError('stale_php_fingerprint_failed', 'Stale-mode PHP fingerprint check failed: ' . $e->getMessage());
+                            }
+                        }
+
+                        $expectedImage = $this->lastOkImageDigestSha256;
+                        if ($expectedImage === null) {
+                            $extraOk = false;
+                            $addError('stale_image_digest_missing', 'Stale-mode image digest commitment is not available.');
+                        } else {
+                            try {
+                                $current = $this->readImageDigestSha256Bytes32OrThrow();
+                                if (!hash_equals(Bytes32::normalizeHex($expectedImage), Bytes32::normalizeHex($current))) {
+                                    $extraOk = false;
+                                    $addError('stale_image_digest_mismatch', 'Stale-mode image digest commitment mismatch.');
+                                }
+                            } catch (\Throwable $e) {
+                                $extraOk = false;
+                                $addError('stale_image_digest_failed', 'Stale-mode image digest check failed: ' . $e->getMessage());
+                            }
+                        }
+                    }
+
+                    if ($rootOk && $uriOk && $runtimeConfigOk && $extraOk) {
                         $readAllowed = true;
                     }
                 } catch (\Throwable $e) {
@@ -530,10 +706,125 @@ final class TrustKernel
         $this->lastStatusRequestId = $requestId;
         if ($trustedNow) {
             $this->lastOkStatus = $status;
+            $this->lastOkRuntimeConfigSha256 = null;
+            if (is_string($this->config->runtimeConfigCanonicalSha256) && $this->config->runtimeConfigCanonicalSha256 !== '') {
+                try {
+                    $this->lastOkRuntimeConfigSha256 = Bytes32::normalizeHex($this->config->runtimeConfigCanonicalSha256);
+                } catch (\Throwable) {
+                    $this->lastOkRuntimeConfigSha256 = null;
+                }
+            }
+
+            $this->lastOkComposerLockSha256 = is_string($computedComposerLockSha256) ? Bytes32::normalizeHex($computedComposerLockSha256) : null;
+            $this->lastOkPhpFingerprintSha256 = is_string($computedPhpFingerprintSha256) ? Bytes32::normalizeHex($computedPhpFingerprintSha256) : null;
+            $this->lastOkImageDigestSha256 = is_string($computedImageDigestSha256) ? Bytes32::normalizeHex($computedImageDigestSha256) : null;
+
             $this->persistLastOkToDiskBestEffort($status);
         }
 
         return $status;
+    }
+
+    private function computeComposerLockSha256Bytes32OrThrow(): string
+    {
+        $rootDir = $this->config->integrityRootDir;
+        $rootDir = rtrim(trim($rootDir), "/\\");
+        if ($rootDir === '' || str_contains($rootDir, "\0")) {
+            throw new TrustKernelException('Integrity root dir is invalid.');
+        }
+
+        $path = $rootDir . DIRECTORY_SEPARATOR . 'composer.lock';
+        if (is_link($path)) {
+            throw new TrustKernelException('composer.lock must not be a symlink.');
+        }
+        if (!is_file($path) || !is_readable($path)) {
+            throw new TrustKernelException('composer.lock is not readable: ' . $path);
+        }
+
+        $size = @filesize($path);
+        if (is_int($size) && $size > 8 * 1024 * 1024) {
+            throw new TrustKernelException('composer.lock is too large.');
+        }
+
+        $raw = @file_get_contents($path);
+        if ($raw === false) {
+            throw new TrustKernelException('Unable to read composer.lock.');
+        }
+
+        try {
+            /** @var mixed $decoded */
+            $decoded = json_decode($raw, true, 512, JSON_THROW_ON_ERROR);
+        } catch (\JsonException $e) {
+            throw new TrustKernelException('composer.lock JSON is invalid.', 0, $e);
+        }
+
+        if (!is_array($decoded)) {
+            throw new TrustKernelException('composer.lock JSON must decode to an object/array.');
+        }
+
+        /** @var array<string,mixed> $decoded */
+        return CanonicalJson::sha256Bytes32($decoded);
+    }
+
+    private function computePhpFingerprintSha256Bytes32(): string
+    {
+        $extensions = get_loaded_extensions();
+        sort($extensions, SORT_STRING);
+
+        $map = [];
+        foreach ($extensions as $ext) {
+            if (!is_string($ext) || $ext === '') {
+                continue;
+            }
+            $version = phpversion($ext);
+            $map[$ext] = is_string($version) && trim($version) !== '' ? trim($version) : null;
+        }
+
+        return CanonicalJson::sha256Bytes32([
+            'schema_version' => 2,
+            'type' => 'blackcat.php.fingerprint',
+            'php_version' => PHP_VERSION,
+            'extensions' => $map,
+        ]);
+    }
+
+    private function readImageDigestSha256Bytes32OrThrow(): string
+    {
+        $path = $this->config->imageDigestFilePath ?? '/etc/blackcat/image.digest';
+        $path = trim($path);
+        if ($path === '' || str_contains($path, "\0")) {
+            throw new TrustKernelException('Image digest file path is invalid.');
+        }
+
+        if (is_link($path)) {
+            throw new TrustKernelException('Image digest file must not be a symlink.');
+        }
+        if (!is_file($path) || !is_readable($path)) {
+            throw new TrustKernelException('Image digest file is not readable: ' . $path);
+        }
+
+        $raw = @file_get_contents($path);
+        if ($raw === false) {
+            throw new TrustKernelException('Unable to read image digest file.');
+        }
+
+        $digest = trim($raw);
+        if ($digest === '' || str_contains($digest, "\0")) {
+            throw new TrustKernelException('Image digest file is empty/invalid.');
+        }
+
+        if (str_starts_with($digest, 'sha256:')) {
+            $digest = substr($digest, 7);
+        }
+        if (str_starts_with($digest, '0x') || str_starts_with($digest, '0X')) {
+            $digest = substr($digest, 2);
+        }
+        $digest = trim($digest);
+        if (!preg_match('/^[a-fA-F0-9]{64}$/', $digest)) {
+            throw new TrustKernelException('Image digest must be 32 bytes of hex (sha256).');
+        }
+
+        return '0x' . strtolower($digest);
     }
 
     private static function currentRequestId(): ?string
@@ -662,6 +953,9 @@ final class TrustKernel
         $controller = $decoded['instance_controller'] ?? null;
         $lastOkAt = $decoded['last_ok_at'] ?? null;
         $runtimeConfigSha256 = $decoded['runtime_config_sha256'] ?? null;
+        $composerLockSha256 = $decoded['composer_lock_sha256'] ?? null;
+        $phpFingerprintSha256 = $decoded['php_fingerprint_sha256'] ?? null;
+        $imageDigestSha256 = $decoded['image_digest_sha256'] ?? null;
         $snapshotRaw = $decoded['snapshot'] ?? null;
 
         if (!is_int($version) || $version !== 1) {
@@ -716,6 +1010,33 @@ final class TrustKernel
                     $this->lastOkRuntimeConfigSha256 = null;
                 }
             }
+
+            $this->lastOkComposerLockSha256 = null;
+            if (is_string($composerLockSha256) && $composerLockSha256 !== '') {
+                try {
+                    $this->lastOkComposerLockSha256 = Bytes32::normalizeHex($composerLockSha256);
+                } catch (\Throwable) {
+                    $this->lastOkComposerLockSha256 = null;
+                }
+            }
+
+            $this->lastOkPhpFingerprintSha256 = null;
+            if (is_string($phpFingerprintSha256) && $phpFingerprintSha256 !== '') {
+                try {
+                    $this->lastOkPhpFingerprintSha256 = Bytes32::normalizeHex($phpFingerprintSha256);
+                } catch (\Throwable) {
+                    $this->lastOkPhpFingerprintSha256 = null;
+                }
+            }
+
+            $this->lastOkImageDigestSha256 = null;
+            if (is_string($imageDigestSha256) && $imageDigestSha256 !== '') {
+                try {
+                    $this->lastOkImageDigestSha256 = Bytes32::normalizeHex($imageDigestSha256);
+                } catch (\Throwable) {
+                    $this->lastOkImageDigestSha256 = null;
+                }
+            }
             $this->lastOkStatus = new TrustKernelStatus(
                 enforcement: $this->effectiveEnforcement,
                 mode: $this->config->mode,
@@ -753,7 +1074,10 @@ final class TrustKernel
             'chain_id' => $this->config->chainId,
             'instance_controller' => $this->config->instanceController,
             'last_ok_at' => $this->lastOkAt,
-            'runtime_config_sha256' => $this->config->runtimeConfigCanonicalSha256,
+            'runtime_config_sha256' => $this->lastOkRuntimeConfigSha256,
+            'composer_lock_sha256' => $this->lastOkComposerLockSha256,
+            'php_fingerprint_sha256' => $this->lastOkPhpFingerprintSha256,
+            'image_digest_sha256' => $this->lastOkImageDigestSha256,
             'snapshot' => $status->snapshot->toArray(),
         ];
 

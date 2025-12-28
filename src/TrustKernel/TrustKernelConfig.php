@@ -8,6 +8,9 @@ final class TrustKernelConfig
 {
     private const RUNTIME_CONFIG_ATTESTATION_KEY_LABEL_V1 = 'blackcat.runtime_config.canonical_sha256.v1';
     private const RUNTIME_CONFIG_ATTESTATION_KEY_LABEL_V2 = 'blackcat.runtime_config.canonical_sha256.v2';
+    private const COMPOSER_LOCK_ATTESTATION_KEY_LABEL_V1 = 'blackcat.composer.lock.canonical_sha256.v1';
+    private const PHP_FINGERPRINT_ATTESTATION_KEY_LABEL_V2 = 'blackcat.php.fingerprint.canonical_sha256.v2';
+    private const IMAGE_DIGEST_ATTESTATION_KEY_LABEL_V1 = 'blackcat.image.digest.sha256.v1';
 
     /** @var list<string> */
     public readonly array $rpcEndpoints;
@@ -38,15 +41,27 @@ final class TrustKernelConfig
     public readonly string $policyHashV3Warn;
     public readonly string $policyHashV3StrictV2;
     public readonly string $policyHashV3WarnV2;
+    public readonly string $policyHashV4Strict;
+    public readonly string $policyHashV4Warn;
+    public readonly string $policyHashV4StrictV2;
+    public readonly string $policyHashV4WarnV2;
 
     /** On-chain key (bytes32) used for runtime config commitment. */
     public readonly string $runtimeConfigAttestationKey;
     /** Alternate on-chain key (bytes32) for runtime config commitment rotation (v2). */
     public readonly string $runtimeConfigAttestationKeyV2;
+    /** On-chain key (bytes32) for composer.lock commitment (v1). */
+    public readonly string $composerLockAttestationKeyV1;
+    /** On-chain key (bytes32) for PHP fingerprint commitment (v2; stable across worker SAPIs). */
+    public readonly string $phpFingerprintAttestationKeyV2;
+    /** On-chain key (bytes32) for image digest commitment (v1). */
+    public readonly string $imageDigestAttestationKeyV1;
     /** Canonical SHA-256 (bytes32) of the loaded runtime config (optional; only available when sourcePath is known). */
     public readonly ?string $runtimeConfigCanonicalSha256;
     /** Path of the runtime config file used to compute {@see self::$runtimeConfigCanonicalSha256}. */
     public readonly ?string $runtimeConfigSourcePath;
+    /** Optional image digest file path (used only for v4 attestation enforcement). */
+    public readonly ?string $imageDigestFilePath;
 
     /**
      * @param list<string> $rpcEndpoints
@@ -65,6 +80,7 @@ final class TrustKernelConfig
         int $rpcTimeoutSec,
         ?string $runtimeConfigCanonicalSha256 = null,
         ?string $runtimeConfigSourcePath = null,
+        ?string $imageDigestFilePath = null,
     )
     {
         if ($chainId <= 0) {
@@ -115,10 +131,100 @@ final class TrustKernelConfig
         $this->policyHashV3StrictV2 = (new TrustPolicyV3($mode, $maxStaleSec, 'strict', $this->runtimeConfigAttestationKeyV2))->hashBytes32();
         $this->policyHashV3WarnV2 = (new TrustPolicyV3($mode, $maxStaleSec, 'warn', $this->runtimeConfigAttestationKeyV2))->hashBytes32();
 
+        $this->composerLockAttestationKeyV1 = Bytes32::normalizeHex(
+            '0x' . hash('sha256', self::COMPOSER_LOCK_ATTESTATION_KEY_LABEL_V1)
+        );
+
+        $this->phpFingerprintAttestationKeyV2 = Bytes32::normalizeHex(
+            '0x' . hash('sha256', self::PHP_FINGERPRINT_ATTESTATION_KEY_LABEL_V2)
+        );
+
+        $this->imageDigestAttestationKeyV1 = Bytes32::normalizeHex(
+            '0x' . hash('sha256', self::IMAGE_DIGEST_ATTESTATION_KEY_LABEL_V1)
+        );
+
+        $this->policyHashV4Strict = (new TrustPolicyV4(
+            $mode,
+            $maxStaleSec,
+            'strict',
+            $this->runtimeConfigAttestationKey,
+            true,
+            true,
+            $this->composerLockAttestationKeyV1,
+            true,
+            true,
+            $this->phpFingerprintAttestationKeyV2,
+            true,
+            true,
+            $this->imageDigestAttestationKeyV1,
+            true,
+            true,
+        ))->hashBytes32();
+
+        $this->policyHashV4Warn = (new TrustPolicyV4(
+            $mode,
+            $maxStaleSec,
+            'warn',
+            $this->runtimeConfigAttestationKey,
+            true,
+            true,
+            $this->composerLockAttestationKeyV1,
+            true,
+            true,
+            $this->phpFingerprintAttestationKeyV2,
+            true,
+            true,
+            $this->imageDigestAttestationKeyV1,
+            true,
+            true,
+        ))->hashBytes32();
+
+        $this->policyHashV4StrictV2 = (new TrustPolicyV4(
+            $mode,
+            $maxStaleSec,
+            'strict',
+            $this->runtimeConfigAttestationKeyV2,
+            true,
+            true,
+            $this->composerLockAttestationKeyV1,
+            true,
+            true,
+            $this->phpFingerprintAttestationKeyV2,
+            true,
+            true,
+            $this->imageDigestAttestationKeyV1,
+            true,
+            true,
+        ))->hashBytes32();
+
+        $this->policyHashV4WarnV2 = (new TrustPolicyV4(
+            $mode,
+            $maxStaleSec,
+            'warn',
+            $this->runtimeConfigAttestationKeyV2,
+            true,
+            true,
+            $this->composerLockAttestationKeyV1,
+            true,
+            true,
+            $this->phpFingerprintAttestationKeyV2,
+            true,
+            true,
+            $this->imageDigestAttestationKeyV1,
+            true,
+            true,
+        ))->hashBytes32();
+
         $this->runtimeConfigCanonicalSha256 = $runtimeConfigCanonicalSha256 !== null
             ? Bytes32::normalizeHex($runtimeConfigCanonicalSha256)
             : null;
         $this->runtimeConfigSourcePath = $runtimeConfigSourcePath;
+
+        $imageDigestFilePath = is_string($imageDigestFilePath) ? trim($imageDigestFilePath) : null;
+        if ($imageDigestFilePath === '' || $imageDigestFilePath === null || str_contains($imageDigestFilePath, "\0")) {
+            $imageDigestFilePath = null;
+        }
+        $this->imageDigestFilePath = $imageDigestFilePath;
     }
 
     public static function fromRuntimeConfig(RuntimeConfigRepositoryInterface $repo): ?self
@@ -221,6 +327,15 @@ final class TrustKernelConfig
             $runtimeConfigCanonicalSha256 = CanonicalJson::sha256Bytes32($decoded);
         }
 
+        $imageDigestFilePath = null;
+        $imageDigestRaw = $repo->get('trust.integrity.image_digest_file');
+        if (is_string($imageDigestRaw) && trim($imageDigestRaw) !== '') {
+            $resolved = $repo->resolvePath($imageDigestRaw);
+            if (trim($resolved) !== '' && !str_contains($resolved, "\0")) {
+                $imageDigestFilePath = $resolved;
+            }
+        }
+
         return new self(
             chainId: $chainId,
             rpcEndpoints: $normalizedEndpoints,
@@ -234,6 +349,7 @@ final class TrustKernelConfig
             rpcTimeoutSec: $timeoutSec,
             runtimeConfigCanonicalSha256: $runtimeConfigCanonicalSha256,
             runtimeConfigSourcePath: $runtimeConfigSourcePath,
+            imageDigestFilePath: $imageDigestFilePath,
         );
     }
 
