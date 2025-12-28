@@ -6,6 +6,8 @@ namespace BlackCat\Core\TrustKernel;
 
 final class DefaultWeb3Transport implements Web3TransportInterface
 {
+    private const MAX_RESPONSE_BYTES = 1024 * 1024; // 1 MiB
+
     public function postJson(string $url, string $jsonBody, int $timeoutSec): string
     {
         $url = trim($url);
@@ -24,8 +26,10 @@ final class DefaultWeb3Transport implements Web3TransportInterface
                 throw new \RuntimeException('Unable to initialize curl.');
             }
 
+            $buffer = '';
+            $maxBytes = self::MAX_RESPONSE_BYTES;
+
             curl_setopt_array($ch, [
-                CURLOPT_RETURNTRANSFER => true,
                 CURLOPT_POST => true,
                 CURLOPT_POSTFIELDS => $jsonBody,
                 CURLOPT_HTTPHEADER => [
@@ -35,6 +39,14 @@ final class DefaultWeb3Transport implements Web3TransportInterface
                 CURLOPT_CONNECTTIMEOUT => $timeoutSec,
                 CURLOPT_TIMEOUT => $timeoutSec,
                 CURLOPT_FOLLOWLOCATION => false,
+                CURLOPT_MAXREDIRS => 0,
+                CURLOPT_WRITEFUNCTION => static function ($ch, string $data) use (&$buffer, $maxBytes): int {
+                    $buffer .= $data;
+                    if (strlen($buffer) > $maxBytes) {
+                        return 0;
+                    }
+                    return strlen($data);
+                },
             ]);
 
             if (defined('CURLOPT_PROTOCOLS') && defined('CURLPROTO_HTTP') && defined('CURLPROTO_HTTPS')) {
@@ -50,10 +62,13 @@ final class DefaultWeb3Transport implements Web3TransportInterface
                 curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 2);
             }
 
-            $out = curl_exec($ch);
-            if ($out === false) {
+            $ok = curl_exec($ch);
+            if ($ok === false) {
                 $err = curl_error($ch);
                 curl_close($ch);
+                if (strlen($buffer) > self::MAX_RESPONSE_BYTES) {
+                    throw new \RuntimeException('RPC response too large (possible malicious endpoint or MITM).');
+                }
                 throw new \RuntimeException('RPC request failed (curl): ' . $err);
             }
 
@@ -63,11 +78,11 @@ final class DefaultWeb3Transport implements Web3TransportInterface
                 throw new \RuntimeException('RPC HTTP error: ' . $code);
             }
 
-            if (!is_string($out) || $out === '') {
+            if ($buffer === '') {
                 throw new \RuntimeException('RPC returned empty response.');
             }
 
-            return $out;
+            return $buffer;
         }
 
         /** @var array<string,mixed>|false $parsed */
@@ -100,8 +115,29 @@ final class DefaultWeb3Transport implements Web3TransportInterface
 
         /** @var array<int,string>|null $http_response_header */
         $http_response_header = null;
-        $out = @file_get_contents($url, false, $context);
-        if (!is_string($out) || $out === '') {
+        $fp = @fopen($url, 'rb', false, $context);
+        if (!is_resource($fp)) {
+            throw new \RuntimeException('RPC request failed.');
+        }
+
+        $out = '';
+        $maxBytes = self::MAX_RESPONSE_BYTES;
+        try {
+            while (!feof($fp)) {
+                $chunk = fread($fp, 8192);
+                if (!is_string($chunk)) {
+                    break;
+                }
+                $out .= $chunk;
+                if (strlen($out) > $maxBytes) {
+                    throw new \RuntimeException('RPC response too large (possible malicious endpoint or MITM).');
+                }
+            }
+        } finally {
+            fclose($fp);
+        }
+
+        if ($out === '') {
             throw new \RuntimeException('RPC request failed.');
         }
 
