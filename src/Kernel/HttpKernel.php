@@ -6,6 +6,7 @@ namespace BlackCat\Core\Kernel;
 
 use BlackCat\Core\Security\HttpRequestGuard;
 use BlackCat\Core\Security\PhpRuntimeInspector;
+use BlackCat\Core\Security\TrustedProxyGuard;
 use BlackCat\Core\TrustKernel\Web3TransportInterface;
 use Psr\Log\LoggerInterface;
 
@@ -97,6 +98,29 @@ final class HttpKernel
             return self::genericErrorResponse(503);
         }
 
+        if ($options->rejectUntrustedForwardedHeaders || $options->honorTrustedForwardedProto) {
+            $trustedProxies = self::mergeTrustedProxyList(
+                $options->trustedProxies,
+                self::trustedProxiesFromRuntimeConfig(),
+            );
+
+            try {
+                if ($options->rejectUntrustedForwardedHeaders) {
+                    TrustedProxyGuard::assertNoUntrustedForwardedHeaders($server, $trustedProxies);
+                }
+
+                if ($options->honorTrustedForwardedProto && TrustedProxyGuard::isForwardedHttpsFromTrustedProxy($server, $trustedProxies)) {
+                    // Best-effort: make downstream code treat the request as HTTPS when behind a trusted proxy.
+                    // Never downgrade HTTPS to HTTP based on forwarded headers.
+                    $_SERVER['HTTPS'] = 'on';
+                    $_SERVER['SERVER_PORT'] = '443';
+                }
+            } catch (\Throwable $e) {
+                $logger?->warning('[http-kernel] forwarded headers rejected: ' . $e->getMessage());
+                return self::genericErrorResponse(400);
+            }
+        }
+
         $status = $kernel->check();
         if ($status->paused) {
             $logger?->error('[http-kernel] instance controller is paused.');
@@ -127,6 +151,83 @@ final class HttpKernel
         }
 
         return new HttpKernelContext($kernel, $status, $phpRuntime);
+    }
+
+    /**
+     * @return list<string>
+     */
+    private static function mergeTrustedProxyList(array $a, array $b): array
+    {
+        $out = [];
+        $add = static function (array $items) use (&$out): void {
+            foreach ($items as $v) {
+                if (!is_string($v)) {
+                    continue;
+                }
+                $v = trim($v);
+                if ($v === '' || str_contains($v, "\0")) {
+                    continue;
+                }
+                $out[$v] = true;
+            }
+        };
+
+        $add($a);
+        $add($b);
+
+        return array_keys($out);
+    }
+
+    /**
+     * Read trusted proxy peers from runtime config (`http.trusted_proxies`).
+     *
+     * @return list<string>
+     */
+    private static function trustedProxiesFromRuntimeConfig(): array
+    {
+        $configClass = implode('\\', ['BlackCat', 'Config', 'Runtime', 'Config']);
+        if (!class_exists($configClass)) {
+            return [];
+        }
+
+        $isInitialized = false;
+        if (is_callable([$configClass, 'isInitialized'])) {
+            $method = 'isInitialized';
+            $isInitialized = (bool) $configClass::$method();
+        }
+        if (!$isInitialized || !is_callable([$configClass, 'get'])) {
+            return [];
+        }
+
+        // If this process runs as root, it should be treated as privileged (installer/agent context).
+        // In such contexts, proxy spoofing is not meaningful to guard at the HTTP boundary.
+        if (function_exists('posix_geteuid')) {
+            $euid = @posix_geteuid();
+            if (is_int($euid) && $euid === 0) {
+                return [];
+            }
+        }
+
+        $get = 'get';
+        /** @var mixed $raw */
+        $raw = $configClass::$get('http.trusted_proxies');
+        if (!is_array($raw)) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($raw as $v) {
+            if (!is_string($v)) {
+                continue;
+            }
+            $v = trim($v);
+            if ($v === '' || str_contains($v, "\0")) {
+                continue;
+            }
+            $out[] = $v;
+        }
+
+        return $out;
     }
 
     private static function applyIniHardening(): void
