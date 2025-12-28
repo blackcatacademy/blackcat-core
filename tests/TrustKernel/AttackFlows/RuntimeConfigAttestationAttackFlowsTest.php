@@ -30,8 +30,8 @@ final class RuntimeConfigAttestationAttackFlowsTest extends TestCase
                 ],
                 'web3' => [
                     'chain_id' => 4207,
-                    'rpc_endpoints' => ['https://rpc.layeredge.io'],
-                    'rpc_quorum' => 1,
+                    'rpc_endpoints' => ['https://a', 'https://b'],
+                    'rpc_quorum' => 2,
                     'max_stale_sec' => 180,
                     'timeout_sec' => 5,
                     'mode' => 'root_uri',
@@ -52,8 +52,8 @@ final class RuntimeConfigAttestationAttackFlowsTest extends TestCase
 
         $cfg = new TrustKernelConfig(
             chainId: 4207,
-            rpcEndpoints: ['https://a'],
-            rpcQuorum: 1,
+            rpcEndpoints: ['https://a', 'https://b'],
+            rpcQuorum: 2,
             maxStaleSec: 3,
             mode: 'root_uri',
             instanceController: $instanceController,
@@ -155,8 +155,8 @@ final class RuntimeConfigAttestationAttackFlowsTest extends TestCase
                 ],
                 'web3' => [
                     'chain_id' => 4207,
-                    'rpc_endpoints' => ['https://rpc.layeredge.io'],
-                    'rpc_quorum' => 1,
+                    'rpc_endpoints' => ['https://a', 'https://b'],
+                    'rpc_quorum' => 2,
                     'max_stale_sec' => 180,
                     'timeout_sec' => 5,
                     'mode' => 'root_uri',
@@ -177,8 +177,8 @@ final class RuntimeConfigAttestationAttackFlowsTest extends TestCase
 
         $cfg = new TrustKernelConfig(
             chainId: 4207,
-            rpcEndpoints: ['https://a'],
-            rpcQuorum: 1,
+            rpcEndpoints: ['https://a', 'https://b'],
+            rpcQuorum: 2,
             maxStaleSec: 3,
             mode: 'root_uri',
             instanceController: $instanceController,

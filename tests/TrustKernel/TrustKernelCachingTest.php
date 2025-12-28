@@ -30,8 +30,8 @@ final class TrustKernelCachingTest extends TestCase
 
             $cfg = new TrustKernelConfig(
                 chainId: $chainId,
-                rpcEndpoints: ['https://rpc.example.invalid'],
-                rpcQuorum: 1,
+                rpcEndpoints: ['https://a', 'https://b'],
+                rpcQuorum: 2,
                 maxStaleSec: 60,
                 mode: 'root_uri',
                 instanceController: $instanceController,
@@ -94,11 +94,11 @@ final class TrustKernelCachingTest extends TestCase
             $_SERVER['REQUEST_TIME_FLOAT'] = 1000.000001;
             $kernel->check();
             $kernel->check();
-            self::assertSame(1, $snapshotCalls, 'Expected snapshot() to be cached within the same request.');
+            self::assertSame(2, $snapshotCalls, 'Expected snapshot() to be cached within the same request (2 endpoints, quorum=2).');
 
             $_SERVER['REQUEST_TIME_FLOAT'] = 1000.000002;
             $kernel->check();
-            self::assertSame(2, $snapshotCalls, 'Expected snapshot() to be re-fetched on a new request.');
+            self::assertSame(4, $snapshotCalls, 'Expected snapshot() to be re-fetched on a new request (2 endpoints, quorum=2).');
         } finally {
             if ($prevRequestTime === null) {
                 unset($_SERVER['REQUEST_TIME_FLOAT']);

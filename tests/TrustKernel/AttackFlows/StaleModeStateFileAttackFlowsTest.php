@@ -32,8 +32,8 @@ final class StaleModeStateFileAttackFlowsTest extends TestCase
 
         $cfg = new TrustKernelConfig(
             chainId: 4207,
-            rpcEndpoints: ['https://a'],
-            rpcQuorum: 1,
+            rpcEndpoints: ['https://a', 'https://b'],
+            rpcQuorum: 2,
             maxStaleSec: 5,
             mode: 'root_uri',
             instanceController: $instanceController,

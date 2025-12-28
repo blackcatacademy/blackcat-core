@@ -79,8 +79,8 @@ namespace BlackCat\Core\Tests\TrustKernel\AttackFlows {
             $repo = new FakeRepo([
                 'trust.web3' => [],
                 'trust.web3.chain_id' => 4207,
-                'trust.web3.rpc_endpoints' => ['https://a'],
-                'trust.web3.rpc_quorum' => 1,
+                'trust.web3.rpc_endpoints' => ['https://a', 'https://b'],
+                'trust.web3.rpc_quorum' => 2,
                 'trust.web3.max_stale_sec' => 3,
                 'trust.web3.mode' => 'root_uri',
                 'trust.web3.timeout_sec' => 5,

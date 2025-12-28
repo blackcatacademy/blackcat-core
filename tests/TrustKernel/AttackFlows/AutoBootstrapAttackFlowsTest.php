@@ -94,8 +94,8 @@ final class AutoBootstrapAttackFlowsTest extends TestCase
                 ],
                 'web3' => [
                     'chain_id' => 4207,
-                    'rpc_endpoints' => ['https://rpc.layeredge.io'],
-                    'rpc_quorum' => 1,
+                    'rpc_endpoints' => ['https://a', 'https://b'],
+                    'rpc_quorum' => 2,
                     'max_stale_sec' => 180,
                     'timeout_sec' => 5,
                     'mode' => 'root_uri',

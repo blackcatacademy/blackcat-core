@@ -22,8 +22,8 @@ final class ProxyAttackFlowsTest extends TestCase
 
         $cfg = new TrustKernelConfig(
             chainId: 4207,
-            rpcEndpoints: ['https://a'],
-            rpcQuorum: 1,
+            rpcEndpoints: ['https://a', 'https://b'],
+            rpcQuorum: 2,
             maxStaleSec: 3,
             mode: 'root_uri',
             instanceController: $instanceController,
@@ -114,4 +114,3 @@ final class ProxyAttackFlowsTest extends TestCase
         }
     }
 }
-

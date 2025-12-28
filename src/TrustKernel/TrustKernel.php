@@ -186,6 +186,13 @@ final class TrustKernel
                 $this->effectiveEnforcement = $derivedEnforcement;
             }
 
+            // Strict deployments must not rely on a single RPC endpoint.
+            // With quorum=1, a single compromised/malicious endpoint can lie about on-chain state.
+            $endpointCount = count($this->config->rpcEndpoints);
+            if ($this->effectiveEnforcement === 'strict' && ($endpointCount < 2 || $this->config->rpcQuorum < 2)) {
+                $addError('rpc_quorum_insecure', 'Strict mode requires at least 2 RPC endpoints and quorum >= 2.');
+            }
+
             try {
                 $manifest = $this->loadManifestIfNeeded();
                 $computedRoot = $this->config->mode === 'full'

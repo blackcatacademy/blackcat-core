@@ -24,8 +24,8 @@ final class PolicyAttackFlowsTest extends TestCase
 
         $cfg = new TrustKernelConfig(
             chainId: 4207,
-            rpcEndpoints: ['https://a'],
-            rpcQuorum: 1,
+            rpcEndpoints: ['https://a', 'https://b'],
+            rpcQuorum: 2,
             maxStaleSec: 3,
             mode: 'root_uri',
             instanceController: $instanceController,
@@ -38,8 +38,16 @@ final class PolicyAttackFlowsTest extends TestCase
         $logger = new TestLogger();
 
         $step = 0;
+        /** @var array<string,true> $seenSnapshotEndpoints */
+        $seenSnapshotEndpoints = [];
+        $policyForCurrentStep = $cfg->policyHashV2Warn;
+        $pausedForCurrentStep = false;
+
         $transport = new ScenarioTransport(static function (string $url, array $req, int $timeout, int $callIndex) use (
             &$step,
+            &$seenSnapshotEndpoints,
+            &$policyForCurrentStep,
+            &$pausedForCurrentStep,
             $cfg,
             $fixture,
             $instanceController,
@@ -60,12 +68,21 @@ final class PolicyAttackFlowsTest extends TestCase
                 $data = is_array($params) && isset($params[0]['data']) ? strtolower((string) $params[0]['data']) : '';
 
                 if ($to === strtolower($instanceController) && $data === '0x9711715a') {
-                    $step++;
-                    $policy = match ($step) {
-                        1, 2 => $cfg->policyHashV2Warn,
-                        default => '0x' . str_repeat('11', 32),
-                    };
-                    $paused = $step === 2;
+                    $seenSnapshotEndpoints[$url] = true;
+                    if (count($seenSnapshotEndpoints) === 1) {
+                        $step++;
+                        $policyForCurrentStep = match ($step) {
+                            1, 2 => $cfg->policyHashV2Warn,
+                            default => '0x' . str_repeat('11', 32),
+                        };
+                        $pausedForCurrentStep = $step === 2;
+                    }
+
+                    $policy = $policyForCurrentStep;
+                    $paused = $pausedForCurrentStep;
+                    if (count($seenSnapshotEndpoints) >= 2) {
+                        $seenSnapshotEndpoints = [];
+                    }
 
                     $snapshotHex = Abi::snapshotResult(
                         version: 1,

@@ -23,8 +23,8 @@ final class StaleModeAttackFlowsTest extends TestCase
 
         $cfg = new TrustKernelConfig(
             chainId: 4207,
-            rpcEndpoints: ['https://a'],
-            rpcQuorum: 1,
+            rpcEndpoints: ['https://a', 'https://b'],
+            rpcQuorum: 2,
             maxStaleSec: 5,
             mode: 'root_uri',
             instanceController: $instanceController,
@@ -61,9 +61,9 @@ final class StaleModeAttackFlowsTest extends TestCase
                 return json_encode(['jsonrpc' => '2.0', 'id' => 1, 'result' => '0x106f'], JSON_THROW_ON_ERROR);
             }
 
-            // First `check()` performs 5 RPC calls in the happy path.
+            // First `check()` performs 10 RPC calls in the happy path (2 endpoints, quorum=2).
             // After that, simulate an RPC outage (for stale-mode behavior).
-            if ($callIndex > 5) {
+            if ($callIndex > 10) {
                 throw new \RuntimeException('simulated rpc outage');
             }
 

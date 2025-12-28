@@ -56,8 +56,8 @@ final class CryptoGuardAttackFlowsTest extends TestCase
 
         $cfg = new TrustKernelConfig(
             chainId: 4207,
-            rpcEndpoints: ['https://a'],
-            rpcQuorum: 1,
+            rpcEndpoints: ['https://a', 'https://b'],
+            rpcQuorum: 2,
             maxStaleSec: 3,
             mode: 'root_uri',
             instanceController: $instanceController,
@@ -67,8 +67,12 @@ final class CryptoGuardAttackFlowsTest extends TestCase
             rpcTimeoutSec: 5,
         );
 
-        $snapshotCalls = 0;
-        $transport = new ScenarioTransport(static function (string $url, array $req, int $timeoutSec, int $callIndex) use ($cfg, $fixture, $instanceController, &$snapshotCalls): string {
+        $snapshotChecks = 0;
+        /** @var array<string,true> $seenSnapshotEndpoints */
+        $seenSnapshotEndpoints = [];
+        $pausedForCurrentCheck = false;
+
+        $transport = new ScenarioTransport(static function (string $url, array $req, int $timeoutSec, int $callIndex) use ($cfg, $fixture, $instanceController, &$snapshotChecks, &$seenSnapshotEndpoints, &$pausedForCurrentCheck): string {
             $method = $req['method'] ?? null;
             if ($method === 'eth_chainId') {
                 return json_encode(['jsonrpc' => '2.0', 'id' => 1, 'result' => '0x106f'], JSON_THROW_ON_ERROR);
@@ -84,8 +88,16 @@ final class CryptoGuardAttackFlowsTest extends TestCase
                 $data = is_array($params) && isset($params[0]['data']) ? strtolower((string) $params[0]['data']) : '';
 
                 if ($to === strtolower($instanceController) && $data === '0x9711715a') {
-                    $snapshotCalls++;
-                    $paused = $snapshotCalls >= 2;
+                    $seenSnapshotEndpoints[$url] = true;
+                    if (count($seenSnapshotEndpoints) === 1) {
+                        $snapshotChecks++;
+                        $pausedForCurrentCheck = $snapshotChecks >= 2;
+                    }
+
+                    $paused = $pausedForCurrentCheck;
+                    if (count($seenSnapshotEndpoints) >= 2) {
+                        $seenSnapshotEndpoints = [];
+                    }
 
                     $snapshotHex = Abi::snapshotResult(
                         version: 1,
@@ -151,8 +163,8 @@ final class CryptoGuardAttackFlowsTest extends TestCase
 
         $cfg = new TrustKernelConfig(
             chainId: 4207,
-            rpcEndpoints: ['https://a'],
-            rpcQuorum: 1,
+            rpcEndpoints: ['https://a', 'https://b'],
+            rpcQuorum: 2,
             maxStaleSec: 3,
             mode: 'root_uri',
             instanceController: $instanceController,
@@ -162,8 +174,12 @@ final class CryptoGuardAttackFlowsTest extends TestCase
             rpcTimeoutSec: 5,
         );
 
-        $snapshotCalls = 0;
-        $transport = new ScenarioTransport(static function (string $url, array $req, int $timeoutSec, int $callIndex) use ($cfg, $fixture, $instanceController, &$snapshotCalls): string {
+        $snapshotChecks = 0;
+        /** @var array<string,true> $seenSnapshotEndpoints */
+        $seenSnapshotEndpoints = [];
+        $pausedForCurrentCheck = false;
+
+        $transport = new ScenarioTransport(static function (string $url, array $req, int $timeoutSec, int $callIndex) use ($cfg, $fixture, $instanceController, &$snapshotChecks, &$seenSnapshotEndpoints, &$pausedForCurrentCheck): string {
             $method = $req['method'] ?? null;
             if ($method === 'eth_chainId') {
                 return json_encode(['jsonrpc' => '2.0', 'id' => 1, 'result' => '0x106f'], JSON_THROW_ON_ERROR);
@@ -179,8 +195,16 @@ final class CryptoGuardAttackFlowsTest extends TestCase
                 $data = is_array($params) && isset($params[0]['data']) ? strtolower((string) $params[0]['data']) : '';
 
                 if ($to === strtolower($instanceController) && $data === '0x9711715a') {
-                    $snapshotCalls++;
-                    $paused = $snapshotCalls >= 2;
+                    $seenSnapshotEndpoints[$url] = true;
+                    if (count($seenSnapshotEndpoints) === 1) {
+                        $snapshotChecks++;
+                        $pausedForCurrentCheck = $snapshotChecks >= 2;
+                    }
+
+                    $paused = $pausedForCurrentCheck;
+                    if (count($seenSnapshotEndpoints) >= 2) {
+                        $seenSnapshotEndpoints = [];
+                    }
 
                     $snapshotHex = Abi::snapshotResult(
                         version: 1,
