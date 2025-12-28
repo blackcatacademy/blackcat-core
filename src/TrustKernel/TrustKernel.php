@@ -22,6 +22,7 @@ final class TrustKernel
 
     private ?TrustKernelStatus $lastStatus = null;
     private ?int $lastStatusAt = null;
+    private ?string $lastStatusRequestId = null;
 
     private ?TrustKernelStatus $lastOkStatus = null;
     private ?int $lastOkAt = null;
@@ -106,7 +107,17 @@ final class TrustKernel
     public function check(): TrustKernelStatus
     {
         $now = time();
-        if ($this->lastStatus !== null && $this->lastStatusAt !== null && ($now - $this->lastStatusAt) < 1) {
+        $requestId = self::currentRequestId();
+
+        // Cache within the same HTTP request only.
+        // Do not cache across requests (even within the same second) to avoid "1s stale trust" windows
+        // in long-lived PHP-FPM workers.
+        if ($requestId !== null && $this->lastStatus !== null && $this->lastStatusRequestId === $requestId) {
+            return $this->lastStatus;
+        }
+
+        // Fallback: allow a tiny cache window for non-request contexts (CLI/worker) to reduce RPC churn.
+        if ($requestId === null && $this->lastStatus !== null && $this->lastStatusAt !== null && ($now - $this->lastStatusAt) < 1) {
             return $this->lastStatus;
         }
 
@@ -412,12 +423,37 @@ final class TrustKernel
 
         $this->lastStatus = $status;
         $this->lastStatusAt = $now;
+        $this->lastStatusRequestId = $requestId;
         if ($trustedNow) {
             $this->lastOkStatus = $status;
             $this->persistLastOkToDiskBestEffort($status);
         }
 
         return $status;
+    }
+
+    private static function currentRequestId(): ?string
+    {
+        // Only treat this as a "request context" when the runtime is actually serving HTTP.
+        // In CLI processes `REQUEST_TIME_FLOAT` exists too, but it is constant for the whole process.
+        if (!isset($_SERVER['REQUEST_METHOD'])) {
+            return null;
+        }
+
+        $rt = $_SERVER['REQUEST_TIME_FLOAT'] ?? null;
+
+        if (is_int($rt) || is_float($rt)) {
+            return sprintf('%.6f', (float) $rt);
+        }
+
+        if (is_string($rt)) {
+            $trimmed = trim($rt);
+            if ($trimmed !== '' && is_numeric($trimmed)) {
+                return sprintf('%.6f', (float) $trimmed);
+            }
+        }
+
+        return null;
     }
 
     private function hydrateLastOkFromDiskIfAvailable(): void

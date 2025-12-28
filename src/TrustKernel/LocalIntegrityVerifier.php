@@ -6,8 +6,9 @@ namespace BlackCat\Core\TrustKernel;
 
 final class LocalIntegrityVerifier
 {
-    /** @var array<string,array{mtime:int,size:int,hash:string}> */
+    /** @var array<string,array{mtime:int,ctime:int,size:int,hash:string}> */
     private array $hashCache = [];
+    private ?string $cacheRequestId = null;
 
     private string $rootDir;
 
@@ -115,15 +116,28 @@ final class LocalIntegrityVerifier
 
     private function sha256Bytes32Cached(string $absolutePath): string
     {
+        $this->resetCacheIfNewRequest();
+
         clearstatcache(true, $absolutePath);
         $mtime = @filemtime($absolutePath);
+        $ctime = @filectime($absolutePath);
         $size = @filesize($absolutePath);
         if (!is_int($mtime) || $mtime <= 0 || !is_int($size)) {
             throw new IntegrityViolationException('integrity_stat_failed', 'Integrity check failed: unable to stat file.');
         }
 
+        if (!is_int($ctime) || $ctime <= 0) {
+            $ctime = null;
+        }
+
         $cached = $this->hashCache[$absolutePath] ?? null;
-        if ($cached !== null && $cached['mtime'] === $mtime && $cached['size'] === $size) {
+        if (
+            $ctime !== null
+            && $cached !== null
+            && $cached['mtime'] === $mtime
+            && $cached['ctime'] === $ctime
+            && $cached['size'] === $size
+        ) {
             return $cached['hash'];
         }
 
@@ -133,13 +147,50 @@ final class LocalIntegrityVerifier
         }
 
         $hash = Bytes32::normalizeHex('0x' . $hex);
-        $this->hashCache[$absolutePath] = [
-            'mtime' => $mtime,
-            'size' => $size,
-            'hash' => $hash,
-        ];
+        if ($ctime !== null) {
+            $this->hashCache[$absolutePath] = [
+                'mtime' => $mtime,
+                'ctime' => $ctime,
+                'size' => $size,
+                'hash' => $hash,
+            ];
+        }
 
         return $hash;
+    }
+
+    private function resetCacheIfNewRequest(): void
+    {
+        $id = self::currentRequestId();
+        if ($id === null) {
+            return;
+        }
+        if ($this->cacheRequestId !== $id) {
+            $this->hashCache = [];
+            $this->cacheRequestId = $id;
+        }
+    }
+
+    private static function currentRequestId(): ?string
+    {
+        if (!isset($_SERVER['REQUEST_METHOD'])) {
+            return null;
+        }
+
+        $rt = $_SERVER['REQUEST_TIME_FLOAT'] ?? null;
+
+        if (is_int($rt) || is_float($rt)) {
+            return sprintf('%.6f', (float) $rt);
+        }
+
+        if (is_string($rt)) {
+            $trimmed = trim($rt);
+            if ($trimmed !== '' && is_numeric($trimmed)) {
+                return sprintf('%.6f', (float) $trimmed);
+            }
+        }
+
+        return null;
     }
 
     private static function isAbsolutePath(string $path): bool
