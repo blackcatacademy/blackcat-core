@@ -8,6 +8,7 @@ final class InstanceControllerReader
 {
     private const SNAPSHOT_SELECTOR = '0x9711715a'; // snapshot()
     private const RELEASE_REGISTRY_SELECTOR = '0x19ee073e'; // releaseRegistry()
+    private const EXPECTED_COMPONENT_ID_SELECTOR = '0xd6c1b425'; // expectedComponentId()
     private const ATTESTATIONS_SELECTOR = '0x940992a3'; // attestations(bytes32)
     private const ATTESTATION_UPDATED_AT_SELECTOR = '0xb54917aa'; // attestationUpdatedAt(bytes32)
     private const ATTESTATION_LOCKED_SELECTOR = '0xa93a4e86'; // attestationLocked(bytes32)
@@ -27,6 +28,12 @@ final class InstanceControllerReader
     {
         $hex = $this->rpc->ethCallQuorum($instanceControllerAddress, self::RELEASE_REGISTRY_SELECTOR, 'latest');
         return self::decodeAddress($hex);
+    }
+
+    public function expectedComponentId(string $instanceControllerAddress): string
+    {
+        $hex = $this->rpc->ethCallQuorum($instanceControllerAddress, self::EXPECTED_COMPONENT_ID_SELECTOR, 'latest');
+        return self::decodeBytes32($hex);
     }
 
     public function attestation(string $instanceControllerAddress, string $keyBytes32): string
