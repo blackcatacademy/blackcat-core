@@ -13,7 +13,7 @@ use PHPUnit\Framework\TestCase;
 
 final class StaleModeStateFileAttackFlowsTest extends TestCase
 {
-    public function testRpcOutageAllowsStaleReadAcrossKernelInstancesWhenStateFileIsProtected(): void
+    public function testRpcOutageAllowsStaleReadOnlyWhenStateFileIsProtectedFromRuntimeWrites(): void
     {
         $fixture = IntegrityFixture::create(['app.txt' => 'ok']);
 
@@ -116,13 +116,40 @@ final class StaleModeStateFileAttackFlowsTest extends TestCase
             @chmod($stateFile, 0444);
             @chmod($cfgDir, 0555);
 
+            $canUsePersistedState = false;
+            if (function_exists('posix_geteuid')) {
+                $euid = @posix_geteuid();
+                if (is_int($euid) && $euid === 0) {
+                    $canUsePersistedState = true;
+                } elseif (is_int($euid)) {
+                    $ownerFile = @fileowner($stateFile);
+                    $ownerDir = @fileowner($cfgDir);
+                    $permsFile = @fileperms($stateFile);
+                    $permsDir = @fileperms($cfgDir);
+
+                    $canUsePersistedState = !is_writable($stateFile)
+                        && !is_writable($cfgDir)
+                        && !is_link($stateFile)
+                        && !is_link($cfgDir)
+                        && is_int($ownerFile) && $ownerFile !== $euid
+                        && is_int($ownerDir) && $ownerDir !== $euid
+                        && is_int($permsFile) && (($permsFile & 0o022) === 0)
+                        && is_int($permsDir) && (($permsDir & 0o022) === 0);
+                }
+            }
+
             usleep(1_100_000);
 
             $kernel2 = new TrustKernel($cfg, null, $transportDown);
             $status2 = $kernel2->check();
             self::assertFalse($status2->rpcOkNow);
-            self::assertNotNull($status2->lastOkAt, 'expected last_ok_at to load from state file');
-            self::assertTrue($status2->readAllowed, 'stale read should be allowed using persisted last OK');
+            if ($canUsePersistedState) {
+                self::assertNotNull($status2->lastOkAt, 'expected last_ok_at to load from protected state file');
+                self::assertTrue($status2->readAllowed, 'stale read should be allowed using persisted last OK');
+            } else {
+                self::assertNull($status2->lastOkAt, 'expected last_ok_at to be ignored when state file can be forged by the runtime user');
+                self::assertFalse($status2->readAllowed, 'stale read must be denied when state file is not protected from runtime writes');
+            }
 
             $fixture->tamper('app.txt', 'tampered');
             usleep(1_100_000);

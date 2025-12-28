@@ -489,11 +489,49 @@ final class TrustKernel
         $dir = dirname($path);
         if (
             $this->effectiveEnforcement === 'strict'
-            && $euid !== 0
-            && (is_writable($path) || ($dir !== '' && is_writable($dir)))
+            && (!is_int($euid) || $euid !== 0)
         ) {
-            $this->lastOkStateMtime = $mtime;
-            return;
+            if (!is_int($euid)) {
+                $this->lastOkStateMtime = $mtime;
+                return;
+            }
+
+            // Reject when the runtime can modify the file or its directory.
+            if (is_writable($path) || ($dir !== '' && is_writable($dir))) {
+                $this->lastOkStateMtime = $mtime;
+                return;
+            }
+
+            // Reject symlinks (swap attacks).
+            if (is_link($path) || ($dir !== '' && is_link($dir))) {
+                $this->lastOkStateMtime = $mtime;
+                return;
+            }
+
+            // Reject if the runtime user owns the file or directory: even if currently read-only,
+            // the owner can chmod it back and forge a stale-trust bypass.
+            $ownerFile = @fileowner($path);
+            $ownerDir = $dir !== '' ? @fileowner($dir) : false;
+            if (!is_int($ownerFile) || $ownerFile === $euid) {
+                $this->lastOkStateMtime = $mtime;
+                return;
+            }
+            if ($dir !== '' && (!is_int($ownerDir) || $ownerDir === $euid)) {
+                $this->lastOkStateMtime = $mtime;
+                return;
+            }
+
+            // Reject world/group-writable files or directories.
+            $permsFile = @fileperms($path);
+            if (is_int($permsFile) && (($permsFile & 0o022) !== 0)) {
+                $this->lastOkStateMtime = $mtime;
+                return;
+            }
+            $permsDir = $dir !== '' ? @fileperms($dir) : false;
+            if (is_int($permsDir) && (($permsDir & 0o022) !== 0)) {
+                $this->lastOkStateMtime = $mtime;
+                return;
+            }
         }
 
         $raw = @file_get_contents($path);
