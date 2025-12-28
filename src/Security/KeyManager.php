@@ -16,6 +16,192 @@ final class KeyManager
     private static bool $accessGuardLocked = false;
     private static bool $trustKernelAutoBootAttempted = false;
     private static array $cache = []; // simple per-request cache ['key_<env>_<basename>[_vN]'=> ['raw'=>..., 'version'=>...]]
+
+    private const AGENT_TIMEOUT_SEC = 1;
+    private const AGENT_MAX_REQ_BYTES = 8 * 1024;
+    private const AGENT_MAX_RESP_BYTES = 256 * 1024;
+
+    private static function cryptoAgentSocketPathFromRuntimeConfig(): ?string
+    {
+        if (\function_exists('posix_geteuid')) {
+            $euid = @\posix_geteuid();
+            if (\is_int($euid) && $euid === 0) {
+                return null;
+            }
+        }
+
+        $configClass = implode('\\', ['BlackCat', 'Config', 'Runtime', 'Config']);
+        if (!class_exists($configClass) || !is_callable([$configClass, 'isInitialized'])) {
+            return null;
+        }
+
+        $method = 'isInitialized';
+        if (!(bool) $configClass::$method()) {
+            return null;
+        }
+
+        if (!is_callable([$configClass, 'repo'])) {
+            return null;
+        }
+
+        $repoMethod = 'repo';
+        /** @var mixed $repo */
+        $repo = $configClass::$repoMethod();
+
+        if (!is_object($repo) || !method_exists($repo, 'get')) {
+            return null;
+        }
+
+        $get = 'get';
+        /** @var mixed $raw */
+        $raw = $repo->$get('crypto.agent.socket_path');
+        if (!is_string($raw) || trim($raw) === '' || str_contains($raw, "\0")) {
+            return null;
+        }
+
+        $path = trim($raw);
+        if (method_exists($repo, 'resolvePath')) {
+            try {
+                $path = $repo->resolvePath($path);
+            } catch (\Throwable) {
+                return null;
+            }
+        }
+
+        if (!is_string($path)) {
+            return null;
+        }
+
+        $path = trim($path);
+        if ($path === '' || str_contains($path, "\0")) {
+            return null;
+        }
+
+        return $path;
+    }
+
+    /**
+     * @param array<string,mixed> $payload
+     * @return array<string,mixed>
+     */
+    private static function agentCall(string $socketPath, array $payload): array
+    {
+        $socketPath = trim($socketPath);
+        if ($socketPath === '' || str_contains($socketPath, "\0")) {
+            throw new KeyManagerException('Crypto agent socket path is invalid.');
+        }
+
+        $endpoint = 'unix://' . $socketPath;
+        $errno = 0;
+        $errstr = '';
+        $fp = @stream_socket_client($endpoint, $errno, $errstr, (float) self::AGENT_TIMEOUT_SEC, STREAM_CLIENT_CONNECT);
+        if (!is_resource($fp)) {
+            throw new KeyManagerException('Crypto agent connect failed: ' . ($errstr !== '' ? $errstr : 'unknown'));
+        }
+
+        stream_set_timeout($fp, self::AGENT_TIMEOUT_SEC);
+
+        $json = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        if (!is_string($json)) {
+            fclose($fp);
+            throw new KeyManagerException('Crypto agent request JSON encode failed.');
+        }
+        if (strlen($json) > self::AGENT_MAX_REQ_BYTES) {
+            fclose($fp);
+            throw new KeyManagerException('Crypto agent request is too large.');
+        }
+
+        $written = @fwrite($fp, $json . "\n");
+        if ($written === false) {
+            fclose($fp);
+            throw new KeyManagerException('Crypto agent request write failed.');
+        }
+
+        $raw = stream_get_contents($fp, self::AGENT_MAX_RESP_BYTES + 1);
+        fclose($fp);
+
+        if (!is_string($raw) || $raw === '') {
+            throw new KeyManagerException('Crypto agent returned empty response.');
+        }
+        if (strlen($raw) > self::AGENT_MAX_RESP_BYTES) {
+            throw new KeyManagerException('Crypto agent response is too large.');
+        }
+
+        $raw = trim($raw);
+
+        try {
+            /** @var mixed $decoded */
+            $decoded = json_decode($raw, true, 512, JSON_THROW_ON_ERROR);
+        } catch (\JsonException $e) {
+            throw new KeyManagerException('Crypto agent returned invalid JSON.', 0, $e);
+        }
+
+        if (!is_array($decoded)) {
+            throw new KeyManagerException('Crypto agent response must decode to an object/array.');
+        }
+
+        /** @var array<string,mixed> $decoded */
+        return $decoded;
+    }
+
+    /**
+     * @return list<array{version:string,raw:string}>
+     */
+    private static function agentGetAllKeyEntries(string $basename, int $wantedLen): array
+    {
+        $socket = self::cryptoAgentSocketPathFromRuntimeConfig();
+        if ($socket === null) {
+            return [];
+        }
+
+        $basename = trim($basename);
+        if ($basename === '') {
+            return [];
+        }
+        if (str_contains($basename, "\0") || !preg_match('/^[a-z0-9_]{1,64}$/', $basename)) {
+            throw new KeyManagerException('Invalid key basename for crypto agent.');
+        }
+
+        $res = self::agentCall($socket, [
+            'op' => 'get_all_keys',
+            'basename' => $basename,
+        ]);
+
+        if (($res['ok'] ?? null) !== true) {
+            $err = is_string($res['error'] ?? null) ? (string) $res['error'] : 'unknown';
+            throw new KeyManagerException('Crypto agent error: ' . $err);
+        }
+
+        $items = $res['keys'] ?? null;
+        if (!is_array($items)) {
+            throw new KeyManagerException('Crypto agent protocol violation: missing keys list.');
+        }
+
+        $out = [];
+        foreach ($items as $i => $item) {
+            if (!is_array($item)) {
+                throw new KeyManagerException('Crypto agent protocol violation: keys[' . $i . '] must be an object.');
+            }
+
+            $ver = $item['version'] ?? null;
+            $b64 = $item['b64'] ?? null;
+            if (!is_string($ver) || !preg_match('/^v[0-9]+$/', $ver)) {
+                throw new KeyManagerException('Crypto agent protocol violation: invalid key version.');
+            }
+            if (!is_string($b64) || $b64 === '' || str_contains($b64, "\0")) {
+                throw new KeyManagerException('Crypto agent protocol violation: invalid key b64.');
+            }
+
+            $raw = base64_decode($b64, true);
+            if (!is_string($raw) || strlen($raw) !== $wantedLen) {
+                throw new KeyManagerException('Crypto agent returned key with invalid length.');
+            }
+
+            $out[] = ['version' => $ver, 'raw' => $raw];
+        }
+
+        return $out;
+    }
     
     public static function setLogger(?LoggerInterface $logger): void
     {
@@ -151,7 +337,12 @@ final class KeyManager
         $wantedLen = $expectedByteLen ?? self::keyByteLen();
         $keys = [];
 
-        if ($keysDir !== null && $basename !== '') {
+        $agentEntries = self::agentGetAllKeyEntries($basename, $wantedLen);
+        if ($agentEntries !== []) {
+            foreach ($agentEntries as $e) {
+                $keys[] = $e['raw'];
+            }
+        } elseif ($keysDir !== null && $basename !== '') {
             $versions = self::listKeyVersions($keysDir, $basename);
             foreach ($versions as $ver => $path) {
                 $raw = @file_get_contents($path);
@@ -377,6 +568,14 @@ final class KeyManager
         self::requireSodium();
         $wantedLen = $expectedByteLen ?? self::keyByteLen();
 
+        $agentEntries = self::agentGetAllKeyEntries($basename, $wantedLen);
+        if ($agentEntries !== []) {
+            $latest = $agentEntries[count($agentEntries) - 1] ?? null;
+            if (is_array($latest) && isset($latest['raw']) && is_string($latest['raw']) && strlen($latest['raw']) === $wantedLen) {
+                return base64_encode($latest['raw']);
+            }
+        }
+
         if ($keysDir !== null && $basename !== '') {
             $info = self::locateLatestKeyFile($keysDir, $basename);
             if ($info !== null) {
@@ -420,11 +619,36 @@ final class KeyManager
      */
     public static function getRawKeyBytes(string $envName, ?string $keysDir = null, string $basename = '', bool $generateIfMissing = false, ?int $expectedByteLen = null, ?string $version = null): array
     {
+        $wantedLen = $expectedByteLen ?? self::keyByteLen();
+
+        if ($basename !== '') {
+            $agentEntries = self::agentGetAllKeyEntries($basename, $wantedLen);
+            if ($agentEntries !== []) {
+                if ($generateIfMissing) {
+                    throw new KeyManagerException('generateIfMissing is not supported in crypto-agent mode.');
+                }
+
+                if ($version !== null) {
+                    $normalized = 'v' . (string) (int) ltrim($version, 'v');
+                    foreach ($agentEntries as $e) {
+                        if (($e['version'] ?? null) === $normalized) {
+                            return ['raw' => $e['raw'], 'version' => $normalized];
+                        }
+                    }
+
+                    throw new KeyManagerException('Requested key version not found via crypto agent: ' . $normalized);
+                }
+
+                $latest = $agentEntries[count($agentEntries) - 1] ?? null;
+                if (is_array($latest) && isset($latest['raw'], $latest['version']) && is_string($latest['raw']) && is_string($latest['version'])) {
+                    return ['raw' => $latest['raw'], 'version' => $latest['version']];
+                }
+            }
+        }
+
         if ($version !== null && $keysDir !== null && $basename !== '') {
             return self::getRawKeyBytesByVersion($envName, $keysDir, $basename, $version, $expectedByteLen);
         }
-
-        $wantedLen = $expectedByteLen ?? self::keyByteLen();
 
         // Obtain base64 representation (files/ENV) — getBase64Key is safe
         $b64 = self::getBase64Key($envName, $keysDir, $basename, $generateIfMissing, $wantedLen);
@@ -455,12 +679,25 @@ final class KeyManager
         self::guard('read');
         $version = ltrim($version, 'v'); // accept 'v2' or '2'
         $verStr = 'v' . (string)(int)$version;
+        $wantedLen = $expectedByteLen ?? self::keyByteLen();
+
+        if ($basename !== '') {
+            $agentEntries = self::agentGetAllKeyEntries($basename, $wantedLen);
+            if ($agentEntries !== []) {
+                foreach ($agentEntries as $e) {
+                    if (($e['version'] ?? null) === $verStr) {
+                        return ['raw' => $e['raw'], 'version' => $verStr];
+                    }
+                }
+                throw new KeyManagerException('Requested key version not found via crypto agent: ' . $verStr);
+            }
+        }
+
         $path = rtrim($keysDir, '/\\') . '/' . $basename . '_' . $verStr . '.key';
         if (!is_file($path)) {
             throw new KeyManagerException('Requested key version not found: ' . $path);
         }
         $raw = @file_get_contents($path);
-        $wantedLen = $expectedByteLen ?? self::keyByteLen();
         if ($raw === false || strlen($raw) !== $wantedLen) {
             throw new KeyManagerException('Key file invalid or wrong length: ' . $path);
         }
@@ -598,6 +835,33 @@ final class KeyManager
 
         $out = [];
         $expectedLen = self::keyByteLen();
+
+        $agentEntries = self::agentGetAllKeyEntries($basename, $expectedLen);
+        if ($agentEntries !== []) {
+            $count = 0;
+            for ($i = count($agentEntries) - 1; $i >= 0; $i--) {
+                if ($maxCandidates !== null && $count >= $maxCandidates) {
+                    break;
+                }
+
+                $entry = $agentEntries[$i] ?? null;
+                if (!is_array($entry) || !isset($entry['raw'], $entry['version']) || !is_string($entry['raw']) || !is_string($entry['version'])) {
+                    continue;
+                }
+
+                $h = hash_hmac('sha256', $data, $entry['raw'], true);
+                $out[] = ['version' => $entry['version'], 'hash' => $h];
+                $count++;
+
+                try {
+                    self::memzero($entry['raw']);
+                } catch (\Throwable $_) {
+                }
+            }
+
+            $cache[$cacheKey] = $out;
+            return $out;
+        }
 
         if ($keysDir !== null && $basename !== '') {
             $versions = [];
