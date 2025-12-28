@@ -161,6 +161,7 @@ final class TrustKernel
             /** @var 'strict'|'warn' $derivedEnforcement */
             $derivedEnforcement = 'strict';
             $requiresRuntimeConfigAttestation = false;
+            $runtimeConfigAttestationKeyForCheck = null;
             if (hash_equals(Bytes32::normalizeHex($this->config->policyHashV1), $activePolicyHash)) {
                 $policyOk = true;
                 $derivedEnforcement = 'strict';
@@ -174,10 +175,22 @@ final class TrustKernel
                 $policyOk = true;
                 $derivedEnforcement = 'strict';
                 $requiresRuntimeConfigAttestation = true;
+                $runtimeConfigAttestationKeyForCheck = $this->config->runtimeConfigAttestationKey;
             } elseif (hash_equals(Bytes32::normalizeHex($this->config->policyHashV3Warn), $activePolicyHash)) {
                 $policyOk = true;
                 $derivedEnforcement = 'warn';
                 $requiresRuntimeConfigAttestation = true;
+                $runtimeConfigAttestationKeyForCheck = $this->config->runtimeConfigAttestationKey;
+            } elseif (hash_equals(Bytes32::normalizeHex($this->config->policyHashV3StrictV2), $activePolicyHash)) {
+                $policyOk = true;
+                $derivedEnforcement = 'strict';
+                $requiresRuntimeConfigAttestation = true;
+                $runtimeConfigAttestationKeyForCheck = $this->config->runtimeConfigAttestationKeyV2;
+            } elseif (hash_equals(Bytes32::normalizeHex($this->config->policyHashV3WarnV2), $activePolicyHash)) {
+                $policyOk = true;
+                $derivedEnforcement = 'warn';
+                $requiresRuntimeConfigAttestation = true;
+                $runtimeConfigAttestationKeyForCheck = $this->config->runtimeConfigAttestationKeyV2;
             }
 
             if (!$policyOk) {
@@ -316,7 +329,8 @@ final class TrustKernel
                     if ($expected === null || $sourcePath === null) {
                         $addError('runtime_config_commitment_missing', 'Runtime config commitment is not available (missing sourcePath).');
                     } else {
-                        $key = Bytes32::normalizeHex($this->config->runtimeConfigAttestationKey);
+                        $keyRaw = $runtimeConfigAttestationKeyForCheck ?? $this->config->runtimeConfigAttestationKey;
+                        $key = Bytes32::normalizeHex($keyRaw);
                         $expectedNorm = Bytes32::normalizeHex($expected);
 
                         // Detect runtime config tamper: the on-disk file must remain equal to the config used for boot.

@@ -7,6 +7,7 @@ namespace BlackCat\Core\TrustKernel;
 final class TrustKernelConfig
 {
     private const RUNTIME_CONFIG_ATTESTATION_KEY_LABEL_V1 = 'blackcat.runtime_config.canonical_sha256.v1';
+    private const RUNTIME_CONFIG_ATTESTATION_KEY_LABEL_V2 = 'blackcat.runtime_config.canonical_sha256.v2';
 
     /** @var list<string> */
     public readonly array $rpcEndpoints;
@@ -35,9 +36,13 @@ final class TrustKernelConfig
     public readonly string $policyHashV2Warn;
     public readonly string $policyHashV3Strict;
     public readonly string $policyHashV3Warn;
+    public readonly string $policyHashV3StrictV2;
+    public readonly string $policyHashV3WarnV2;
 
     /** On-chain key (bytes32) used for runtime config commitment. */
     public readonly string $runtimeConfigAttestationKey;
+    /** Alternate on-chain key (bytes32) for runtime config commitment rotation (v2). */
+    public readonly string $runtimeConfigAttestationKeyV2;
     /** Canonical SHA-256 (bytes32) of the loaded runtime config (optional; only available when sourcePath is known). */
     public readonly ?string $runtimeConfigCanonicalSha256;
     /** Path of the runtime config file used to compute {@see self::$runtimeConfigCanonicalSha256}. */
@@ -100,8 +105,15 @@ final class TrustKernelConfig
         );
         $this->runtimeConfigAttestationKey = $runtimeConfigAttestationKey;
 
+        $runtimeConfigAttestationKeyV2 = Bytes32::normalizeHex(
+            '0x' . hash('sha256', self::RUNTIME_CONFIG_ATTESTATION_KEY_LABEL_V2)
+        );
+        $this->runtimeConfigAttestationKeyV2 = $runtimeConfigAttestationKeyV2;
+
         $this->policyHashV3Strict = (new TrustPolicyV3($mode, $maxStaleSec, 'strict', $this->runtimeConfigAttestationKey))->hashBytes32();
         $this->policyHashV3Warn = (new TrustPolicyV3($mode, $maxStaleSec, 'warn', $this->runtimeConfigAttestationKey))->hashBytes32();
+        $this->policyHashV3StrictV2 = (new TrustPolicyV3($mode, $maxStaleSec, 'strict', $this->runtimeConfigAttestationKeyV2))->hashBytes32();
+        $this->policyHashV3WarnV2 = (new TrustPolicyV3($mode, $maxStaleSec, 'warn', $this->runtimeConfigAttestationKeyV2))->hashBytes32();
 
         $this->runtimeConfigCanonicalSha256 = $runtimeConfigCanonicalSha256 !== null
             ? Bytes32::normalizeHex($runtimeConfigCanonicalSha256)
