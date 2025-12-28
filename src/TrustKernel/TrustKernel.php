@@ -10,6 +10,8 @@ use BlackCat\Core\Security\KeyManager;
 
 final class TrustKernel
 {
+    private const LAST_OK_STATE_FILENAME = 'trust.last_ok.v1.json';
+
     private Web3RpcQuorumClient $rpc;
     private InstanceControllerReader $controller;
     private ReleaseRegistryReader $releaseRegistry;
@@ -23,6 +25,11 @@ final class TrustKernel
 
     private ?TrustKernelStatus $lastOkStatus = null;
     private ?int $lastOkAt = null;
+
+    private ?string $lastOkRuntimeConfigSha256 = null;
+
+    private ?string $lastOkStatePath = null;
+    private ?int $lastOkStateMtime = null;
 
     /** @var 'strict'|'warn' */
     private string $effectiveEnforcement = 'strict';
@@ -43,6 +50,14 @@ final class TrustKernel
         $this->controller = new InstanceControllerReader($this->rpc);
         $this->releaseRegistry = new ReleaseRegistryReader($this->rpc);
         $this->integrity = new LocalIntegrityVerifier($config->integrityRootDir);
+
+        $sourcePath = $config->runtimeConfigSourcePath;
+        if (is_string($sourcePath) && $sourcePath !== '') {
+            $dir = dirname($sourcePath);
+            if ($dir !== '' && $dir !== '.' && !str_contains($dir, "\0")) {
+                $this->lastOkStatePath = $dir . DIRECTORY_SEPARATOR . self::LAST_OK_STATE_FILENAME;
+            }
+        }
     }
 
     public function installGuards(): void
@@ -94,6 +109,8 @@ final class TrustKernel
         if ($this->lastStatus !== null && $this->lastStatusAt !== null && ($now - $this->lastStatusAt) < 1) {
             return $this->lastStatus;
         }
+
+        $this->hydrateLastOkFromDiskIfAvailable();
 
         $errors = [];
         $errorCodes = [];
@@ -324,7 +341,50 @@ final class TrustKernel
                         $uriOk = hash_equals(Bytes32::normalizeHex($manifestUriHash), Bytes32::normalizeHex($lastOkUriHash));
                     }
 
-                    if ($rootOk && $uriOk) {
+                    $runtimeConfigOk = true;
+                    $lastOkPolicyHash = $this->lastOkStatus->snapshot?->activePolicyHash;
+                    if (is_string($lastOkPolicyHash)) {
+                        $policyNorm = Bytes32::normalizeHex($lastOkPolicyHash);
+                        $v3Strict = Bytes32::normalizeHex($this->config->policyHashV3Strict);
+                        $v3Warn = Bytes32::normalizeHex($this->config->policyHashV3Warn);
+                        $requiresV3 = hash_equals($v3Strict, $policyNorm) || hash_equals($v3Warn, $policyNorm);
+                        if ($requiresV3) {
+                            $expectedCfgSha = $this->lastOkRuntimeConfigSha256;
+                            $sourcePath = $this->config->runtimeConfigSourcePath;
+                            if ($expectedCfgSha === null || !is_string($sourcePath) || $sourcePath === '' || !is_file($sourcePath)) {
+                                $runtimeConfigOk = false;
+                                $addError('stale_runtime_config_missing', 'Stale-mode runtime config commitment is not available.');
+                            } else {
+                                clearstatcache(true, $sourcePath);
+                                $rawNow = @file_get_contents($sourcePath);
+                                if ($rawNow === false) {
+                                    $runtimeConfigOk = false;
+                                    $addError('stale_runtime_config_unreadable', 'Stale-mode runtime config file is not readable: ' . $sourcePath);
+                                } else {
+                                    try {
+                                        /** @var mixed $decodedNow */
+                                        $decodedNow = json_decode($rawNow, true, 512, JSON_THROW_ON_ERROR);
+                                        if (!is_array($decodedNow)) {
+                                            $runtimeConfigOk = false;
+                                            $addError('stale_runtime_config_invalid', 'Stale-mode runtime config JSON must decode to an object/array: ' . $sourcePath);
+                                        } else {
+                                            /** @var array<string,mixed> $decodedNow */
+                                            $currentCfgSha = CanonicalJson::sha256Bytes32($decodedNow);
+                                            $runtimeConfigOk = hash_equals(Bytes32::normalizeHex($expectedCfgSha), Bytes32::normalizeHex($currentCfgSha));
+                                            if (!$runtimeConfigOk) {
+                                                $addError('stale_runtime_config_mismatch', 'Stale-mode runtime config commitment mismatch.');
+                                            }
+                                        }
+                                    } catch (\JsonException $e) {
+                                        $runtimeConfigOk = false;
+                                        $addError('stale_runtime_config_invalid', 'Stale-mode runtime config JSON is invalid: ' . $sourcePath . ' (' . $e->getMessage() . ')');
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if ($rootOk && $uriOk && $runtimeConfigOk) {
                         $readAllowed = true;
                     }
                 } catch (\Throwable $e) {
@@ -354,9 +414,195 @@ final class TrustKernel
         $this->lastStatusAt = $now;
         if ($trustedNow) {
             $this->lastOkStatus = $status;
+            $this->persistLastOkToDiskBestEffort($status);
         }
 
         return $status;
+    }
+
+    private function hydrateLastOkFromDiskIfAvailable(): void
+    {
+        $path = $this->lastOkStatePath;
+        if ($path === null) {
+            return;
+        }
+
+        clearstatcache(true, $path);
+        if (!is_file($path)) {
+            return;
+        }
+
+        $mtime = @filemtime($path);
+        if (!is_int($mtime)) {
+            return;
+        }
+        if ($this->lastOkStateMtime !== null && $this->lastOkStateMtime === $mtime) {
+            return;
+        }
+
+        // Only consume a persisted "last OK" snapshot if the current runtime cannot modify it.
+        // This prevents an attacker with runtime code execution from forging a stale-trust bypass by
+        // writing a fake snapshot to disk.
+        //
+        // Note: root can always write, so treat uid=0 as "privileged writer" (safe to read).
+        $euid = null;
+        if (\function_exists('posix_geteuid')) {
+            $euid = @posix_geteuid();
+        }
+
+        $dir = dirname($path);
+        if (
+            $this->effectiveEnforcement === 'strict'
+            && $euid !== 0
+            && (is_writable($path) || ($dir !== '' && is_writable($dir)))
+        ) {
+            $this->lastOkStateMtime = $mtime;
+            return;
+        }
+
+        $raw = @file_get_contents($path);
+        if ($raw === false) {
+            $this->lastOkStateMtime = $mtime;
+            return;
+        }
+
+        try {
+            /** @var mixed $decoded */
+            $decoded = json_decode($raw, true, 32, JSON_THROW_ON_ERROR);
+        } catch (\JsonException) {
+            $this->lastOkStateMtime = $mtime;
+            return;
+        }
+
+        if (!is_array($decoded)) {
+            $this->lastOkStateMtime = $mtime;
+            return;
+        }
+
+        $version = $decoded['version'] ?? null;
+        $chainId = $decoded['chain_id'] ?? null;
+        $controller = $decoded['instance_controller'] ?? null;
+        $lastOkAt = $decoded['last_ok_at'] ?? null;
+        $runtimeConfigSha256 = $decoded['runtime_config_sha256'] ?? null;
+        $snapshotRaw = $decoded['snapshot'] ?? null;
+
+        if (!is_int($version) || $version !== 1) {
+            $this->lastOkStateMtime = $mtime;
+            return;
+        }
+        if (!is_int($chainId) || $chainId !== $this->config->chainId) {
+            $this->lastOkStateMtime = $mtime;
+            return;
+        }
+        if (!is_string($controller) || strtolower(trim($controller)) !== strtolower($this->config->instanceController)) {
+            $this->lastOkStateMtime = $mtime;
+            return;
+        }
+        if (!is_int($lastOkAt) || $lastOkAt <= 0) {
+            $this->lastOkStateMtime = $mtime;
+            return;
+        }
+        if (!is_array($snapshotRaw)) {
+            $this->lastOkStateMtime = $mtime;
+            return;
+        }
+
+        try {
+            $snapshot = new InstanceControllerSnapshot(
+                version: (int) ($snapshotRaw['version'] ?? 0),
+                paused: (bool) ($snapshotRaw['paused'] ?? false),
+                activeRoot: (string) ($snapshotRaw['active_root'] ?? ''),
+                activeUriHash: (string) ($snapshotRaw['active_uri_hash'] ?? ''),
+                activePolicyHash: (string) ($snapshotRaw['active_policy_hash'] ?? ''),
+                pendingRoot: (string) ($snapshotRaw['pending_root'] ?? ''),
+                pendingUriHash: (string) ($snapshotRaw['pending_uri_hash'] ?? ''),
+                pendingPolicyHash: (string) ($snapshotRaw['pending_policy_hash'] ?? ''),
+                pendingCreatedAt: (int) ($snapshotRaw['pending_created_at'] ?? 0),
+                pendingTtlSec: (int) ($snapshotRaw['pending_ttl_sec'] ?? 0),
+                genesisAt: (int) ($snapshotRaw['genesis_at'] ?? 0),
+                lastUpgradeAt: (int) ($snapshotRaw['last_upgrade_at'] ?? 0),
+            );
+        } catch (\Throwable) {
+            $this->lastOkStateMtime = $mtime;
+            return;
+        }
+
+        // Prefer the newest persisted snapshot (in case multiple sources update it).
+        if ($this->lastOkAt === null || $lastOkAt > $this->lastOkAt) {
+            $this->lastOkAt = $lastOkAt;
+            $this->lastOkRuntimeConfigSha256 = null;
+            if (is_string($runtimeConfigSha256) && $runtimeConfigSha256 !== '') {
+                try {
+                    $this->lastOkRuntimeConfigSha256 = Bytes32::normalizeHex($runtimeConfigSha256);
+                } catch (\Throwable) {
+                    $this->lastOkRuntimeConfigSha256 = null;
+                }
+            }
+            $this->lastOkStatus = new TrustKernelStatus(
+                enforcement: $this->effectiveEnforcement,
+                mode: $this->config->mode,
+                maxStaleSec: $this->config->maxStaleSec,
+                trustedNow: true,
+                readAllowed: true,
+                writeAllowed: true,
+                rpcOkNow: true,
+                paused: $snapshot->paused,
+                snapshot: $snapshot,
+                computedRoot: null,
+                checkedAt: $lastOkAt,
+                lastOkAt: $lastOkAt,
+                errors: [],
+                errorCodes: [],
+            );
+        }
+
+        $this->lastOkStateMtime = $mtime;
+    }
+
+    private function persistLastOkToDiskBestEffort(TrustKernelStatus $status): void
+    {
+        $path = $this->lastOkStatePath;
+        if ($path === null) {
+            return;
+        }
+
+        if (!$status->trustedNow || $status->snapshot === null || $this->lastOkAt === null) {
+            return;
+        }
+
+        $payload = [
+            'version' => 1,
+            'chain_id' => $this->config->chainId,
+            'instance_controller' => $this->config->instanceController,
+            'last_ok_at' => $this->lastOkAt,
+            'runtime_config_sha256' => $this->config->runtimeConfigCanonicalSha256,
+            'snapshot' => $status->snapshot->toArray(),
+        ];
+
+        try {
+            $json = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
+        } catch (\JsonException $e) {
+            $this->logger?->warning('[trust-kernel] unable to persist last-ok snapshot (json): ' . $e->getMessage());
+            return;
+        }
+
+        $dir = dirname($path);
+        $base = basename($path);
+        $tmp = $dir . DIRECTORY_SEPARATOR . '.' . $base . '.' . bin2hex(random_bytes(6)) . '.tmp';
+
+        try {
+            if (@file_put_contents($tmp, $json . "\n") === false) {
+                return;
+            }
+            @chmod($tmp, 0644);
+            if (!@rename($tmp, $path)) {
+                @unlink($tmp);
+                return;
+            }
+            $this->lastOkStateMtime = @filemtime($path) ?: $this->lastOkStateMtime;
+        } catch (\Throwable) {
+            @unlink($tmp);
+        }
     }
 
     public function assertReadAllowed(string $context = 'read'): void
