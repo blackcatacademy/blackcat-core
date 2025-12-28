@@ -76,8 +76,10 @@ final class DefaultWeb3Transport implements Web3TransportInterface
                 'header' => "Content-Type: application/json\r\nAccept: application/json\r\n",
                 'content' => $jsonBody,
                 'timeout' => $timeoutSec,
-                ],
-            ]);
+                'follow_location' => 0,
+                'max_redirects' => 0,
+            ],
+        ]);
 
         /** @var array<int,string>|null $http_response_header */
         $http_response_header = null;
