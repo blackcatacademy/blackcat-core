@@ -25,8 +25,10 @@ final class AuditChain
     private const LOCK_FILE = '.audit.lock';
     private const MAX_HEAD_BYTES = 64 * 1024; // 64 KiB (bounded read)
 
+    public readonly string $dir;
+
     public function __construct(
-        public readonly string $dir,
+        string $dir,
     ) {
         $dir = trim($dir);
         if ($dir === '' || str_contains($dir, "\0")) {
@@ -41,13 +43,35 @@ final class AuditChain
             throw new AuditChainException('Audit chain directory is not a usable directory: ' . $dir);
         }
 
-        if (!is_writable($dir)) {
+        $realDir = realpath($dir);
+        if (!is_string($realDir) || trim($realDir) === '') {
+            throw new AuditChainException('Audit chain directory realpath failed: ' . $dir);
+        }
+        $realDir = rtrim($realDir, '/\\');
+
+        if (!is_writable($realDir)) {
             throw new AuditChainException('Audit chain directory is not writable: ' . $dir);
+        }
+
+        // Refuse directories under the web document root (would expose audit logs over HTTP).
+        $docRoot = $_SERVER['DOCUMENT_ROOT'] ?? null;
+        if (is_string($docRoot)) {
+            $docRoot = trim($docRoot);
+            if ($docRoot !== '' && !str_contains($docRoot, "\0")) {
+                $docReal = realpath($docRoot);
+                if (is_string($docReal) && trim($docReal) !== '') {
+                    $docReal = rtrim($docReal, '/\\') . DIRECTORY_SEPARATOR;
+                    $dirPrefix = $realDir . DIRECTORY_SEPARATOR;
+                    if (str_starts_with($dirPrefix, $docReal)) {
+                        throw new AuditChainException('Audit chain directory must not be under DOCUMENT_ROOT: ' . $dir);
+                    }
+                }
+            }
         }
 
         // Basic hardening: the directory must not be world-writable.
         if (DIRECTORY_SEPARATOR !== '\\') {
-            $st = @stat($dir);
+            $st = @stat($realDir);
             if (is_array($st)) {
                 $mode = (int) ($st['mode'] ?? 0);
                 $perms = $mode & 0o777;
@@ -56,6 +80,8 @@ final class AuditChain
                 }
             }
         }
+
+        $this->dir = $realDir;
     }
 
     public static function fromRuntimeConfigBestEffort(): ?self

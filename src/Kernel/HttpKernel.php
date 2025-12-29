@@ -586,6 +586,8 @@ final class HttpKernel
         header('X-Frame-Options: DENY');
         header('Referrer-Policy: no-referrer');
         header('Permissions-Policy: geolocation=(), microphone=(), camera=()');
+        header('X-Permitted-Cross-Domain-Policies: none');
+        header('Origin-Agent-Cluster: ?1');
     }
 
     private static function sendHstsHeaderIfHttps(array $server, HttpKernelOptions $options): void
