@@ -29,6 +29,7 @@ final class TrustKernel
     private ?int $lastOkAt = null;
 
     private ?string $lastOkRuntimeConfigSha256 = null;
+    private ?string $lastOkHttpAllowedHostsSha256 = null;
     private ?string $lastOkComposerLockSha256 = null;
     private ?string $lastOkPhpFingerprintSha256 = null;
     private ?string $lastOkImageDigestSha256 = null;
@@ -180,6 +181,7 @@ final class TrustKernel
             $derivedEnforcement = 'strict';
             $requiresRuntimeConfigAttestation = false;
             $runtimeConfigAttestationKeyForCheck = null;
+            $requiresHttpAllowedHostsAttestation = false;
             $requiresComposerLockAttestation = false;
             $requiresPhpFingerprintAttestation = false;
             $requiresImageDigestAttestation = false;
@@ -241,6 +243,42 @@ final class TrustKernel
                 $derivedEnforcement = 'warn';
                 $requiresRuntimeConfigAttestation = true;
                 $runtimeConfigAttestationKeyForCheck = $this->config->runtimeConfigAttestationKeyV2;
+                $requiresComposerLockAttestation = true;
+                $requiresPhpFingerprintAttestation = true;
+                $requiresImageDigestAttestation = true;
+            } elseif (hash_equals(Bytes32::normalizeHex($this->config->policyHashV5Strict), $activePolicyHash)) {
+                $policyOk = true;
+                $derivedEnforcement = 'strict';
+                $requiresRuntimeConfigAttestation = true;
+                $runtimeConfigAttestationKeyForCheck = $this->config->runtimeConfigAttestationKey;
+                $requiresHttpAllowedHostsAttestation = true;
+                $requiresComposerLockAttestation = true;
+                $requiresPhpFingerprintAttestation = true;
+                $requiresImageDigestAttestation = true;
+            } elseif (hash_equals(Bytes32::normalizeHex($this->config->policyHashV5Warn), $activePolicyHash)) {
+                $policyOk = true;
+                $derivedEnforcement = 'warn';
+                $requiresRuntimeConfigAttestation = true;
+                $runtimeConfigAttestationKeyForCheck = $this->config->runtimeConfigAttestationKey;
+                $requiresHttpAllowedHostsAttestation = true;
+                $requiresComposerLockAttestation = true;
+                $requiresPhpFingerprintAttestation = true;
+                $requiresImageDigestAttestation = true;
+            } elseif (hash_equals(Bytes32::normalizeHex($this->config->policyHashV5StrictV2), $activePolicyHash)) {
+                $policyOk = true;
+                $derivedEnforcement = 'strict';
+                $requiresRuntimeConfigAttestation = true;
+                $runtimeConfigAttestationKeyForCheck = $this->config->runtimeConfigAttestationKeyV2;
+                $requiresHttpAllowedHostsAttestation = true;
+                $requiresComposerLockAttestation = true;
+                $requiresPhpFingerprintAttestation = true;
+                $requiresImageDigestAttestation = true;
+            } elseif (hash_equals(Bytes32::normalizeHex($this->config->policyHashV5WarnV2), $activePolicyHash)) {
+                $policyOk = true;
+                $derivedEnforcement = 'warn';
+                $requiresRuntimeConfigAttestation = true;
+                $runtimeConfigAttestationKeyForCheck = $this->config->runtimeConfigAttestationKeyV2;
+                $requiresHttpAllowedHostsAttestation = true;
                 $requiresComposerLockAttestation = true;
                 $requiresPhpFingerprintAttestation = true;
                 $requiresImageDigestAttestation = true;
@@ -424,6 +462,31 @@ final class TrustKernel
                 }
             }
 
+            // Optional hardening (policy v5): bind http.allowed_hosts via on-chain attestation.
+            if ($requiresHttpAllowedHostsAttestation) {
+                try {
+                    $expected = $this->config->httpAllowedHostsCanonicalSha256;
+                    if ($expected === null) {
+                        $addError('http_allowed_hosts_commitment_missing', 'HTTP allowed hosts commitment is not available.');
+                    } else {
+                        $key = Bytes32::normalizeHex($this->config->httpAllowedHostsAttestationKeyV1);
+                        $expectedNorm = Bytes32::normalizeHex($expected);
+
+                        $onChain = Bytes32::normalizeHex(
+                            $this->controller->attestation($this->config->instanceController, $key)
+                        );
+                        if (!hash_equals($expectedNorm, $onChain)) {
+                            $addError('http_allowed_hosts_commitment_mismatch', 'HTTP allowed hosts commitment mismatch.');
+                        }
+                        if (!$this->controller->attestationLocked($this->config->instanceController, $key)) {
+                            $addError('http_allowed_hosts_commitment_unlocked', 'HTTP allowed hosts commitment key is not locked.');
+                        }
+                    }
+                } catch (\Throwable $e) {
+                    $addError('http_allowed_hosts_attestation_failed', 'HTTP allowed hosts attestation check failed: ' . $e->getMessage());
+                }
+            }
+
             // Optional hardening (policy v4): bind additional provenance attestations.
             if ($requiresComposerLockAttestation || $requiresPhpFingerprintAttestation || $requiresImageDigestAttestation) {
                 try {
@@ -559,6 +622,7 @@ final class TrustKernel
 
                     $requiresRuntimeConfig = false;
                     $requiresV4Extra = false;
+                    $requiresHttpAllowedHosts = false;
 
                     $lastOkPolicyHash = $this->lastOkStatus->snapshot?->activePolicyHash;
                     if (is_string($lastOkPolicyHash) && trim($lastOkPolicyHash) !== '') {
@@ -587,6 +651,21 @@ final class TrustKernel
                             if (hash_equals($h, $policyNorm)) {
                                 $requiresRuntimeConfig = true;
                                 $requiresV4Extra = true;
+                                break;
+                            }
+                        }
+
+                        $v5 = [
+                            Bytes32::normalizeHex($this->config->policyHashV5Strict),
+                            Bytes32::normalizeHex($this->config->policyHashV5Warn),
+                            Bytes32::normalizeHex($this->config->policyHashV5StrictV2),
+                            Bytes32::normalizeHex($this->config->policyHashV5WarnV2),
+                        ];
+                        foreach ($v5 as $h) {
+                            if (hash_equals($h, $policyNorm)) {
+                                $requiresRuntimeConfig = true;
+                                $requiresV4Extra = true;
+                                $requiresHttpAllowedHosts = true;
                                 break;
                             }
                         }
@@ -680,6 +759,25 @@ final class TrustKernel
                         }
                     }
 
+                    if ($requiresHttpAllowedHosts) {
+                        $expectedHosts = $this->lastOkHttpAllowedHostsSha256;
+                        if ($expectedHosts === null) {
+                            $extraOk = false;
+                            $addError('stale_http_allowed_hosts_missing', 'Stale-mode HTTP allowed hosts commitment is not available.');
+                        } else {
+                            try {
+                                $current = $this->config->httpAllowedHostsCanonicalSha256;
+                                if ($current === null || !hash_equals(Bytes32::normalizeHex($expectedHosts), Bytes32::normalizeHex($current))) {
+                                    $extraOk = false;
+                                    $addError('stale_http_allowed_hosts_mismatch', 'Stale-mode HTTP allowed hosts commitment mismatch.');
+                                }
+                            } catch (\Throwable $e) {
+                                $extraOk = false;
+                                $addError('stale_http_allowed_hosts_failed', 'Stale-mode HTTP allowed hosts check failed: ' . $e->getMessage());
+                            }
+                        }
+                    }
+
                     if ($rootOk && $uriOk && $runtimeConfigOk && $extraOk) {
                         $readAllowed = true;
                     }
@@ -723,6 +821,9 @@ final class TrustKernel
             $this->lastOkComposerLockSha256 = is_string($computedComposerLockSha256) ? Bytes32::normalizeHex($computedComposerLockSha256) : null;
             $this->lastOkPhpFingerprintSha256 = is_string($computedPhpFingerprintSha256) ? Bytes32::normalizeHex($computedPhpFingerprintSha256) : null;
             $this->lastOkImageDigestSha256 = is_string($computedImageDigestSha256) ? Bytes32::normalizeHex($computedImageDigestSha256) : null;
+            $this->lastOkHttpAllowedHostsSha256 = is_string($this->config->httpAllowedHostsCanonicalSha256) && $this->config->httpAllowedHostsCanonicalSha256 !== ''
+                ? Bytes32::normalizeHex($this->config->httpAllowedHostsCanonicalSha256)
+                : null;
 
             $this->persistLastOkToDiskBestEffort($status);
         }
@@ -958,6 +1059,7 @@ final class TrustKernel
         $controller = $decoded['instance_controller'] ?? null;
         $lastOkAt = $decoded['last_ok_at'] ?? null;
         $runtimeConfigSha256 = $decoded['runtime_config_sha256'] ?? null;
+        $httpAllowedHostsSha256 = $decoded['http_allowed_hosts_sha256'] ?? null;
         $composerLockSha256 = $decoded['composer_lock_sha256'] ?? null;
         $phpFingerprintSha256 = $decoded['php_fingerprint_sha256'] ?? null;
         $imageDigestSha256 = $decoded['image_digest_sha256'] ?? null;
@@ -1042,6 +1144,15 @@ final class TrustKernel
                     $this->lastOkImageDigestSha256 = null;
                 }
             }
+
+            $this->lastOkHttpAllowedHostsSha256 = null;
+            if (is_string($httpAllowedHostsSha256) && $httpAllowedHostsSha256 !== '') {
+                try {
+                    $this->lastOkHttpAllowedHostsSha256 = Bytes32::normalizeHex($httpAllowedHostsSha256);
+                } catch (\Throwable) {
+                    $this->lastOkHttpAllowedHostsSha256 = null;
+                }
+            }
             $this->lastOkStatus = new TrustKernelStatus(
                 enforcement: $this->effectiveEnforcement,
                 mode: $this->config->mode,
@@ -1080,6 +1191,7 @@ final class TrustKernel
             'instance_controller' => $this->config->instanceController,
             'last_ok_at' => $this->lastOkAt,
             'runtime_config_sha256' => $this->lastOkRuntimeConfigSha256,
+            'http_allowed_hosts_sha256' => $this->lastOkHttpAllowedHostsSha256,
             'composer_lock_sha256' => $this->lastOkComposerLockSha256,
             'php_fingerprint_sha256' => $this->lastOkPhpFingerprintSha256,
             'image_digest_sha256' => $this->lastOkImageDigestSha256,

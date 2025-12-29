@@ -133,6 +133,19 @@ final class HttpKernel
             return self::genericErrorResponse(503);
         }
 
+        $allowedHosts = self::allowedHostsFromRuntimeConfig();
+        if ($allowedHosts !== []) {
+            $hostHeader = $server['HTTP_HOST'] ?? ($server['SERVER_NAME'] ?? null);
+            $host = is_string($hostHeader) ? self::normalizeHostHeader($hostHeader) : null;
+            $ok = $host !== null && self::isHostAllowed($host, $allowedHosts);
+            if (!$ok) {
+                $logger?->warning('[http-kernel] host rejected by allowlist.');
+                if ($status->enforcement === 'strict') {
+                    return self::genericErrorResponse(400);
+                }
+            }
+        }
+
         if ($options->checkTrustOnRequest && $status->enforcement === 'strict' && !$status->readAllowed) {
             $logger?->error('[http-kernel] trust kernel denied read on request entry.');
             return self::genericErrorResponse(503);
@@ -300,6 +313,145 @@ final class HttpKernel
         $add($b);
 
         return array_keys($out);
+    }
+
+    /**
+     * Read allowed hosts list from runtime config (`http.allowed_hosts`).
+     *
+     * @return list<string>
+     */
+    private static function allowedHostsFromRuntimeConfig(): array
+    {
+        $configClass = implode('\\', ['BlackCat', 'Config', 'Runtime', 'Config']);
+        if (!class_exists($configClass)) {
+            return [];
+        }
+
+        $isInitialized = false;
+        if (is_callable([$configClass, 'isInitialized'])) {
+            $method = 'isInitialized';
+            $isInitialized = (bool) $configClass::$method();
+        }
+        if (!$isInitialized || !is_callable([$configClass, 'get'])) {
+            return [];
+        }
+
+        $get = 'get';
+        /** @var mixed $raw */
+        $raw = $configClass::$get('http.allowed_hosts');
+        if (!is_array($raw)) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($raw as $v) {
+            if (!is_string($v)) {
+                continue;
+            }
+            $v = trim($v);
+            if ($v === '' || str_contains($v, "\0") || str_contains($v, "\r") || str_contains($v, "\n")) {
+                continue;
+            }
+
+            if (str_starts_with($v, '*.')) {
+                $suffix = strtolower(trim(substr($v, 2)));
+                if ($suffix === '' || str_contains($suffix, "\0")) {
+                    continue;
+                }
+                if (!preg_match('/^[a-z0-9.-]+$/', $suffix)) {
+                    continue;
+                }
+                if (str_contains($suffix, '..') || str_starts_with($suffix, '.') || str_ends_with($suffix, '.')) {
+                    continue;
+                }
+                $out['*.' . $suffix] = true;
+                continue;
+            }
+
+            $host = self::normalizeHostHeader($v);
+            if ($host === null) {
+                continue;
+            }
+            $out[$host] = true;
+        }
+
+        $list = array_keys($out);
+        sort($list, SORT_STRING);
+        return $list;
+    }
+
+    private static function normalizeHostHeader(string $hostHeader): ?string
+    {
+        $hostHeader = trim($hostHeader);
+        if ($hostHeader === '' || str_contains($hostHeader, "\0")) {
+            return null;
+        }
+
+        // Bracketed IPv6: [::1]:443
+        if (str_starts_with($hostHeader, '[')) {
+            $end = strpos($hostHeader, ']');
+            if ($end === false) {
+                return null;
+            }
+            $ipv6 = substr($hostHeader, 1, $end - 1);
+            if ($ipv6 === '') {
+                return null;
+            }
+            if (@filter_var($ipv6, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) === false) {
+                return null;
+            }
+            return strtolower($ipv6);
+        }
+
+        // Normalize "host:port" form (ignore port).
+        if (str_contains($hostHeader, ':')) {
+            [$h, $p] = explode(':', $hostHeader, 2) + [null, null];
+            if (!is_string($h)) {
+                return null;
+            }
+            $hostHeader = $h;
+        }
+
+        $host = strtolower(trim($hostHeader));
+        if ($host === '' || str_contains($host, "\0")) {
+            return null;
+        }
+
+        if (@filter_var($host, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4 | FILTER_FLAG_IPV6) !== false) {
+            return $host;
+        }
+
+        if (!preg_match('/^[a-z0-9.-]+$/', $host)) {
+            return null;
+        }
+        if (str_contains($host, '..') || str_starts_with($host, '.') || str_ends_with($host, '.')) {
+            return null;
+        }
+
+        return $host;
+    }
+
+    /**
+     * @param list<string> $allowedHosts Normalized host patterns.
+     */
+    private static function isHostAllowed(string $host, array $allowedHosts): bool
+    {
+        foreach ($allowedHosts as $pattern) {
+            if (!is_string($pattern)) {
+                continue;
+            }
+            if ($pattern === $host) {
+                return true;
+            }
+            if (str_starts_with($pattern, '*.')) {
+                $suffix = substr($pattern, 1); // ".example.com"
+                if ($suffix !== '' && str_ends_with($host, $suffix) && strlen($host) > strlen($suffix)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     /**

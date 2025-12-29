@@ -11,6 +11,7 @@ final class TrustKernelConfig
     private const COMPOSER_LOCK_ATTESTATION_KEY_LABEL_V1 = 'blackcat.composer.lock.canonical_sha256.v1';
     private const PHP_FINGERPRINT_ATTESTATION_KEY_LABEL_V2 = 'blackcat.php.fingerprint.canonical_sha256.v2';
     private const IMAGE_DIGEST_ATTESTATION_KEY_LABEL_V1 = 'blackcat.image.digest.sha256.v1';
+    private const HTTP_ALLOWED_HOSTS_ATTESTATION_KEY_LABEL_V1 = 'blackcat.http.allowed_hosts.canonical_sha256.v1';
 
     /** @var list<string> */
     public readonly array $rpcEndpoints;
@@ -45,6 +46,10 @@ final class TrustKernelConfig
     public readonly string $policyHashV4Warn;
     public readonly string $policyHashV4StrictV2;
     public readonly string $policyHashV4WarnV2;
+    public readonly string $policyHashV5Strict;
+    public readonly string $policyHashV5Warn;
+    public readonly string $policyHashV5StrictV2;
+    public readonly string $policyHashV5WarnV2;
 
     /** On-chain key (bytes32) used for runtime config commitment. */
     public readonly string $runtimeConfigAttestationKey;
@@ -56,8 +61,12 @@ final class TrustKernelConfig
     public readonly string $phpFingerprintAttestationKeyV2;
     /** On-chain key (bytes32) for image digest commitment (v1). */
     public readonly string $imageDigestAttestationKeyV1;
+    /** On-chain key (bytes32) for HTTP allowed hosts commitment (v1). */
+    public readonly string $httpAllowedHostsAttestationKeyV1;
     /** Canonical SHA-256 (bytes32) of the loaded runtime config (optional; only available when sourcePath is known). */
     public readonly ?string $runtimeConfigCanonicalSha256;
+    /** Canonical SHA-256 (bytes32) of normalized http.allowed_hosts list (optional). */
+    public readonly ?string $httpAllowedHostsCanonicalSha256;
     /** Path of the runtime config file used to compute {@see self::$runtimeConfigCanonicalSha256}. */
     public readonly ?string $runtimeConfigSourcePath;
     /** Optional image digest file path (used only for v4 attestation enforcement). */
@@ -79,6 +88,7 @@ final class TrustKernelConfig
         string $integrityManifestPath,
         int $rpcTimeoutSec,
         ?string $runtimeConfigCanonicalSha256 = null,
+        ?string $httpAllowedHostsCanonicalSha256 = null,
         ?string $runtimeConfigSourcePath = null,
         ?string $imageDigestFilePath = null,
     )
@@ -143,11 +153,36 @@ final class TrustKernelConfig
             '0x' . hash('sha256', self::IMAGE_DIGEST_ATTESTATION_KEY_LABEL_V1)
         );
 
+        $this->httpAllowedHostsAttestationKeyV1 = Bytes32::normalizeHex(
+            '0x' . hash('sha256', self::HTTP_ALLOWED_HOSTS_ATTESTATION_KEY_LABEL_V1)
+        );
+
         $this->policyHashV4Strict = (new TrustPolicyV4(
             $mode,
             $maxStaleSec,
             'strict',
             $this->runtimeConfigAttestationKey,
+            true,
+            true,
+            $this->composerLockAttestationKeyV1,
+            true,
+            true,
+            $this->phpFingerprintAttestationKeyV2,
+            true,
+            true,
+            $this->imageDigestAttestationKeyV1,
+            true,
+            true,
+        ))->hashBytes32();
+
+        $this->policyHashV5Strict = (new TrustPolicyV5(
+            $mode,
+            $maxStaleSec,
+            'strict',
+            $this->runtimeConfigAttestationKey,
+            $this->httpAllowedHostsAttestationKeyV1,
+            true,
+            true,
             true,
             true,
             $this->composerLockAttestationKeyV1,
@@ -179,11 +214,53 @@ final class TrustKernelConfig
             true,
         ))->hashBytes32();
 
+        $this->policyHashV5Warn = (new TrustPolicyV5(
+            $mode,
+            $maxStaleSec,
+            'warn',
+            $this->runtimeConfigAttestationKey,
+            $this->httpAllowedHostsAttestationKeyV1,
+            true,
+            true,
+            true,
+            true,
+            $this->composerLockAttestationKeyV1,
+            true,
+            true,
+            $this->phpFingerprintAttestationKeyV2,
+            true,
+            true,
+            $this->imageDigestAttestationKeyV1,
+            true,
+            true,
+        ))->hashBytes32();
+
         $this->policyHashV4StrictV2 = (new TrustPolicyV4(
             $mode,
             $maxStaleSec,
             'strict',
             $this->runtimeConfigAttestationKeyV2,
+            true,
+            true,
+            $this->composerLockAttestationKeyV1,
+            true,
+            true,
+            $this->phpFingerprintAttestationKeyV2,
+            true,
+            true,
+            $this->imageDigestAttestationKeyV1,
+            true,
+            true,
+        ))->hashBytes32();
+
+        $this->policyHashV5StrictV2 = (new TrustPolicyV5(
+            $mode,
+            $maxStaleSec,
+            'strict',
+            $this->runtimeConfigAttestationKeyV2,
+            $this->httpAllowedHostsAttestationKeyV1,
+            true,
+            true,
             true,
             true,
             $this->composerLockAttestationKeyV1,
@@ -215,8 +292,32 @@ final class TrustKernelConfig
             true,
         ))->hashBytes32();
 
+        $this->policyHashV5WarnV2 = (new TrustPolicyV5(
+            $mode,
+            $maxStaleSec,
+            'warn',
+            $this->runtimeConfigAttestationKeyV2,
+            $this->httpAllowedHostsAttestationKeyV1,
+            true,
+            true,
+            true,
+            true,
+            $this->composerLockAttestationKeyV1,
+            true,
+            true,
+            $this->phpFingerprintAttestationKeyV2,
+            true,
+            true,
+            $this->imageDigestAttestationKeyV1,
+            true,
+            true,
+        ))->hashBytes32();
+
         $this->runtimeConfigCanonicalSha256 = $runtimeConfigCanonicalSha256 !== null
             ? Bytes32::normalizeHex($runtimeConfigCanonicalSha256)
+            : null;
+        $this->httpAllowedHostsCanonicalSha256 = $httpAllowedHostsCanonicalSha256 !== null
+            ? Bytes32::normalizeHex($httpAllowedHostsCanonicalSha256)
             : null;
         $this->runtimeConfigSourcePath = $runtimeConfigSourcePath;
 
@@ -305,6 +406,7 @@ final class TrustKernelConfig
         }
 
         $runtimeConfigCanonicalSha256 = null;
+        $httpAllowedHostsCanonicalSha256 = null;
         $runtimeConfigSourcePath = $repo->sourcePath();
         if ($runtimeConfigSourcePath !== null && is_file($runtimeConfigSourcePath)) {
             $raw = @file_get_contents($runtimeConfigSourcePath);
@@ -325,6 +427,16 @@ final class TrustKernelConfig
 
             /** @var array<string,mixed> $decoded */
             $runtimeConfigCanonicalSha256 = CanonicalJson::sha256Bytes32($decoded);
+        }
+
+        $allowedHostsRaw = $repo->get('http.allowed_hosts');
+        $normalizedAllowedHosts = self::normalizeAllowedHostsList($allowedHostsRaw);
+        if ($normalizedAllowedHosts !== null) {
+            $httpAllowedHostsCanonicalSha256 = CanonicalJson::sha256Bytes32([
+                'schema_version' => 1,
+                'type' => 'blackcat.http.allowed_hosts',
+                'hosts' => $normalizedAllowedHosts,
+            ]);
         }
 
         $imageDigestFilePath = null;
@@ -348,9 +460,109 @@ final class TrustKernelConfig
             integrityManifestPath: $integrityManifestPath,
             rpcTimeoutSec: $timeoutSec,
             runtimeConfigCanonicalSha256: $runtimeConfigCanonicalSha256,
+            httpAllowedHostsCanonicalSha256: $httpAllowedHostsCanonicalSha256,
             runtimeConfigSourcePath: $runtimeConfigSourcePath,
             imageDigestFilePath: $imageDigestFilePath,
         );
+    }
+
+    /**
+     * @return list<string>|null Normalized patterns (lowercase, sorted, unique) or null when missing/invalid.
+     */
+    private static function normalizeAllowedHostsList(mixed $raw): ?array
+    {
+        if (!is_array($raw) || $raw === []) {
+            return null;
+        }
+
+        $out = [];
+        foreach ($raw as $v) {
+            if (!is_string($v)) {
+                continue;
+            }
+            $v = trim($v);
+            if ($v === '' || str_contains($v, "\0") || str_contains($v, "\r") || str_contains($v, "\n")) {
+                continue;
+            }
+
+            $isWildcard = str_starts_with($v, '*.');
+            if ($isWildcard) {
+                $suffix = substr($v, 2);
+                $suffix = strtolower(trim($suffix));
+                if ($suffix === '' || str_contains($suffix, "\0")) {
+                    continue;
+                }
+                if (!preg_match('/^[a-z0-9.-]+$/', $suffix)) {
+                    continue;
+                }
+                if (str_contains($suffix, '..') || str_starts_with($suffix, '.') || str_ends_with($suffix, '.')) {
+                    continue;
+                }
+                $out['*.' . $suffix] = true;
+                continue;
+            }
+
+            $host = self::normalizeHostLike($v);
+            if ($host === null) {
+                continue;
+            }
+            $out[$host] = true;
+        }
+
+        $list = array_keys($out);
+        sort($list, SORT_STRING);
+        return $list !== [] ? $list : null;
+    }
+
+    private static function normalizeHostLike(string $host): ?string
+    {
+        $host = trim($host);
+        if ($host === '' || str_contains($host, "\0")) {
+            return null;
+        }
+
+        // Accept bracketed IPv6 in config: [::1]:443 or [::1]
+        if (str_starts_with($host, '[')) {
+            $end = strpos($host, ']');
+            if ($end === false) {
+                return null;
+            }
+            $ipv6 = substr($host, 1, $end - 1);
+            if ($ipv6 === '') {
+                return null;
+            }
+            if (@filter_var($ipv6, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) === false) {
+                return null;
+            }
+            return strtolower($ipv6);
+        }
+
+        // Drop optional ":port" suffix.
+        if (str_contains($host, ':')) {
+            [$h, $p] = explode(':', $host, 2) + [null, null];
+            if (!is_string($h)) {
+                return null;
+            }
+            $host = $h;
+        }
+
+        $host = strtolower(trim($host));
+        if ($host === '' || str_contains($host, "\0")) {
+            return null;
+        }
+
+        if (@filter_var($host, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4 | FILTER_FLAG_IPV6) !== false) {
+            return $host;
+        }
+
+        if (!preg_match('/^[a-z0-9.-]+$/', $host)) {
+            return null;
+        }
+        if (str_contains($host, '..') || str_starts_with($host, '.') || str_ends_with($host, '.')) {
+            return null;
+        }
+
+        return $host;
     }
 
     private static function parseIntLike(mixed $value, string $key): int
