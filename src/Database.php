@@ -66,6 +66,9 @@ final class Database
     private bool $dangerousSqlGuard = false;
     // Guard: placeholder mismatch (warn only)
     private bool $placeholderGuard = false;
+    // SQL firewall: blocks obvious SQL injection escalation primitives (multi-statements, file IO, etc.).
+    /** @var 'strict'|'warn'|'off' */
+    private string $sqlFirewallMode = 'strict';
     // Observers + ring buffer of recent queries
     /** @var array<\BlackCat\Database\Support\QueryObserver> */
     private array $observers = [];
@@ -148,6 +151,11 @@ final class Database
      *   // Replica health-gate:
      *   'replicaMaxLagMs' => 250,                 // e.g. 250 ms
      *   'replicaHealthCheckSec' => 2
+     *   // SQL firewall (recommended):
+     *   //  - strict: throw on violations (default)
+     *   //  - warn: log and continue (dev only)
+     *   //  - off: disable (not recommended)
+     *   'sqlFirewallMode' => 'strict'|'warn'|'off',
      * ]
      */
     public static function init(array $config, ?LoggerInterface $logger = null): void
@@ -194,6 +202,10 @@ final class Database
         $inst->stickAfterWriteMs = max(0, $stickMs);
         $inst->replicaMaxLagMs = $replicaMaxLagMs;
         $inst->replicaHealthCheckSec = max(1, $replicaHealthCheckSec);
+        $fwMode = $config['sqlFirewallMode'] ?? 'strict';
+        if (is_bool($fwMode)) { $fwMode = $fwMode ? 'strict' : 'off'; }
+        if (!is_string($fwMode)) { $fwMode = 'strict'; }
+        $inst->setSqlFirewallMode($fwMode);
         if (is_string($dsn) && str_starts_with($dsn,'mysql:') && !str_contains($dsn,'charset=')) {
             $logger?->warning('DSN without charset=utf8mb4; consider adding it for MySQL.');
         }
@@ -222,12 +234,32 @@ final class Database
         try { $pdo->setAttribute(\PDO::ATTR_EMULATE_PREPARES, false); } catch (\Throwable) {}
         try { $pdo->setAttribute(\PDO::ATTR_DEFAULT_FETCH_MODE, \PDO::FETCH_ASSOC); } catch (\Throwable) {}
         try { $pdo->setAttribute(\PDO::ATTR_STRINGIFY_FETCHES, false); } catch (\Throwable) {}
+        try {
+            if ((string)$pdo->getAttribute(\PDO::ATTR_DRIVER_NAME) === 'mysql') {
+                if (defined('PDO::MYSQL_ATTR_MULTI_STATEMENTS')) {
+                    $pdo->setAttribute(\PDO::MYSQL_ATTR_MULTI_STATEMENTS, false);
+                }
+                if (defined('PDO::MYSQL_ATTR_LOCAL_INFILE')) {
+                    $pdo->setAttribute(\PDO::MYSQL_ATTR_LOCAL_INFILE, false);
+                }
+            }
+        } catch (\Throwable) {}
 
         if ($pdoRead instanceof \PDO) {
             try { $pdoRead->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION); } catch (\Throwable) {}
             try { $pdoRead->setAttribute(\PDO::ATTR_EMULATE_PREPARES, false); } catch (\Throwable) {}
             try { $pdoRead->setAttribute(\PDO::ATTR_DEFAULT_FETCH_MODE, \PDO::FETCH_ASSOC); } catch (\Throwable) {}
             try { $pdoRead->setAttribute(\PDO::ATTR_STRINGIFY_FETCHES, false); } catch (\Throwable) {}
+            try {
+                if ((string)$pdoRead->getAttribute(\PDO::ATTR_DRIVER_NAME) === 'mysql') {
+                    if (defined('PDO::MYSQL_ATTR_MULTI_STATEMENTS')) {
+                        $pdoRead->setAttribute(\PDO::MYSQL_ATTR_MULTI_STATEMENTS, false);
+                    }
+                    if (defined('PDO::MYSQL_ATTR_LOCAL_INFILE')) {
+                        $pdoRead->setAttribute(\PDO::MYSQL_ATTR_LOCAL_INFILE, false);
+                    }
+                }
+            } catch (\Throwable) {}
         }
 
         $inst = new self($config, $pdo, $logger, $pdoRead);
@@ -250,6 +282,10 @@ final class Database
         if ($requireSqlComment) {
             $inst->requireSqlComment(true);
         }
+        $fwMode = $config['sqlFirewallMode'] ?? 'strict';
+        if (is_bool($fwMode)) { $fwMode = $fwMode ? 'strict' : 'off'; }
+        if (!is_string($fwMode)) { $fwMode = 'strict'; }
+        $inst->setSqlFirewallMode($fwMode);
 
         self::$instance = $inst;
     }
@@ -270,9 +306,21 @@ final class Database
         if (is_string($dsn) && str_starts_with($dsn, 'mysql:') && defined('PDO::MYSQL_ATTR_USE_BUFFERED_QUERY')) {
             $options[\PDO::MYSQL_ATTR_USE_BUFFERED_QUERY] = false;
         }
+        if (is_string($dsn) && str_starts_with($dsn, 'mysql:') && defined('PDO::MYSQL_ATTR_MULTI_STATEMENTS')) {
+            $options[\PDO::MYSQL_ATTR_MULTI_STATEMENTS] = false;
+        }
+        if (is_string($dsn) && str_starts_with($dsn, 'mysql:') && defined('PDO::MYSQL_ATTR_LOCAL_INFILE')) {
+            $options[\PDO::MYSQL_ATTR_LOCAL_INFILE] = false;
+        }
         $pdo = new \PDO($dsn, $user, $pass, $options);
         if ($pdo->getAttribute(\PDO::ATTR_DRIVER_NAME) === 'mysql' && defined('PDO::MYSQL_ATTR_USE_BUFFERED_QUERY')) {
             $pdo->setAttribute(\PDO::MYSQL_ATTR_USE_BUFFERED_QUERY, false);
+        }
+        if ($pdo->getAttribute(\PDO::ATTR_DRIVER_NAME) === 'mysql' && defined('PDO::MYSQL_ATTR_MULTI_STATEMENTS')) {
+            $pdo->setAttribute(\PDO::MYSQL_ATTR_MULTI_STATEMENTS, false);
+        }
+        if ($pdo->getAttribute(\PDO::ATTR_DRIVER_NAME) === 'mysql' && defined('PDO::MYSQL_ATTR_LOCAL_INFILE')) {
+            $pdo->setAttribute(\PDO::MYSQL_ATTR_LOCAL_INFILE, false);
         }
 
         try {
@@ -518,6 +566,17 @@ final class Database
     public function enableAutoExplain(bool $on = true, bool $analyze = false): void { $this->autoExplain = $on; $this->autoExplainAnalyze = $analyze; }
     /** Enable placeholder/parameter mismatch guard (warns via logger). */
     public function enablePlaceholderGuard(bool $on = true): void { $this->placeholderGuard = $on; }
+    /** SQL firewall mode: strict|warn|off. */
+    public function setSqlFirewallMode(string $mode): void
+    {
+        $m = strtolower(trim($mode));
+        if (!in_array($m, ['strict', 'warn', 'off'], true)) {
+            throw new DatabaseException('Invalid sqlFirewallMode (expected strict|warn|off).');
+        }
+        $this->sqlFirewallMode = $m;
+    }
+    /** Returns SQL firewall mode. */
+    public function sqlFirewallMode(): string { return $this->sqlFirewallMode; }
     /** Adds a query observer (e.g. Prometheus/StatsD). */
     public function addObserver(\BlackCat\Database\Support\QueryObserver $obs): void { $this->observers[] = $obs; }
     /** Maximum size of the recent-queries ring buffer. */
@@ -1578,6 +1637,7 @@ final class Database
     public function prepareAndRun(string $sql, array $params = []): \PDOStatement
     {
         $this->circuitCheck();
+        $this->sqlFirewallGuard($sql);
         if ($this->requireSqlComment) {
             $trim = ltrim($sql);
             // Allow internal check/config commands without a comment.
@@ -1781,6 +1841,217 @@ final class Database
             $mapped = $this->mapPdoToDomainException($e, $msg);
             throw $mapped;
         }
+    }
+
+    private function sqlFirewallGuard(string $sql): void
+    {
+        if ($this->sqlFirewallMode === 'off') {
+            return;
+        }
+
+        $violations = $this->sqlFirewallViolations($sql);
+        if ($violations === []) {
+            return;
+        }
+
+        $msg = 'SQL firewall: blocked (' . implode(', ', $violations) . ')';
+        $ctx = [
+            'violations' => $violations,
+            'preview' => $this->sanitizeSqlPreview($sql),
+        ];
+
+        if ($this->sqlFirewallMode === 'warn') {
+            $this->logger?->warning($msg, $ctx);
+            return;
+        }
+
+        $this->logger?->error($msg, $ctx);
+        throw new DatabaseException($msg);
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function sqlFirewallViolations(string $sql): array
+    {
+        $san = $this->stripSqlLiteralsAndComments($sql);
+        $trim = rtrim($san);
+
+        $violations = [];
+
+        // Multi-statement guard (block "; ..." and multiple semicolons; allow a single trailing ';').
+        $firstSemi = strpos($trim, ';');
+        if ($firstSemi !== false) {
+            $lastSemi = strrpos($trim, ';');
+            $onlyTrailing = ($lastSemi === strlen($trim) - 1) && ($firstSemi === $lastSemi);
+            if (!$onlyTrailing) {
+                $violations[] = 'multi_statement';
+            }
+        }
+
+        $u = strtoupper($san);
+
+        // MySQL/MariaDB primitives commonly used to escalate SQL injection into file IO or time-based DoS.
+        if (preg_match('~\\bLOAD_FILE\\s*\\(~', $u)) $violations[] = 'load_file';
+        if (preg_match('~\\bINTO\\s+OUTFILE\\b~', $u)) $violations[] = 'into_outfile';
+        if (preg_match('~\\bINTO\\s+DUMPFILE\\b~', $u)) $violations[] = 'into_dumpfile';
+        if (preg_match('~\\bLOAD\\s+DATA\\b~', $u)) $violations[] = 'load_data';
+        if (preg_match('~\\bLOCAL\\s+INFILE\\b~', $u)) $violations[] = 'local_infile';
+        if (preg_match('~\\bBENCHMARK\\s*\\(~', $u)) $violations[] = 'benchmark';
+        if (preg_match('~\\bSLEEP\\s*\\(~', $u)) $violations[] = 'sleep';
+        if (preg_match('~\\bGET_LOCK\\s*\\(~', $u)) $violations[] = 'get_lock';
+
+        // Postgres: server-side COPY is a common escalation vector if DB creds are over-privileged.
+        if ($this->isPg() && preg_match('~^\\s*COPY\\b~i', $u)) {
+            $violations[] = 'copy';
+        }
+
+        return $violations;
+    }
+
+    private function stripSqlLiteralsAndComments(string $sql): string
+    {
+        $len = strlen($sql);
+        $out = '';
+
+        $NORMAL = 0;
+        $SINGLE = 1;
+        $DOUBLE = 2;
+        $BACKTICK = 3;
+        $LINE_COMMENT = 4;
+        $BLOCK_COMMENT = 5;
+
+        $state = $NORMAL;
+        for ($i = 0; $i < $len; $i++) {
+            $ch = $sql[$i];
+
+            if ($state === $NORMAL) {
+                if ($ch === "'") {
+                    $state = $SINGLE;
+                    $out .= ' ';
+                    continue;
+                }
+                if ($ch === '"') {
+                    $state = $DOUBLE;
+                    $out .= ' ';
+                    continue;
+                }
+                if ($ch === '`') {
+                    $state = $BACKTICK;
+                    $out .= ' ';
+                    continue;
+                }
+                if ($ch === '-' && ($i + 1) < $len && $sql[$i + 1] === '-') {
+                    $state = $LINE_COMMENT;
+                    $out .= '  ';
+                    $i++;
+                    continue;
+                }
+                if ($ch === '#') {
+                    $state = $LINE_COMMENT;
+                    $out .= ' ';
+                    continue;
+                }
+                if ($ch === '/' && ($i + 1) < $len && $sql[$i + 1] === '*') {
+                    $state = $BLOCK_COMMENT;
+                    $out .= '  ';
+                    $i++;
+                    continue;
+                }
+                $out .= $ch;
+                continue;
+            }
+
+            if ($state === $LINE_COMMENT) {
+                if ($ch === "\n" || $ch === "\r") {
+                    $state = $NORMAL;
+                    $out .= $ch;
+                    continue;
+                }
+                $out .= ' ';
+                continue;
+            }
+
+            if ($state === $BLOCK_COMMENT) {
+                if ($ch === '*' && ($i + 1) < $len && $sql[$i + 1] === '/') {
+                    $state = $NORMAL;
+                    $out .= '  ';
+                    $i++;
+                    continue;
+                }
+                $out .= ' ';
+                continue;
+            }
+
+            if ($state === $SINGLE) {
+                if ($ch === '\\') {
+                    $out .= ' ';
+                    if (($i + 1) < $len) {
+                        $out .= ' ';
+                        $i++;
+                    }
+                    continue;
+                }
+                if ($ch === "'") {
+                    if (($i + 1) < $len && $sql[$i + 1] === "'") {
+                        $out .= '  ';
+                        $i++;
+                        continue;
+                    }
+                    $state = $NORMAL;
+                    $out .= ' ';
+                    continue;
+                }
+                $out .= ' ';
+                continue;
+            }
+
+            if ($state === $DOUBLE) {
+                if ($ch === '\\') {
+                    $out .= ' ';
+                    if (($i + 1) < $len) {
+                        $out .= ' ';
+                        $i++;
+                    }
+                    continue;
+                }
+                if ($ch === '"') {
+                    if (($i + 1) < $len && $sql[$i + 1] === '"') {
+                        $out .= '  ';
+                        $i++;
+                        continue;
+                    }
+                    $state = $NORMAL;
+                    $out .= ' ';
+                    continue;
+                }
+                $out .= ' ';
+                continue;
+            }
+
+            // BACKTICK
+            if ($ch === '\\') {
+                $out .= ' ';
+                if (($i + 1) < $len) {
+                    $out .= ' ';
+                    $i++;
+                }
+                continue;
+            }
+            if ($ch === '`') {
+                if (($i + 1) < $len && $sql[$i + 1] === '`') {
+                    $out .= '  ';
+                    $i++;
+                    continue;
+                }
+                $state = $NORMAL;
+                $out .= ' ';
+                continue;
+            }
+            $out .= ' ';
+        }
+
+        return $out;
     }
 
     // query() unified with prepareAndRun(), so it does not bypass guards.
