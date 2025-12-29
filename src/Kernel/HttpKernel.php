@@ -387,6 +387,10 @@ final class HttpKernel
             return null;
         }
 
+        if (str_contains($hostHeader, '://') || str_contains($hostHeader, '/') || str_contains($hostHeader, '\\')) {
+            return null;
+        }
+
         // Bracketed IPv6: [::1]:443
         if (str_starts_with($hostHeader, '[')) {
             $end = strpos($hostHeader, ']');
@@ -400,13 +404,37 @@ final class HttpKernel
             if (@filter_var($ipv6, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) === false) {
                 return null;
             }
+
+            $rest = trim(substr($hostHeader, $end + 1));
+            if ($rest !== '') {
+                if (!str_starts_with($rest, ':')) {
+                    return null;
+                }
+                $port = trim(substr($rest, 1));
+                if ($port === '' || !ctype_digit($port)) {
+                    return null;
+                }
+                $portNum = (int) $port;
+                if ($portNum < 1 || $portNum > 65535) {
+                    return null;
+                }
+            }
+
             return strtolower($ipv6);
         }
 
         // Normalize "host:port" form (ignore port).
         if (str_contains($hostHeader, ':')) {
             [$h, $p] = explode(':', $hostHeader, 2) + [null, null];
-            if (!is_string($h)) {
+            if (!is_string($h) || !is_string($p)) {
+                return null;
+            }
+            $p = trim($p);
+            if ($p === '' || !ctype_digit($p)) {
+                return null;
+            }
+            $portNum = (int) $p;
+            if ($portNum < 1 || $portNum > 65535) {
                 return null;
             }
             $hostHeader = $h;

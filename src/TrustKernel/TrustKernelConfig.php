@@ -521,6 +521,10 @@ final class TrustKernelConfig
             return null;
         }
 
+        if (str_contains($host, '://') || str_contains($host, '/') || str_contains($host, '\\')) {
+            return null;
+        }
+
         // Accept bracketed IPv6 in config: [::1]:443 or [::1]
         if (str_starts_with($host, '[')) {
             $end = strpos($host, ']');
@@ -534,13 +538,37 @@ final class TrustKernelConfig
             if (@filter_var($ipv6, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) === false) {
                 return null;
             }
+
+            $rest = trim(substr($host, $end + 1));
+            if ($rest !== '') {
+                if (!str_starts_with($rest, ':')) {
+                    return null;
+                }
+                $port = trim(substr($rest, 1));
+                if ($port === '' || !ctype_digit($port)) {
+                    return null;
+                }
+                $portNum = (int) $port;
+                if ($portNum < 1 || $portNum > 65535) {
+                    return null;
+                }
+            }
+
             return strtolower($ipv6);
         }
 
         // Drop optional ":port" suffix.
         if (str_contains($host, ':')) {
             [$h, $p] = explode(':', $host, 2) + [null, null];
-            if (!is_string($h)) {
+            if (!is_string($h) || !is_string($p)) {
+                return null;
+            }
+            $p = trim($p);
+            if ($p === '' || !ctype_digit($p)) {
+                return null;
+            }
+            $portNum = (int) $p;
+            if ($portNum < 1 || $portNum > 65535) {
                 return null;
             }
             $host = $h;
