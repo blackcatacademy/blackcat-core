@@ -196,9 +196,10 @@ final class FileVaultAgentClient
             throw new FileVaultAgentException('FileVault agent socket path is invalid.');
         }
 
-        clearstatcache(true, $socketPath);
-        if (file_exists($socketPath) && is_link($socketPath)) {
-            throw new FileVaultAgentException('Refusing to connect to symlink socket path: ' . $socketPath);
+        try {
+            UnixSocketGuard::assertSafeUnixSocketPath($socketPath, UnixSocketGuard::defaultAllowedPrefixes());
+        } catch (\Throwable $e) {
+            throw new FileVaultAgentException('FileVault agent socket rejected: ' . $e->getMessage(), 0, $e);
         }
 
         $endpoint = 'unix://' . $socketPath;

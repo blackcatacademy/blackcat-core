@@ -28,5 +28,33 @@ final class KeyManagerTest extends TestCase
             @rmdir($dir);
         }
     }
-}
 
+    public function testListKeyVersionsSkipsSymlinks(): void
+    {
+        if (!function_exists('symlink')) {
+            self::markTestSkipped('symlink() is not available.');
+        }
+
+        $dir = sys_get_temp_dir() . '/blackcat-core-tests-' . bin2hex(random_bytes(6));
+        mkdir($dir, 0700, true);
+
+        try {
+            file_put_contents($dir . '/app_salt_v1.key', str_repeat('x', 32));
+
+            $target = $dir . '/app_salt_v1.key';
+            $link = $dir . '/app_salt_v2.key';
+            if (!@symlink($target, $link)) {
+                self::markTestSkipped('symlink creation failed (filesystem may not support it).');
+            }
+
+            $list = KeyManager::listKeyVersions($dir, 'app_salt');
+
+            self::assertSame(['v1'], array_keys($list));
+        } finally {
+            foreach (glob($dir . '/*') ?: [] as $f) {
+                @unlink($f);
+            }
+            @rmdir($dir);
+        }
+    }
+}

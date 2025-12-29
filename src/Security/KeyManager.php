@@ -141,6 +141,12 @@ final class KeyManager
             throw new KeyManagerException('Crypto agent socket path is invalid.');
         }
 
+        try {
+            UnixSocketGuard::assertSafeUnixSocketPath($socketPath, UnixSocketGuard::defaultAllowedPrefixes());
+        } catch (\Throwable $e) {
+            throw new KeyManagerException('Crypto agent socket rejected: ' . $e->getMessage(), 0, $e);
+        }
+
         $endpoint = 'unix://' . $socketPath;
         $errno = 0;
         $errstr = '';
@@ -493,6 +499,9 @@ final class KeyManager
     {
         self::guard('read');
         $wantedLen = $expectedByteLen ?? self::keyByteLen();
+        if ($wantedLen <= 0 || $wantedLen > 4096) {
+            throw new KeyManagerException('Expected key length out of allowed range.');
+        }
         $keys = [];
 
         $agentSocket = self::cryptoAgentSocketPathFromRuntimeConfig();
@@ -517,8 +526,16 @@ final class KeyManager
         if ($keysDir !== null && $basename !== '') {
             $versions = self::listKeyVersions($keysDir, $basename);
             foreach ($versions as $ver => $path) {
-                $raw = @file_get_contents($path);
-                if ($raw === false || strlen($raw) !== $wantedLen) {
+                clearstatcache(true, $path);
+                if (is_link($path)) {
+                    throw new KeyManagerException('Key file must not be a symlink: ' . $path);
+                }
+                if (!is_readable($path)) {
+                    throw new KeyManagerException('Key file is not readable: ' . $path);
+                }
+
+                $raw = @file_get_contents($path, false, null, 0, $wantedLen + 1);
+                if (!is_string($raw) || strlen($raw) !== $wantedLen) {
                     throw new KeyManagerException('Key file invalid length: ' . $path);
                 }
                 $keys[] = $raw;
@@ -685,7 +702,7 @@ final class KeyManager
         $pattern = rtrim($keysDir, '/\\') . '/' . $basename . '_v*.key';
         $out = [];
         foreach (glob($pattern) ?: [] as $p) {
-            if (!is_file($p)) continue;
+            if (!is_file($p) || is_link($p) || !is_readable($p)) continue;
             if (preg_match('/_v([0-9]+)\.key$/', $p, $m)) {
                 $ver = 'v' . (string)(int)$m[1];
                 $out[$ver] = $p;
@@ -739,6 +756,9 @@ final class KeyManager
         self::guard('read');
         self::requireSodium();
         $wantedLen = $expectedByteLen ?? self::keyByteLen();
+        if ($wantedLen <= 0 || $wantedLen > 4096) {
+            throw new KeyManagerException('Expected key length out of allowed range.');
+        }
 
         $agentSocket = self::cryptoAgentSocketPathFromRuntimeConfig();
         if ($agentSocket !== null && self::cryptoAgentIsKeyless()) {
@@ -763,8 +783,17 @@ final class KeyManager
         if ($keysDir !== null && $basename !== '') {
             $info = self::locateLatestKeyFile($keysDir, $basename);
             if ($info !== null) {
-                $raw = @file_get_contents($info['path']);
-                if ($raw === false || strlen($raw) !== $wantedLen) {
+                $path = $info['path'];
+                clearstatcache(true, $path);
+                if (is_link($path)) {
+                    throw new KeyManagerException('Key file must not be a symlink: ' . $path);
+                }
+                if (!is_readable($path)) {
+                    throw new KeyManagerException('Key file is not readable: ' . $path);
+                }
+
+                $raw = @file_get_contents($path, false, null, 0, $wantedLen + 1);
+                if (!is_string($raw) || strlen($raw) !== $wantedLen) {
                     throw new KeyManagerException('Key file exists but invalid length: ' . $info['path']);
                 }
                 return base64_encode($raw);
@@ -786,8 +815,17 @@ final class KeyManager
             }
             // use rotateKey to secure locking + auditing
             $res = self::rotateKey($basename, $keysDir, null, 5, false);
-            $raw = @file_get_contents($res['path']);
-            if ($raw === false || strlen($raw) !== $wantedLen) {
+            $path = $res['path'];
+            clearstatcache(true, $path);
+            if (is_link($path)) {
+                throw new KeyManagerException('Key file must not be a symlink: ' . $path);
+            }
+            if (!is_readable($path)) {
+                throw new KeyManagerException('Key file is not readable: ' . $path);
+            }
+
+            $raw = @file_get_contents($path, false, null, 0, $wantedLen + 1);
+            if (!is_string($raw) || strlen($raw) !== $wantedLen) {
                 throw new KeyManagerException('Failed to read generated key ' . $res['path']);
             }
             return base64_encode($raw);
@@ -805,6 +843,9 @@ final class KeyManager
     {
         self::guard('read');
         $wantedLen = $expectedByteLen ?? self::keyByteLen();
+        if ($wantedLen <= 0 || $wantedLen > 4096) {
+            throw new KeyManagerException('Expected key length out of allowed range.');
+        }
 
         $agentSocket = self::cryptoAgentSocketPathFromRuntimeConfig();
         if ($agentSocket !== null && self::cryptoAgentIsKeyless()) {
@@ -874,6 +915,9 @@ final class KeyManager
         $version = ltrim($version, 'v'); // accept 'v2' or '2'
         $verStr = 'v' . (string)(int)$version;
         $wantedLen = $expectedByteLen ?? self::keyByteLen();
+        if ($wantedLen <= 0 || $wantedLen > 4096) {
+            throw new KeyManagerException('Expected key length out of allowed range.');
+        }
 
         $agentSocket = self::cryptoAgentSocketPathFromRuntimeConfig();
         if ($agentSocket !== null && self::cryptoAgentIsKeyless()) {
@@ -900,8 +944,16 @@ final class KeyManager
         if (!is_file($path)) {
             throw new KeyManagerException('Requested key version not found: ' . $path);
         }
-        $raw = @file_get_contents($path);
-        if ($raw === false || strlen($raw) !== $wantedLen) {
+        clearstatcache(true, $path);
+        if (is_link($path)) {
+            throw new KeyManagerException('Key file must not be a symlink: ' . $path);
+        }
+        if (!is_readable($path)) {
+            throw new KeyManagerException('Key file is not readable: ' . $path);
+        }
+
+        $raw = @file_get_contents($path, false, null, 0, $wantedLen + 1);
+        if (!is_string($raw) || strlen($raw) !== $wantedLen) {
             throw new KeyManagerException('Key file invalid or wrong length: ' . $path);
         }
 

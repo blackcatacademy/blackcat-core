@@ -257,6 +257,11 @@ class FileCache implements LockingCacheInterface
     }
 
     private function safeFileRead(string $file): string|false {
+        clearstatcache(true, $file);
+        if (!is_file($file) || is_link($file) || !$this->isPathInCacheDir($file)) {
+            return false;
+        }
+
         $fp = @fopen($file, 'rb');
         if ($fp === false) return false;
         if (!flock($fp, LOCK_SH)) { fclose($fp); return false; }
@@ -335,7 +340,14 @@ class FileCache implements LockingCacheInterface
             @mkdir($locksDir, 0700, true);
             @chmod($locksDir, 0700);
         }
+        clearstatcache(true, $locksDir);
+        if (is_link($locksDir) || !$this->isPathInCacheDir($locksDir)) {
+            return null;
+        }
         $lockFile = $locksDir . DIRECTORY_SEPARATOR . $safe . '.lock';
+        if (is_link($lockFile)) {
+            return null;
+        }
         $token = bin2hex(random_bytes(16));
         $expireAt = time() + max(1, (int)$ttlSeconds);
         try {
@@ -356,22 +368,23 @@ class FileCache implements LockingCacheInterface
         }
 
         // if file exists, check if stale
-        if (is_file($lockFile) && is_readable($lockFile)) {
-            $raw = @file_get_contents($lockFile);
-            if ($raw !== false) {
-                $dec = @json_decode($raw, true);
-                if (is_array($dec) && isset($dec['expires']) && is_numeric($dec['expires'])) {
-                    if ((int)$dec['expires'] < time()) {
-                        // stale -> try to remove and acquire once more
+        $raw = $this->safeFileRead($lockFile);
+        if ($raw !== false) {
+            $dec = @json_decode($raw, true);
+            if (is_array($dec) && isset($dec['expires']) && is_numeric($dec['expires'])) {
+                if ((int)$dec['expires'] < time()) {
+                    // stale -> try to remove and acquire once more
+                    clearstatcache(true, $lockFile);
+                    if (@readlink($lockFile) === false && $this->isPathInCacheDir($lockFile)) {
                         @unlink($lockFile);
-                        $fp2 = @fopen($lockFile, 'x');
-                        if ($fp2 !== false) {
-                            fwrite($fp2, $payload);
-                            fflush($fp2);
-                            fclose($fp2);
-                            @chmod($lockFile, 0600);
-                            return $token;
-                        }
+                    }
+                    $fp2 = @fopen($lockFile, 'x');
+                    if ($fp2 !== false) {
+                        fwrite($fp2, $payload);
+                        fflush($fp2);
+                        fclose($fp2);
+                        @chmod($lockFile, 0600);
+                        return $token;
                     }
                 }
             }
@@ -388,8 +401,8 @@ class FileCache implements LockingCacheInterface
     {
         $safe = preg_replace('/[^A-Za-z0-9_\-]/', '_', self::substrSafe($name, 0, 64));
         $lockFile = $this->cacheDirReal . DIRECTORY_SEPARATOR . 'locks' . DIRECTORY_SEPARATOR . $safe . '.lock';
-        if (!is_file($lockFile) || !is_readable($lockFile)) return false;
-        $raw = @file_get_contents($lockFile);
+        if (!is_file($lockFile) || !is_readable($lockFile) || is_link($lockFile) || !$this->isPathInCacheDir($lockFile)) return false;
+        $raw = $this->safeFileRead($lockFile);
         if ($raw === false) return false;
         $dec = @json_decode($raw, true);
         if (!is_array($dec) || !isset($dec['token'])) return false;

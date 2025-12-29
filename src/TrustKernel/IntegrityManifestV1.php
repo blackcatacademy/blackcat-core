@@ -6,6 +6,8 @@ namespace BlackCat\Core\TrustKernel;
 
 final class IntegrityManifestV1
 {
+    private const MAX_MANIFEST_BYTES = 32 * 1024 * 1024; // 32 MiB
+
     /**
      * @param array<string,string> $files path => sha256 bytes32 hex
      */
@@ -22,9 +24,25 @@ final class IntegrityManifestV1
             throw new \InvalidArgumentException('Invalid manifest path.');
         }
 
-        $raw = file_get_contents($path);
-        if ($raw === false) {
+        clearstatcache(true, $path);
+        if (is_link($path)) {
+            throw new \RuntimeException('Integrity manifest must not be a symlink: ' . $path);
+        }
+        if (!is_file($path) || !is_readable($path)) {
             throw new \RuntimeException('Unable to read integrity manifest: ' . $path);
+        }
+
+        $size = @filesize($path);
+        if (is_int($size) && $size > self::MAX_MANIFEST_BYTES) {
+            throw new \RuntimeException('Integrity manifest is too large.');
+        }
+
+        $raw = @file_get_contents($path, false, null, 0, self::MAX_MANIFEST_BYTES + 1);
+        if (!is_string($raw) || $raw === '') {
+            throw new \RuntimeException('Unable to read integrity manifest: ' . $path);
+        }
+        if (strlen($raw) > self::MAX_MANIFEST_BYTES) {
+            throw new \RuntimeException('Integrity manifest is too large.');
         }
 
         try {
@@ -96,4 +114,3 @@ final class IntegrityManifestV1
         return Sha256Merkle::root($this->files);
     }
 }
-

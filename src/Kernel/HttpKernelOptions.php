@@ -11,6 +11,10 @@ final class HttpKernelOptions
 
     public bool $applyIniHardening = true;
     public bool $sendSecurityHeaders = true;
+    public bool $sendHstsHeader = true;
+    public int $hstsMaxAgeSec = 31536000;
+    public bool $hstsIncludeSubDomains = false;
+    public bool $hstsPreload = false;
 
     /**
      * Trusted reverse proxy peers (IP/CIDR).

@@ -497,24 +497,36 @@ final class TrustKernel
 
                         // Detect runtime config tamper: the on-disk file must remain equal to the config used for boot.
                         clearstatcache(true, $sourcePath);
-                        $rawNow = @file_get_contents($sourcePath);
-                        if ($rawNow === false) {
-                            $addError('runtime_config_source_unreadable', 'Runtime config file is not readable: ' . $sourcePath);
+                        if (is_link($sourcePath)) {
+                            $addError('runtime_config_source_symlink', 'Runtime config file must not be a symlink: ' . $sourcePath);
                         } else {
-                            try {
-                                /** @var mixed $decodedNow */
-                                $decodedNow = json_decode($rawNow, true, 512, JSON_THROW_ON_ERROR);
-                                if (!is_array($decodedNow)) {
-                                    $addError('runtime_config_source_invalid', 'Runtime config JSON must decode to an object/array: ' . $sourcePath);
+                            $maxBytes = 8 * 1024 * 1024; // 8 MiB
+                            $size = @filesize($sourcePath);
+                            if (is_int($size) && $size > $maxBytes) {
+                                $addError('runtime_config_source_too_large', 'Runtime config file is too large: ' . $sourcePath);
+                            } else {
+                                $rawNow = @file_get_contents($sourcePath, false, null, 0, $maxBytes + 1);
+                                if (!is_string($rawNow) || $rawNow === '') {
+                                    $addError('runtime_config_source_unreadable', 'Runtime config file is not readable: ' . $sourcePath);
+                                } elseif (strlen($rawNow) > $maxBytes) {
+                                    $addError('runtime_config_source_too_large', 'Runtime config file is too large: ' . $sourcePath);
                                 } else {
-                                    /** @var array<string,mixed> $decodedNow */
-                                    $current = CanonicalJson::sha256Bytes32($decodedNow);
-                                    if (!hash_equals($expectedNorm, Bytes32::normalizeHex($current))) {
-                                        $addError('runtime_config_source_changed', 'Runtime config file differs from the booted config (restart required).');
+                                    try {
+                                        /** @var mixed $decodedNow */
+                                        $decodedNow = json_decode($rawNow, true, 512, JSON_THROW_ON_ERROR);
+                                        if (!is_array($decodedNow)) {
+                                            $addError('runtime_config_source_invalid', 'Runtime config JSON must decode to an object/array: ' . $sourcePath);
+                                        } else {
+                                            /** @var array<string,mixed> $decodedNow */
+                                            $current = CanonicalJson::sha256Bytes32($decodedNow);
+                                            if (!hash_equals($expectedNorm, Bytes32::normalizeHex($current))) {
+                                                $addError('runtime_config_source_changed', 'Runtime config file differs from the booted config (restart required).');
+                                            }
+                                        }
+                                    } catch (\JsonException $e) {
+                                        $addError('runtime_config_source_invalid', 'Runtime config file JSON is invalid: ' . $sourcePath . ' (' . $e->getMessage() . ')');
                                     }
                                 }
-                            } catch (\JsonException $e) {
-                                $addError('runtime_config_source_invalid', 'Runtime config file JSON is invalid: ' . $sourcePath . ' (' . $e->getMessage() . ')');
                             }
                         }
 
@@ -750,28 +762,43 @@ final class TrustKernel
                             $addError('stale_runtime_config_missing', 'Stale-mode runtime config commitment is not available.');
                         } else {
                             clearstatcache(true, $sourcePath);
-                            $rawNow = @file_get_contents($sourcePath);
-                            if ($rawNow === false) {
+                            if (is_link($sourcePath)) {
                                 $runtimeConfigOk = false;
-                                $addError('stale_runtime_config_unreadable', 'Stale-mode runtime config file is not readable: ' . $sourcePath);
+                                $addError('stale_runtime_config_symlink', 'Stale-mode runtime config file must not be a symlink: ' . $sourcePath);
                             } else {
-                                try {
-                                    /** @var mixed $decodedNow */
-                                    $decodedNow = json_decode($rawNow, true, 512, JSON_THROW_ON_ERROR);
-                                    if (!is_array($decodedNow)) {
+                                $maxBytes = 8 * 1024 * 1024; // 8 MiB
+                                $size = @filesize($sourcePath);
+                                if (is_int($size) && $size > $maxBytes) {
+                                    $runtimeConfigOk = false;
+                                    $addError('stale_runtime_config_too_large', 'Stale-mode runtime config file is too large: ' . $sourcePath);
+                                } else {
+                                    $rawNow = @file_get_contents($sourcePath, false, null, 0, $maxBytes + 1);
+                                    if (!is_string($rawNow)) {
                                         $runtimeConfigOk = false;
-                                        $addError('stale_runtime_config_invalid', 'Stale-mode runtime config JSON must decode to an object/array: ' . $sourcePath);
+                                        $addError('stale_runtime_config_unreadable', 'Stale-mode runtime config file is not readable: ' . $sourcePath);
+                                    } elseif (strlen($rawNow) > $maxBytes) {
+                                        $runtimeConfigOk = false;
+                                        $addError('stale_runtime_config_too_large', 'Stale-mode runtime config file is too large: ' . $sourcePath);
                                     } else {
-                                        /** @var array<string,mixed> $decodedNow */
-                                        $currentCfgSha = CanonicalJson::sha256Bytes32($decodedNow);
-                                        $runtimeConfigOk = hash_equals(Bytes32::normalizeHex($expectedCfgSha), Bytes32::normalizeHex($currentCfgSha));
-                                        if (!$runtimeConfigOk) {
-                                            $addError('stale_runtime_config_mismatch', 'Stale-mode runtime config commitment mismatch.');
+                                        try {
+                                            /** @var mixed $decodedNow */
+                                            $decodedNow = json_decode($rawNow, true, 512, JSON_THROW_ON_ERROR);
+                                            if (!is_array($decodedNow)) {
+                                                $runtimeConfigOk = false;
+                                                $addError('stale_runtime_config_invalid', 'Stale-mode runtime config JSON must decode to an object/array: ' . $sourcePath);
+                                            } else {
+                                                /** @var array<string,mixed> $decodedNow */
+                                                $currentCfgSha = CanonicalJson::sha256Bytes32($decodedNow);
+                                                $runtimeConfigOk = hash_equals(Bytes32::normalizeHex($expectedCfgSha), Bytes32::normalizeHex($currentCfgSha));
+                                                if (!$runtimeConfigOk) {
+                                                    $addError('stale_runtime_config_mismatch', 'Stale-mode runtime config commitment mismatch.');
+                                                }
+                                            }
+                                        } catch (\JsonException $e) {
+                                            $runtimeConfigOk = false;
+                                            $addError('stale_runtime_config_invalid', 'Stale-mode runtime config JSON is invalid: ' . $sourcePath . ' (' . $e->getMessage() . ')');
                                         }
                                     }
-                                } catch (\JsonException $e) {
-                                    $runtimeConfigOk = false;
-                                    $addError('stale_runtime_config_invalid', 'Stale-mode runtime config JSON is invalid: ' . $sourcePath . ' (' . $e->getMessage() . ')');
                                 }
                             }
                         }
@@ -918,14 +945,18 @@ final class TrustKernel
             throw new TrustKernelException('composer.lock is not readable: ' . $path);
         }
 
+        $maxBytes = 8 * 1024 * 1024;
         $size = @filesize($path);
-        if (is_int($size) && $size > 8 * 1024 * 1024) {
+        if (is_int($size) && $size > $maxBytes) {
             throw new TrustKernelException('composer.lock is too large.');
         }
 
-        $raw = @file_get_contents($path);
-        if ($raw === false) {
+        $raw = @file_get_contents($path, false, null, 0, $maxBytes + 1);
+        if (!is_string($raw)) {
             throw new TrustKernelException('Unable to read composer.lock.');
+        }
+        if (strlen($raw) > $maxBytes) {
+            throw new TrustKernelException('composer.lock is too large.');
         }
 
         try {
@@ -980,9 +1011,18 @@ final class TrustKernel
             throw new TrustKernelException('Image digest file is not readable: ' . $path);
         }
 
-        $raw = @file_get_contents($path);
-        if ($raw === false) {
+        $maxBytes = 4096;
+        $size = @filesize($path);
+        if (is_int($size) && $size > $maxBytes) {
+            throw new TrustKernelException('Image digest file is too large.');
+        }
+
+        $raw = @file_get_contents($path, false, null, 0, $maxBytes + 1);
+        if (!is_string($raw)) {
             throw new TrustKernelException('Unable to read image digest file.');
+        }
+        if (strlen($raw) > $maxBytes) {
+            throw new TrustKernelException('Image digest file is too large.');
         }
 
         $digest = trim($raw);
@@ -1208,8 +1248,15 @@ final class TrustKernel
             }
         }
 
-        $raw = @file_get_contents($path);
-        if ($raw === false) {
+        $maxBytes = 64 * 1024;
+        $size = @filesize($path);
+        if (is_int($size) && $size > $maxBytes) {
+            $this->lastOkStateMtime = $mtime;
+            return;
+        }
+
+        $raw = @file_get_contents($path, false, null, 0, $maxBytes + 1);
+        if (!is_string($raw) || strlen($raw) > $maxBytes) {
             $this->lastOkStateMtime = $mtime;
             return;
         }

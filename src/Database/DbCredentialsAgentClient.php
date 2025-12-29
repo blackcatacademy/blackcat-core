@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BlackCat\Core\Database;
 
+use BlackCat\Core\Security\UnixSocketGuard;
 use BlackCat\Core\TrustKernel\TrustKernelException;
 
 final class DbCredentialsAgentException extends \RuntimeException {}
@@ -152,9 +153,10 @@ final class DbCredentialsAgentClient
             throw new DbCredentialsAgentException('DB credentials agent socket path is invalid.');
         }
 
-        clearstatcache(true, $socketPath);
-        if (file_exists($socketPath) && is_link($socketPath)) {
-            throw new DbCredentialsAgentException('Refusing to connect to symlink socket path: ' . $socketPath);
+        try {
+            UnixSocketGuard::assertSafeUnixSocketPath($socketPath, UnixSocketGuard::defaultAllowedPrefixes());
+        } catch (\Throwable $e) {
+            throw new DbCredentialsAgentException('DB credentials agent socket rejected: ' . $e->getMessage(), 0, $e);
         }
 
         $endpoint = 'unix://' . $socketPath;

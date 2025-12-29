@@ -82,7 +82,7 @@ final class HttpKernel
         ?Web3TransportInterface $transport = null,
     ): HttpKernelContext|HttpKernelResponse {
         if ($options->applyIniHardening) {
-            self::applyIniHardening();
+            self::applyIniHardening($server);
         }
 
         if ($options->sendSecurityHeaders) {
@@ -118,6 +118,8 @@ final class HttpKernel
                 if ($options->honorTrustedForwardedProto && TrustedProxyGuard::isForwardedHttpsFromTrustedProxy($server, $trustedProxies)) {
                     // Best-effort: make downstream code treat the request as HTTPS when behind a trusted proxy.
                     // Never downgrade HTTPS to HTTP based on forwarded headers.
+                    $server['HTTPS'] = 'on';
+                    $server['SERVER_PORT'] = '443';
                     $_SERVER['HTTPS'] = 'on';
                     $_SERVER['SERVER_PORT'] = '443';
                 }
@@ -125,6 +127,15 @@ final class HttpKernel
                 $logger?->warning('[http-kernel] forwarded headers rejected: ' . $e->getMessage());
                 return self::genericErrorResponse(400);
             }
+        }
+
+        if ($options->applyIniHardening) {
+            // Re-apply cookie hardening after proxy HTTPS normalization.
+            self::applyIniHardening($server);
+        }
+
+        if ($options->sendHstsHeader) {
+            self::sendHstsHeaderIfHttps($server, $options);
         }
 
         $status = $kernel->check();
@@ -534,7 +545,15 @@ final class HttpKernel
         return $out;
     }
 
-    private static function applyIniHardening(): void
+    /**
+     * Apply best-effort php.ini hardening for HTTP runtimes.
+     *
+     * Note: this does not attempt to override security-critical php.ini settings (those are enforced
+     * by RuntimeDoctor + TrustKernel gates). This is only "defense-in-depth" for common defaults.
+     *
+     * @param array<string,mixed> $server
+     */
+    private static function applyIniHardening(array $server): void
     {
         @ini_set('display_errors', '0');
         @ini_set('display_startup_errors', '0');
@@ -545,6 +564,12 @@ final class HttpKernel
         @ini_set('session.use_only_cookies', '1');
         @ini_set('session.use_trans_sid', '0');
         @ini_set('session.cookie_httponly', '1');
+        @ini_set('session.cookie_samesite', 'Lax');
+
+        // Only set cookie_secure when the request is HTTPS (or trusted-proxy normalized to HTTPS).
+        if (self::isHttpsRequest($server)) {
+            @ini_set('session.cookie_secure', '1');
+        }
     }
 
     private static function sendSecurityHeaders(): void
@@ -561,6 +586,64 @@ final class HttpKernel
         header('X-Frame-Options: DENY');
         header('Referrer-Policy: no-referrer');
         header('Permissions-Policy: geolocation=(), microphone=(), camera=()');
+    }
+
+    private static function sendHstsHeaderIfHttps(array $server, HttpKernelOptions $options): void
+    {
+        if (headers_sent()) {
+            return;
+        }
+        if (!self::isHttpsRequest($server)) {
+            return;
+        }
+
+        $maxAge = (int) $options->hstsMaxAgeSec;
+        if ($maxAge < 0) {
+            $maxAge = 0;
+        }
+        if ($maxAge > 31536000 * 10) {
+            $maxAge = 31536000 * 10;
+        }
+
+        $value = 'max-age=' . $maxAge;
+        if ($options->hstsIncludeSubDomains) {
+            $value .= '; includeSubDomains';
+        }
+        if ($options->hstsPreload) {
+            $value .= '; preload';
+        }
+
+        header('Strict-Transport-Security: ' . $value);
+    }
+
+    /**
+     * @param array<string,mixed> $server
+     */
+    private static function isHttpsRequest(array $server): bool
+    {
+        $https = $server['HTTPS'] ?? null;
+        if ($https === true) {
+            return true;
+        }
+        if (is_string($https)) {
+            $v = strtolower(trim($https));
+            if ($v === 'on' || $v === '1' || $v === 'true') {
+                return true;
+            }
+        }
+        if (is_int($https) && $https === 1) {
+            return true;
+        }
+
+        $port = $server['SERVER_PORT'] ?? null;
+        if (is_int($port) && $port === 443) {
+            return true;
+        }
+        if (is_string($port) && trim($port) === '443') {
+            return true;
+        }
+
+        return false;
     }
 
     private static function genericErrorResponse(int $status): HttpKernelResponse

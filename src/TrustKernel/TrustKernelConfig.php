@@ -409,9 +409,26 @@ final class TrustKernelConfig
         $httpAllowedHostsCanonicalSha256 = null;
         $runtimeConfigSourcePath = $repo->sourcePath();
         if ($runtimeConfigSourcePath !== null && is_file($runtimeConfigSourcePath)) {
-            $raw = @file_get_contents($runtimeConfigSourcePath);
-            if ($raw === false) {
+            clearstatcache(true, $runtimeConfigSourcePath);
+            if (is_link($runtimeConfigSourcePath)) {
+                throw new \RuntimeException('Runtime config source file must not be a symlink: ' . $runtimeConfigSourcePath);
+            }
+            if (!is_readable($runtimeConfigSourcePath)) {
                 throw new \RuntimeException('Unable to read runtime config file: ' . $runtimeConfigSourcePath);
+            }
+
+            $maxBytes = 8 * 1024 * 1024; // 8 MiB (runtime config JSON should be small)
+            $size = @filesize($runtimeConfigSourcePath);
+            if (is_int($size) && $size > $maxBytes) {
+                throw new \RuntimeException('Runtime config file is too large.');
+            }
+
+            $raw = @file_get_contents($runtimeConfigSourcePath, false, null, 0, $maxBytes + 1);
+            if (!is_string($raw) || $raw === '') {
+                throw new \RuntimeException('Unable to read runtime config file: ' . $runtimeConfigSourcePath);
+            }
+            if (strlen($raw) > $maxBytes) {
+                throw new \RuntimeException('Runtime config file is too large.');
             }
 
             try {

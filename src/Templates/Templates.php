@@ -359,7 +359,7 @@ class Templates
         }
 
         try {
-            return self::internalRender($candidate, $esc);
+            return self::internalRender($real, $esc);
         } catch (\Throwable $e) {
             if ($debug) {
                 throw $e;

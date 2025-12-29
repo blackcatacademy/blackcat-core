@@ -96,12 +96,33 @@ final class AuditLogger
     private static function fileFallback(string $timestamp, string $actorId, string $action, string $payloadEnc, string $keyVersion, array $meta): bool
     {
         $auditDir = self::resolveAuditDir();
+        $auditDir = rtrim($auditDir, DIRECTORY_SEPARATOR);
+        if ($auditDir === '' || str_contains($auditDir, "\0")) {
+            throw new \RuntimeException('AuditLogger: invalid audit dir');
+        }
+        if (is_link($auditDir)) {
+            throw new \RuntimeException('AuditLogger: audit dir must not be a symlink: ' . $auditDir);
+        }
         // ensure dir exists
         if (!is_dir($auditDir)) {
             if (!@mkdir($auditDir, 0700, true) && !is_dir($auditDir)) {
                 throw new \RuntimeException('AuditLogger: failed to create audit dir: ' . $auditDir);
             }
             @chmod($auditDir, 0700);
+        }
+        clearstatcache(true, $auditDir);
+        if (@readlink($auditDir) !== false) {
+            throw new \RuntimeException('AuditLogger: audit dir must not be a symlink: ' . $auditDir);
+        }
+        if (DIRECTORY_SEPARATOR !== '\\') {
+            $st = @stat($auditDir);
+            if (is_array($st)) {
+                $mode = (int) ($st['mode'] ?? 0);
+                $perms = $mode & 0o777;
+                if (($perms & 0o002) !== 0) {
+                    throw new \RuntimeException('AuditLogger: audit dir must not be world-writable: ' . $auditDir);
+                }
+            }
         }
 
         $entry = [
@@ -148,6 +169,9 @@ final class AuditLogger
         }
 
         $final = $auditDir . DIRECTORY_SEPARATOR . 'audit.log';
+        if (is_link($final)) {
+            throw new \RuntimeException('AuditLogger: refusing symlink audit.log: ' . $final);
+        }
 
         // If final doesn't exist, try rename (atomic create)
         if (!file_exists($final)) {
@@ -183,6 +207,9 @@ final class AuditLogger
      */
     private static function appendFile(string $file, string $line): bool
     {
+        if (is_link($file)) {
+            return false;
+        }
         $fp = @fopen($file, 'cb');
         if ($fp === false) return false;
         $ok = false;
