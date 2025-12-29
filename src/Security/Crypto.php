@@ -24,12 +24,14 @@ final class Crypto
     /** @var string|null Primary key (newest) for encryption */
     private static ?string $primaryKey = null;
     private static ?string $keysDir = null;
+    private static bool $keylessAgentEnabled = false;
 
     /** Optional PSR-3 logger */
     private static ?LoggerInterface $logger = null;
 
     private const VERSION = 1;
     private const AD = 'app:crypto:v1';
+    private const KEY_BASENAME = 'crypto_key';
     private const BRIDGE_DEFAULT_SLOT = 'crypto.default';
     private const BRIDGE_CSRF_SLOT = 'hmac.csrf';
 
@@ -107,15 +109,29 @@ final class Crypto
     {
         KeyManager::requireSodium();
 
+        // Re-init safety: wipe any previously loaded keys (best-effort).
+        self::clearKey();
+
         if ($logger !== null) {
             self::setLogger($logger);
             KeyManager::setLogger($logger); // also set to KeyManager so it can log if needed
         }
 
         self::$keysDir = $keysDir;
+        self::$keylessAgentEnabled = false;
+
+        // Keyless crypto-agent mode: do not load raw key bytes into the web runtime.
+        if (class_exists(CryptoAgentClient::class) && CryptoAgentClient::isKeylessMode()) {
+            self::$keys = [];
+            self::$primaryKey = null;
+            self::$bridgeEnabled = false;
+            self::$keylessAgentEnabled = true;
+            self::logDebug('Crypto initialized (keyless agent)');
+            return;
+        }
 
         // prefer 'crypto_key' basename, env var APP_CRYPTO_KEY
-        $keys = KeyManager::getAllRawKeys('APP_CRYPTO_KEY', self::$keysDir, 'crypto_key');
+        $keys = KeyManager::getAllRawKeys('APP_CRYPTO_KEY', self::$keysDir, self::KEY_BASENAME);
         if (empty($keys)) {
             throw new RuntimeException('Crypto init failed: no crypto keys available (KeyManager).');
         }
@@ -181,6 +197,7 @@ final class Crypto
 
         self::$keys = [];
         self::$primaryKey = null;
+        self::$keylessAgentEnabled = false;
         self::logDebug('Crypto cleared keys');
 
         $bridgeClass = 'BlackCat\\Crypto\\Bridge\\CoreCryptoBridge';
@@ -204,17 +221,25 @@ final class Crypto
     {
         KeyManager::requireSodium();
         KeyManager::assertAccessAllowed('read');
-        if (self::$primaryKey === null) {
+        if (!self::$keylessAgentEnabled && self::$primaryKey === null) {
             throw new RuntimeException('Crypto::encrypt called but Crypto not initialized.');
+        }
+
+        if ($outFormat !== 'binary' && $outFormat !== 'compact_base64') {
+            throw new \InvalidArgumentException('Unsupported outFormat');
+        }
+
+        if (self::$keylessAgentEnabled) {
+            $cipherB64 = CryptoAgentClient::encrypt(self::KEY_BASENAME, $plaintext);
+            if ($outFormat === 'compact_base64') {
+                return $cipherB64;
+            }
+            return self::compactBase64ToVersionedBinary($cipherB64);
         }
 
         $expectedLen = KeyManager::keyByteLen();
         if (!is_string(self::$primaryKey) || strlen(self::$primaryKey) !== $expectedLen) {
             throw new RuntimeException('Crypto::encrypt: invalid primary key length.');
-        }
-
-        if ($outFormat !== 'binary' && $outFormat !== 'compact_base64') {
-            throw new \InvalidArgumentException('Unsupported outFormat');
         }
 
         $bridgeClass = 'BlackCat\\Crypto\\Bridge\\CoreCryptoBridge';
@@ -253,13 +278,22 @@ final class Crypto
         KeyManager::requireSodium();
         KeyManager::assertAccessAllowed('read');
 
-        if (empty(self::$keys) || self::$primaryKey === null) {
+        if (!self::$keylessAgentEnabled && (empty(self::$keys) || self::$primaryKey === null)) {
             throw new RuntimeException('Crypto::decrypt called but Crypto not initialized.');
         }
 
         if ($payload === '') {
             self::logError('decrypt failed: empty payload');
             return null;
+        }
+
+        if (self::$keylessAgentEnabled) {
+            $compact = self::normalizeToCompactBase64($payload);
+            if ($compact === null) {
+                self::logError('decrypt failed: unknown payload format');
+                return null;
+            }
+            return CryptoAgentClient::decrypt(self::KEY_BASENAME, $compact);
         }
 
         $bridgeClass = 'BlackCat\\Crypto\\Bridge\\CoreCryptoBridge';
@@ -385,6 +419,102 @@ final class Crypto
 
         self::logError('decrypt_versioned: all keys exhausted');
         return null;
+    }
+
+    private static function compactBase64ToVersionedBinary(string $ciphertext): string
+    {
+        $decoded = base64_decode($ciphertext, true);
+        if (!is_string($decoded) || $decoded === '') {
+            throw new RuntimeException('Crypto agent protocol violation: ciphertext is not valid base64.');
+        }
+
+        $nonceLen = SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_NPUBBYTES;
+        if (strlen($decoded) < $nonceLen + SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_ABYTES) {
+            throw new RuntimeException('Crypto agent protocol violation: ciphertext too short.');
+        }
+
+        return chr(self::VERSION) . chr($nonceLen) . $decoded;
+    }
+
+    /**
+     * Normalize a Crypto payload into legacy compact_base64 (base64(nonce+cipher)).
+     *
+     * The keyless crypto agent expects this exact format.
+     */
+    private static function normalizeToCompactBase64(string $payload): ?string
+    {
+        if ($payload === '') {
+            return null;
+        }
+
+        $first = ord($payload[0]);
+        if ($first === self::VERSION || $first === 2) {
+            $nc = self::extractNonceCipherFromVersionedBinary($payload);
+            return $nc !== null ? base64_encode($nc) : null;
+        }
+
+        $decoded = base64_decode($payload, true);
+        if ($decoded === false || $decoded === '') {
+            return null;
+        }
+
+        $first2 = ord($decoded[0]);
+        if ($first2 === self::VERSION || $first2 === 2) {
+            $nc = self::extractNonceCipherFromVersionedBinary($decoded);
+            return $nc !== null ? base64_encode($nc) : null;
+        }
+
+        $nonceLen = SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_NPUBBYTES;
+        if (strlen($decoded) < $nonceLen + SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_ABYTES) {
+            return null;
+        }
+
+        // Already compact_base64.
+        return $payload;
+    }
+
+    private static function extractNonceCipherFromVersionedBinary(string $data): ?string
+    {
+        $len = strlen($data);
+        if ($len < 2) {
+            return null;
+        }
+
+        $ptr = 0;
+        $version = ord($data[$ptr++]);
+        if ($version === 2) {
+            $keyIdLen = ord($data[$ptr++]);
+            if ($ptr + $keyIdLen > $len) {
+                return null;
+            }
+            $ptr += $keyIdLen;
+        } elseif ($version !== self::VERSION) {
+            return null;
+        }
+
+        if ($ptr >= $len) {
+            return null;
+        }
+
+        $nonceLen = ord($data[$ptr++]);
+        $expectedNonceLen = SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_NPUBBYTES;
+        if ($nonceLen !== $expectedNonceLen) {
+            return null;
+        }
+
+        if ($len < $ptr + $nonceLen) {
+            return null;
+        }
+
+        $nonce = substr($data, $ptr, $nonceLen);
+        $ptr += $nonceLen;
+
+        $cipher = substr($data, $ptr);
+        if ($cipher === '' || strlen($cipher) < SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_ABYTES) {
+            return null;
+        }
+
+        return $nonce . $cipher;
     }
 
     /**

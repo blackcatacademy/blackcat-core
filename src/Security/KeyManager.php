@@ -21,6 +21,56 @@ final class KeyManager
     private const AGENT_MAX_REQ_BYTES = 8 * 1024;
     private const AGENT_MAX_RESP_BYTES = 256 * 1024;
 
+    private static function cryptoAgentModeFromRuntimeConfig(): ?string
+    {
+        $socket = self::cryptoAgentSocketPathFromRuntimeConfig();
+        if ($socket === null) {
+            return null;
+        }
+
+        $configClass = implode('\\', ['BlackCat', 'Config', 'Runtime', 'Config']);
+        if (!class_exists($configClass) || !is_callable([$configClass, 'isInitialized'])) {
+            return null;
+        }
+
+        $method = 'isInitialized';
+        if (!(bool) $configClass::$method()) {
+            return null;
+        }
+
+        if (!is_callable([$configClass, 'repo'])) {
+            return null;
+        }
+
+        $repoMethod = 'repo';
+        /** @var mixed $repo */
+        $repo = $configClass::$repoMethod();
+
+        if (!is_object($repo) || !method_exists($repo, 'get')) {
+            return null;
+        }
+
+        $get = 'get';
+        /** @var mixed $raw */
+        $raw = $repo->$get('crypto.agent.mode');
+        $mode = is_string($raw) ? strtolower(trim($raw)) : '';
+        if ($mode === '') {
+            // Security-first default.
+            return 'keyless';
+        }
+
+        if ($mode === 'keys' || $mode === 'keyless') {
+            return $mode;
+        }
+
+        return 'keyless';
+    }
+
+    private static function cryptoAgentIsKeyless(): bool
+    {
+        return self::cryptoAgentModeFromRuntimeConfig() === 'keyless';
+    }
+
     private static function cryptoAgentSocketPathFromRuntimeConfig(): ?string
     {
         if (\function_exists('posix_geteuid')) {
@@ -153,6 +203,10 @@ final class KeyManager
             return [];
         }
 
+        if (self::cryptoAgentIsKeyless()) {
+            throw new KeyManagerException('Crypto agent is configured in keyless mode; raw key export is forbidden.');
+        }
+
         $basename = trim($basename);
         if ($basename === '') {
             return [];
@@ -197,6 +251,111 @@ final class KeyManager
             }
 
             $out[] = ['version' => $ver, 'raw' => $raw];
+        }
+
+        return $out;
+    }
+
+    /**
+     * Keyless agent path: derive a single HMAC using the newest key without exporting key bytes.
+     *
+     * @return array{hash:string,version:string}
+     */
+    private static function agentHmacLatest(string $socketPath, string $basename, string $data): array
+    {
+        if (!self::cryptoAgentIsKeyless()) {
+            throw new KeyManagerException('agentHmacLatest called but crypto agent is not in keyless mode.');
+        }
+
+        $basename = trim($basename);
+        if ($basename === '' || str_contains($basename, "\0") || !preg_match('/^[a-z0-9_]{1,64}$/', $basename)) {
+            throw new KeyManagerException('Invalid key basename for crypto agent.');
+        }
+
+        $res = self::agentCall($socketPath, [
+            'op' => 'hmac_latest',
+            'basename' => $basename,
+            'data_b64' => base64_encode($data),
+        ]);
+
+        if (($res['ok'] ?? null) !== true) {
+            $err = is_string($res['error'] ?? null) ? (string) $res['error'] : 'unknown';
+            throw new KeyManagerException('Crypto agent error: ' . $err);
+        }
+
+        $b64 = $res['hash_b64'] ?? null;
+        $ver = $res['key_version'] ?? null;
+        if (!is_string($b64) || $b64 === '' || str_contains($b64, "\0")) {
+            throw new KeyManagerException('Crypto agent protocol violation: invalid hash_b64.');
+        }
+        if (!is_string($ver) || !preg_match('/^v[0-9]+$/', $ver)) {
+            throw new KeyManagerException('Crypto agent protocol violation: invalid key_version.');
+        }
+
+        $hash = base64_decode($b64, true);
+        if (!is_string($hash) || strlen($hash) !== 32) {
+            throw new KeyManagerException('Crypto agent returned invalid HMAC length.');
+        }
+
+        return ['hash' => $hash, 'version' => $ver];
+    }
+
+    /**
+     * Keyless agent path: derive multiple HMAC candidates (newest->oldest) without exporting key bytes.
+     *
+     * @return list<array{version:string,hash:string}>
+     */
+    private static function agentHmacCandidates(string $socketPath, string $basename, string $data, int $maxCandidates): array
+    {
+        if (!self::cryptoAgentIsKeyless()) {
+            throw new KeyManagerException('agentHmacCandidates called but crypto agent is not in keyless mode.');
+        }
+
+        $basename = trim($basename);
+        if ($basename === '' || str_contains($basename, "\0") || !preg_match('/^[a-z0-9_]{1,64}$/', $basename)) {
+            throw new KeyManagerException('Invalid key basename for crypto agent.');
+        }
+
+        $maxCandidates = max(1, min(50, $maxCandidates));
+
+        $res = self::agentCall($socketPath, [
+            'op' => 'hmac_candidates',
+            'basename' => $basename,
+            'data_b64' => base64_encode($data),
+            'max_candidates' => $maxCandidates,
+        ]);
+
+        if (($res['ok'] ?? null) !== true) {
+            $err = is_string($res['error'] ?? null) ? (string) $res['error'] : 'unknown';
+            throw new KeyManagerException('Crypto agent error: ' . $err);
+        }
+
+        $items = $res['hashes'] ?? null;
+        if (!is_array($items)) {
+            throw new KeyManagerException('Crypto agent protocol violation: missing hashes list.');
+        }
+
+        $out = [];
+        foreach ($items as $i => $item) {
+            if (!is_array($item)) {
+                throw new KeyManagerException('Crypto agent protocol violation: hashes[' . $i . '] must be an object.');
+            }
+
+            $ver = $item['key_version'] ?? null;
+            $b64 = $item['hash_b64'] ?? null;
+            if (!is_string($ver) || !preg_match('/^v[0-9]+$/', $ver)) {
+                throw new KeyManagerException('Crypto agent protocol violation: invalid key_version.');
+            }
+            if (!is_string($b64) || $b64 === '' || str_contains($b64, "\0")) {
+                throw new KeyManagerException('Crypto agent protocol violation: invalid hash_b64.');
+            }
+
+            $hash = base64_decode($b64, true);
+            if (!is_string($hash) || strlen($hash) !== 32) {
+                throw new KeyManagerException('Crypto agent returned invalid HMAC length.');
+            }
+
+            $out[] = ['version' => $ver, 'hash' => $hash];
         }
 
         return $out;
@@ -337,6 +496,9 @@ final class KeyManager
         $keys = [];
 
         $agentSocket = self::cryptoAgentSocketPathFromRuntimeConfig();
+        if ($agentSocket !== null && self::cryptoAgentIsKeyless()) {
+            throw new KeyManagerException('Crypto agent is configured in keyless mode; raw key export is forbidden.');
+        }
         $agentEntries = self::agentGetAllKeyEntries($agentSocket, $basename, $wantedLen);
 
         // Crypto-agent mode is authoritative (no file/env fallbacks).
@@ -579,6 +741,9 @@ final class KeyManager
         $wantedLen = $expectedByteLen ?? self::keyByteLen();
 
         $agentSocket = self::cryptoAgentSocketPathFromRuntimeConfig();
+        if ($agentSocket !== null && self::cryptoAgentIsKeyless()) {
+            throw new KeyManagerException('Crypto agent is configured in keyless mode; base64 key export is forbidden.');
+        }
         $agentEntries = self::agentGetAllKeyEntries($agentSocket, $basename, $wantedLen);
 
         // Crypto-agent mode is authoritative (no file/env fallbacks).
@@ -642,6 +807,9 @@ final class KeyManager
         $wantedLen = $expectedByteLen ?? self::keyByteLen();
 
         $agentSocket = self::cryptoAgentSocketPathFromRuntimeConfig();
+        if ($agentSocket !== null && self::cryptoAgentIsKeyless()) {
+            throw new KeyManagerException('Crypto agent is configured in keyless mode; raw key export is forbidden.');
+        }
         $agentEntries = self::agentGetAllKeyEntries($agentSocket, $basename, $wantedLen);
 
         // Crypto-agent mode is authoritative (no file/env fallbacks).
@@ -708,6 +876,9 @@ final class KeyManager
         $wantedLen = $expectedByteLen ?? self::keyByteLen();
 
         $agentSocket = self::cryptoAgentSocketPathFromRuntimeConfig();
+        if ($agentSocket !== null && self::cryptoAgentIsKeyless()) {
+            throw new KeyManagerException('Crypto agent is configured in keyless mode; raw key export is forbidden.');
+        }
         $agentEntries = self::agentGetAllKeyEntries($agentSocket, $basename, $wantedLen);
 
         // Crypto-agent mode is authoritative (no file/env fallbacks).
@@ -826,7 +997,15 @@ final class KeyManager
      */
     public static function deriveHmacWithLatest(string $envName, ?string $keysDir, string $basename, string $data): array
     {
-        // get latest key (fail-fast)
+        self::guard('read');
+
+        $agentSocket = self::cryptoAgentSocketPathFromRuntimeConfig();
+        if ($agentSocket !== null && self::cryptoAgentIsKeyless()) {
+            $res = self::agentHmacLatest($agentSocket, $basename, $data);
+            return ['hash' => $res['hash'], 'version' => $res['version']];
+        }
+
+        // key-export mode / file mode: get latest key (fail-fast)
         $info = self::getRawKeyBytes($envName, $keysDir, $basename, false, self::keyByteLen());
         $key = $info['raw'];
         $ver = $info['version'];
@@ -869,6 +1048,22 @@ final class KeyManager
         $expectedLen = self::keyByteLen();
 
         $agentSocket = self::cryptoAgentSocketPathFromRuntimeConfig();
+        if ($agentSocket !== null && self::cryptoAgentIsKeyless()) {
+            $c = $maxCandidates ?? 20;
+            $items = self::agentHmacCandidates($agentSocket, $basename, $data, $c);
+
+            $out = [];
+            foreach ($items as $item) {
+                $out[] = [
+                    'version' => $item['version'],
+                    'hash' => $item['hash'],
+                ];
+            }
+
+            $cache[$cacheKey] = $out;
+            return $out;
+        }
+
         $agentEntries = self::agentGetAllKeyEntries($agentSocket, $basename, $expectedLen);
 
         // Crypto-agent mode is authoritative (no file/env fallbacks).
