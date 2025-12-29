@@ -66,5 +66,22 @@ final class TxOutboxTest extends TestCase
             @rmdir($dir);
         }
     }
-}
 
+    public function testConstructorRejectsWorldWritableDir(): void
+    {
+        if (DIRECTORY_SEPARATOR === '\\') {
+            self::markTestSkipped('POSIX perms not available');
+        }
+
+        $dir = sys_get_temp_dir() . '/blackcat-core-tx-outbox-world-writable-' . bin2hex(random_bytes(6));
+        mkdir($dir, 0777, true);
+        @chmod($dir, 0777);
+
+        try {
+            $this->expectException(TxOutboxException::class);
+            new TxOutbox($dir);
+        } finally {
+            @rmdir($dir);
+        }
+    }
+}

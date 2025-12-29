@@ -38,6 +38,19 @@ final class TxOutbox
         if (!is_writable($dir)) {
             throw new TxOutboxException('Tx outbox directory is not writable: ' . $dir);
         }
+
+        // Basic hardening: the outbox directory must not be world-writable.
+        // If an attacker can write arbitrary intent files, they can at least spam relayers.
+        if (DIRECTORY_SEPARATOR !== '\\') {
+            $st = @stat($dir);
+            if (is_array($st)) {
+                $mode = (int) ($st['mode'] ?? 0);
+                $perms = $mode & 0o777;
+                if (($perms & 0o002) !== 0) {
+                    throw new TxOutboxException('Tx outbox directory must not be world-writable: ' . $dir);
+                }
+            }
+        }
     }
 
     public static function isConfiguredFromRuntimeConfig(): bool
@@ -157,4 +170,3 @@ final class TxOutbox
         return (bool) preg_match('~^[a-zA-Z]:[\\\\/]~', $path);
     }
 }
-
