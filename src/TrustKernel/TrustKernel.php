@@ -66,6 +66,11 @@ final class TrustKernel
         }
     }
 
+    public function instanceControllerAddress(): string
+    {
+        return $this->config->instanceController;
+    }
+
     public function installGuards(): void
     {
         $alreadyLocked = KeyManager::isAccessGuardLocked()

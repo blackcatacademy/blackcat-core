@@ -6,7 +6,10 @@ namespace BlackCat\Core\Kernel;
 
 use BlackCat\Core\Security\HttpRequestGuard;
 use BlackCat\Core\Security\PhpRuntimeInspector;
+use BlackCat\Core\Security\ThreatScanner;
 use BlackCat\Core\Security\TrustedProxyGuard;
+use BlackCat\Core\TrustKernel\CanonicalJson;
+use BlackCat\Core\TrustKernel\TxOutbox;
 use BlackCat\Core\TrustKernel\Web3TransportInterface;
 use Psr\Log\LoggerInterface;
 
@@ -22,6 +25,9 @@ use Psr\Log\LoggerInterface;
  */
 final class HttpKernel
 {
+    private static ?string $lastThreatIncidentHash = null;
+    private static int $lastThreatIncidentAt = 0;
+
     /**
      * Run kernel-only HTTP flow and then execute `$app` with a booted context.
      *
@@ -132,6 +138,59 @@ final class HttpKernel
             return self::genericErrorResponse(503);
         }
 
+        if ($options->scanRequestThreats) {
+            try {
+                $get = is_array($_GET) ? $_GET : [];
+                $post = is_array($_POST) ? $_POST : [];
+                $cookie = is_array($_COOKIE) ? $_COOKIE : [];
+                $files = is_array($_FILES) ? $_FILES : [];
+
+                $report = ThreatScanner::scanRequest(
+                    $server,
+                    $get,
+                    $post,
+                    $cookie,
+                    $files,
+                    [
+                        'max_fields' => $options->threatScanMaxFields,
+                        'max_value_len' => $options->threatScanMaxValueLen,
+                        'max_files' => $options->threatScanMaxFiles,
+                        'max_file_bytes' => $options->threatScanMaxFileBytes,
+                        'disallowed_upload_extensions' => $options->threatScanDisallowedUploadExtensions,
+                    ],
+                );
+
+                $findings = $report['findings'] ?? null;
+                if (is_array($findings) && $findings !== []) {
+                    $codes = [];
+                    foreach ($findings as $f) {
+                        if (!is_array($f)) {
+                            continue;
+                        }
+                        $code = $f['code'] ?? null;
+                        if (is_string($code) && $code !== '' && !str_contains($code, "\0")) {
+                            $codes[$code] = true;
+                        }
+                    }
+                    $codeList = array_keys($codes);
+                    sort($codeList, SORT_STRING);
+
+                    if ($status->enforcement === 'strict') {
+                        $logger?->warning('[http-kernel] threat scanner rejected request: ' . implode(',', $codeList));
+                        if ($options->enqueueThreatIncidents) {
+                            self::enqueueThreatIncident($kernel->instanceControllerAddress(), $server, $codeList, $options, $logger);
+                        }
+                        return self::genericErrorResponse(400);
+                    }
+
+                    $logger?->warning('[http-kernel] threat scanner findings (warn mode): ' . implode(',', $codeList));
+                }
+            } catch (\Throwable $e) {
+                // Scanner must never block the app by crashing; rely on TrustKernel for fail-closed integrity.
+                $logger?->warning('[http-kernel] threat scanner failed: ' . $e->getMessage());
+            }
+        }
+
         $phpRuntime = null;
         if ($options->requireRuntimeHardeningInStrict && $status->enforcement === 'strict') {
             try {
@@ -151,6 +210,71 @@ final class HttpKernel
         }
 
         return new HttpKernelContext($kernel, $status, $phpRuntime);
+    }
+
+    /**
+     * @param list<string> $codes
+     */
+    private static function enqueueThreatIncident(
+        string $controller,
+        array $server,
+        array $codes,
+        HttpKernelOptions $options,
+        ?LoggerInterface $logger = null,
+    ): void {
+        $outbox = TxOutbox::fromRuntimeConfigBestEffort();
+        if ($outbox === null) {
+            return;
+        }
+
+        $method = $server['REQUEST_METHOD'] ?? null;
+        $method = is_string($method) ? strtoupper(trim($method)) : 'UNKNOWN';
+
+        $requestUri = $server['REQUEST_URI'] ?? null;
+        $path = is_string($requestUri) ? parse_url($requestUri, PHP_URL_PATH) : null;
+        $path = is_string($path) && $path !== '' ? $path : '/';
+
+        $preimage = [
+            'schema_version' => 1,
+            'type' => 'blackcat.security.threat_detected',
+            'controller' => $controller,
+            'method' => $method,
+            'path_sha256' => '0x' . hash('sha256', $path),
+            'codes' => $codes,
+        ];
+
+        $incidentHash = CanonicalJson::sha256Bytes32($preimage);
+
+        $now = time();
+        if (
+            self::$lastThreatIncidentHash !== null
+            && hash_equals(self::$lastThreatIncidentHash, $incidentHash)
+            && $options->threatIncidentDebounceSec > 0
+            && ($now - self::$lastThreatIncidentAt) < $options->threatIncidentDebounceSec
+        ) {
+            return;
+        }
+
+        try {
+            $payload = [
+                'schema_version' => 1,
+                'type' => 'blackcat.tx_request',
+                'created_at' => gmdate('c'),
+                'to' => $controller,
+                'method' => 'reportIncident(bytes32)',
+                'args' => [$incidentHash],
+                'meta' => [
+                    'source' => 'http-kernel',
+                    'codes' => $codes,
+                ],
+            ];
+
+            $outbox->enqueue($payload);
+            self::$lastThreatIncidentHash = $incidentHash;
+            self::$lastThreatIncidentAt = $now;
+        } catch (\Throwable $e) {
+            $logger?->warning('[http-kernel] threat incident outbox enqueue failed: ' . $e->getMessage());
+        }
     }
 
     /**

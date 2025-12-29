@@ -56,4 +56,53 @@ final class HttpKernelOptions
      * Catch app exceptions and render generic 500 (recommended for minimal installs).
      */
     public bool $catchAppExceptions = true;
+
+    /**
+     * Lightweight request payload + upload scanning for obvious webshell/RCE probes.
+     *
+     * Notes:
+     * - In strict TrustKernel mode this will reject the request on findings.
+     * - In warn mode it will only log findings.
+     *
+     * This is intentionally conservative (high-confidence patterns only).
+     */
+    public bool $scanRequestThreats = true;
+
+    /**
+     * Queue anonymized incident tx intents into TxOutbox when threats are detected.
+     *
+     * Broadcasting is optional and must be done by an external relayer.
+     */
+    public bool $enqueueThreatIncidents = true;
+
+    /** Debounce identical threat incidents (per-process). */
+    public int $threatIncidentDebounceSec = 10;
+
+    public int $threatScanMaxFields = 200;
+    public int $threatScanMaxValueLen = 4096;
+    public int $threatScanMaxFiles = 25;
+    public int $threatScanMaxFileBytes = 65536;
+
+    /** @var list<string> */
+    public array $threatScanDisallowedUploadExtensions = [
+        'php',
+        'phtml',
+        'pht',
+        'phar',
+        'inc',
+        'cgi',
+        'pl',
+        'py',
+        'rb',
+        'sh',
+        'bash',
+        'zsh',
+        'exe',
+        'dll',
+        'so',
+        'dylib',
+        'bat',
+        'cmd',
+        'ps1',
+    ];
 }
