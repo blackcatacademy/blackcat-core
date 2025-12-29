@@ -47,7 +47,8 @@ final class Web3RpcQuorumClient
         }
 
         $this->endpoints = $normalized;
-        $this->transport = $transport ?? new DefaultWeb3Transport();
+        $baseTransport = $transport ?? new DefaultWeb3Transport();
+        $this->transport = AllowlistedWeb3Transport::fromRpcEndpoints($baseTransport, $this->endpoints);
     }
 
     public function ethCallQuorum(string $to, string $data, string $blockTag = 'latest'): string

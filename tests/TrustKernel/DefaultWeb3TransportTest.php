@@ -49,6 +49,24 @@ final class DefaultWeb3TransportTest extends TestCase
         }
     }
 
+    public function testRejectsPrivateIpLiteral(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        self::invokeAssertAllowedRpcUrl('https://10.0.0.1');
+    }
+
+    public function testRejectsLinkLocalIpLiteral(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        self::invokeAssertAllowedRpcUrl('https://169.254.169.254');
+    }
+
+    public function testRejectsUniqueLocalIpv6Literal(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        self::invokeAssertAllowedRpcUrl('https://[fd00::1]');
+    }
+
     private static function invokeAssertAllowedRpcUrl(string $url): void
     {
         $ref = new \ReflectionMethod(DefaultWeb3Transport::class, 'assertAllowedRpcUrl');

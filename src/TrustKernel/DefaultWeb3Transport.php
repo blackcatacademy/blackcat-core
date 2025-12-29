@@ -175,7 +175,15 @@ final class DefaultWeb3Transport implements Web3TransportInterface
         if (!is_string($host) || $host === '') {
             throw new \InvalidArgumentException('RPC URL must include a host.');
         }
-        $host = strtolower($host);
+        $host = self::normalizeHost($host);
+
+        // SSRF hardening: reject private/reserved IP literals (except loopback).
+        if (filter_var($host, FILTER_VALIDATE_IP) !== false && !self::isLoopbackHost($host)) {
+            $flags = FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE;
+            if (filter_var($host, FILTER_VALIDATE_IP, $flags) === false) {
+                throw new \InvalidArgumentException('RPC URL host must not be a private/reserved IP address.');
+            }
+        }
 
         // Ban unencrypted RPC by default. Allow HTTP only for loopback (localhost dev nodes).
         if ($scheme === 'http' && !self::isLoopbackHost($host)) {
@@ -190,16 +198,26 @@ final class DefaultWeb3Transport implements Web3TransportInterface
 
     private static function isLoopbackHost(string $host): bool
     {
-        $host = strtolower(trim($host));
+        $host = self::normalizeHost($host);
         if ($host === 'localhost' || $host === '127.0.0.1' || $host === '::1') {
             return true;
         }
 
-        // parse_url on IPv6 includes no brackets, but keep this tolerant.
-        if ($host === '[::1]') {
-            return true;
-        }
-
         return false;
+    }
+
+    private static function normalizeHost(string $host): string
+    {
+        $host = strtolower(trim($host));
+        if ($host === '') {
+            return '';
+        }
+        if (str_starts_with($host, '[') && str_ends_with($host, ']') && strlen($host) > 2) {
+            $inner = substr($host, 1, -1);
+            if (is_string($inner) && $inner !== '') {
+                $host = $inner;
+            }
+        }
+        return $host;
     }
 }
