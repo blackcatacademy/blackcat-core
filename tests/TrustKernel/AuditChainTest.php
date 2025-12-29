@@ -4,6 +4,7 @@ declare(strict_types=1);
 namespace BlackCat\Core\Tests\TrustKernel;
 
 use BlackCat\Core\TrustKernel\AuditChain;
+use BlackCat\Core\TrustKernel\AuditChainException;
 use PHPUnit\Framework\TestCase;
 
 final class AuditChainTest extends TestCase
@@ -65,6 +66,33 @@ final class AuditChainTest extends TestCase
 
         $this->expectException(\RuntimeException::class);
         $ac->append('test.event');
+    }
+
+    public function testConstructorRejectsSymlinkDirectoryEvenWithTrailingSlash(): void
+    {
+        if (!function_exists('symlink')) {
+            self::markTestSkipped('symlink not available');
+        }
+
+        $dir = sys_get_temp_dir() . '/blackcat-core-audit-chain-real-' . bin2hex(random_bytes(6));
+        $link = sys_get_temp_dir() . '/blackcat-core-audit-chain-link-' . bin2hex(random_bytes(6));
+        mkdir($dir, 0750, true);
+
+        try {
+            if (!@symlink($dir, $link)) {
+                self::markTestSkipped('Unable to create symlink');
+            }
+
+            try {
+                new AuditChain($link . '/');
+                self::fail('Expected AuditChainException for symlink directory with trailing slash.');
+            } catch (AuditChainException $e) {
+                self::assertStringContainsString('Audit chain directory', $e->getMessage());
+            }
+        } finally {
+            @unlink($link);
+            @rmdir($dir);
+        }
     }
 
     public function testRefusesOversizedHeadFile(): void

@@ -59,8 +59,20 @@ final class TxOutboxTest extends TestCase
                 self::markTestSkipped('Unable to create symlink');
             }
 
-            $this->expectException(TxOutboxException::class);
-            new TxOutbox($link);
+            try {
+                new TxOutbox($link);
+                self::fail('Expected TxOutboxException for symlink directory.');
+            } catch (TxOutboxException $e) {
+                self::assertStringContainsString('Tx outbox directory', $e->getMessage());
+            }
+
+            // Trailing slashes must not bypass symlink detection.
+            try {
+                new TxOutbox($link . '/');
+                self::fail('Expected TxOutboxException for symlink directory with trailing slash.');
+            } catch (TxOutboxException $e) {
+                self::assertStringContainsString('Tx outbox directory', $e->getMessage());
+            }
         } finally {
             @unlink($link);
             @rmdir($dir);

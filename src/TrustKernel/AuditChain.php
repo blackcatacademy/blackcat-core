@@ -31,6 +31,7 @@ final class AuditChain
         string $dir,
     ) {
         $dir = trim($dir);
+        $dir = rtrim($dir, "/\\");
         if ($dir === '' || str_contains($dir, "\0")) {
             throw new AuditChainException('Audit chain directory is invalid.');
         }
