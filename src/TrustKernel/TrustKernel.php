@@ -41,6 +41,14 @@ final class TrustKernel
     private string $effectiveEnforcement = 'strict';
     private bool $warnBannerEmitted = false;
     private bool $phpHardeningWarnEmitted = false;
+    private bool $runtimeDoctorWarnEmitted = false;
+
+    private bool $runtimeDoctorPhpChecked = false;
+    private bool $runtimeDoctorPhpAvailable = false;
+    private ?string $runtimeDoctorPhpError = null;
+
+    /** @var list<array{severity:'info'|'warn'|'error',code:string,message:string}> */
+    private array $runtimeDoctorPhpFindings = [];
 
     public function __construct(
         private readonly TrustKernelConfig $config,
@@ -305,56 +313,50 @@ final class TrustKernel
             //
             // This is evaluated only for HTTP request contexts to avoid breaking CLI tooling/tests.
             if ($requestId !== null && PHP_SAPI !== 'cli') {
-                $fatalStrict = [
-                    // Explicitly required hardening controls:
-                    'allow_url_include_enabled' => true,
-                    'phar_readonly_disabled' => true,
-                    'dangerous_functions_not_disabled' => true,
-                    'open_basedir_unset' => true,
-                    'cgi_fix_pathinfo_enabled' => true,
-                    'enable_dl_enabled' => true,
-                    'auto_prepend_file_set' => true,
-                    'auto_append_file_set' => true,
+                $usedDoctor = false;
 
-                    // Web3 transport must exist.
-                    'no_transport_for_web3' => true,
-                ];
-
+                // Prefer blackcat-config RuntimeDoctor when available (centralized runtime hardening checks).
+                // Fallback to blackcat-core PhpRuntimeInspector when RuntimeDoctor is not installed.
                 try {
-                    $report = PhpRuntimeInspector::inspect();
-                    $findings = $report['findings'] ?? null;
-                    if (is_array($findings)) {
-                        foreach ($findings as $f) {
-                            if (!is_array($f)) {
-                                continue;
-                            }
-                            $code = $f['code'] ?? null;
-                            $severity = $f['severity'] ?? null;
-                            $message = $f['message'] ?? null;
+                    $doctorFindings = $this->runtimeDoctorPhpFindingsOrNull();
+                    if ($doctorFindings !== null) {
+                        $usedDoctor = true;
 
-                            if (!is_string($code) || $code === '' || str_contains($code, "\0")) {
-                                continue;
-                            }
-                            if (!is_string($severity) || !in_array($severity, ['info', 'warn', 'error'], true)) {
-                                $severity = 'warn';
-                            }
+                        $fatalStrict = [
+                            'php_allow_url_include_enabled' => true,
+                            'php_phar_readonly_disabled' => true,
+                            'php_open_basedir_unset' => true,
+                            'php_disable_functions_empty' => true,
+                            'php_disable_functions_missing_dangerous' => true,
+                            'php_display_errors_enabled' => true,
+                            'php_enable_dl_enabled' => true,
+                            'php_auto_prepend_file_set' => true,
+                            'php_auto_append_file_set' => true,
+                            'php_cgi_fix_pathinfo_enabled' => true,
+                            'php_no_transport_for_web3' => true,
+                        ];
+
+                        foreach ($doctorFindings as $f) {
+                            $code = $f['code'];
+                            $severity = $f['severity'];
+                            $message = $f['message'];
 
                             $isFatal = ($severity === 'error') || isset($fatalStrict[$code]);
 
                             if ($this->effectiveEnforcement === 'strict' && $isFatal) {
-                                $addError('php_runtime_' . $code, 'PHP runtime hardening violation: ' . $code);
+                                $addError('runtime_doctor_' . $code, 'Runtime hardening violation: ' . $code);
                                 continue;
                             }
 
                             if ($this->effectiveEnforcement === 'warn') {
                                 if ($isFatal || $severity !== 'info') {
-                                    if (!$this->phpHardeningWarnEmitted) {
-                                        $this->phpHardeningWarnEmitted = true;
-                                        $this->logger?->warning('[trust-kernel] WARNING: PHP hardening findings present (dev/warn policy). Do not use this policy in production.');
+                                    if (!$this->runtimeDoctorWarnEmitted) {
+                                        $this->runtimeDoctorWarnEmitted = true;
+                                        $this->logger?->warning('[trust-kernel] WARNING: Runtime hardening findings present (dev/warn policy). Do not use this policy in production.');
                                     }
 
-                                    $line = '[trust-kernel] php hardening: ' . $code;
-                                    if (is_string($message) && trim($message) !== '') {
+                                    $line = '[trust-kernel] runtime hardening: ' . $code;
+                                    if (trim($message) !== '') {
                                         $line .= ' - ' . trim($message);
                                     }
                                     $this->logger?->warning($line);
@@ -365,10 +367,79 @@ final class TrustKernel
                     }
                 } catch (\Throwable $e) {
                     if ($this->effectiveEnforcement === 'strict') {
-                        $addError('php_runtime_inspect_failed', 'PHP runtime hardening inspection failed.');
+                        $addError('runtime_doctor_failed', 'Runtime doctor failed: ' . $e->getMessage());
                     } else {
-                        $this->logger?->warning('[trust-kernel] php runtime inspect failed: ' . $e->getMessage());
-                        @error_log('[trust-kernel] php runtime inspect failed: ' . $e->getMessage());
+                        $this->logger?->warning('[trust-kernel] runtime doctor failed: ' . $e->getMessage());
+                        @error_log('[trust-kernel] runtime doctor failed: ' . $e->getMessage());
+                    }
+                }
+
+                if (!$usedDoctor) {
+                    $fatalStrict = [
+                        // Explicitly required hardening controls:
+                        'allow_url_include_enabled' => true,
+                        'phar_readonly_disabled' => true,
+                        'dangerous_functions_not_disabled' => true,
+                        'open_basedir_unset' => true,
+                        'cgi_fix_pathinfo_enabled' => true,
+                        'enable_dl_enabled' => true,
+                        'auto_prepend_file_set' => true,
+                        'auto_append_file_set' => true,
+
+                        // Web3 transport must exist.
+                        'no_transport_for_web3' => true,
+                    ];
+
+                    try {
+                        $report = PhpRuntimeInspector::inspect();
+                        $findings = $report['findings'] ?? null;
+                        if (is_array($findings)) {
+                            foreach ($findings as $f) {
+                                if (!is_array($f)) {
+                                    continue;
+                                }
+                                $code = $f['code'] ?? null;
+                                $severity = $f['severity'] ?? null;
+                                $message = $f['message'] ?? null;
+
+                                if (!is_string($code) || $code === '' || str_contains($code, "\0")) {
+                                    continue;
+                                }
+                                if (!is_string($severity) || !in_array($severity, ['info', 'warn', 'error'], true)) {
+                                    $severity = 'warn';
+                                }
+
+                                $isFatal = ($severity === 'error') || isset($fatalStrict[$code]);
+
+                                if ($this->effectiveEnforcement === 'strict' && $isFatal) {
+                                    $addError('php_runtime_' . $code, 'PHP runtime hardening violation: ' . $code);
+                                    continue;
+                                }
+
+                                if ($this->effectiveEnforcement === 'warn') {
+                                    if ($isFatal || $severity !== 'info') {
+                                        if (!$this->phpHardeningWarnEmitted) {
+                                            $this->phpHardeningWarnEmitted = true;
+                                            $this->logger?->warning('[trust-kernel] WARNING: PHP hardening findings present (dev/warn policy). Do not use this policy in production.');
+                                        }
+
+                                        $line = '[trust-kernel] php hardening: ' . $code;
+                                        if (is_string($message) && trim($message) !== '') {
+                                            $line .= ' - ' . trim($message);
+                                        }
+                                        $this->logger?->warning($line);
+                                        @error_log($line);
+                                    }
+                                }
+                            }
+                        }
+                    } catch (\Throwable $e) {
+                        if ($this->effectiveEnforcement === 'strict') {
+                            $addError('php_runtime_inspect_failed', 'PHP runtime hardening inspection failed.');
+                        } else {
+                            $this->logger?->warning('[trust-kernel] php runtime inspect failed: ' . $e->getMessage());
+                            @error_log('[trust-kernel] php runtime inspect failed: ' . $e->getMessage());
+                        }
                     }
                 }
             }
@@ -955,6 +1026,108 @@ final class TrustKernel
         }
 
         return null;
+    }
+
+    /**
+     * RuntimeDoctor findings filtered to PHP hardening (`php_*`).
+     *
+     * This is intentionally optional to keep blackcat-core usable without blackcat-config installed.
+     *
+     * @return list<array{severity:'info'|'warn'|'error',code:string,message:string}>|null
+     */
+    private function runtimeDoctorPhpFindingsOrNull(): ?array
+    {
+        if ($this->runtimeDoctorPhpChecked) {
+            if (!$this->runtimeDoctorPhpAvailable) {
+                return null;
+            }
+
+            if ($this->runtimeDoctorPhpError !== null) {
+                throw new TrustKernelException('Runtime doctor failed: ' . $this->runtimeDoctorPhpError);
+            }
+
+            return $this->runtimeDoctorPhpFindings;
+        }
+
+        $this->runtimeDoctorPhpChecked = true;
+
+        $configClass = implode('\\', ['BlackCat', 'Config', 'Runtime', 'Config']);
+        $doctorClass = implode('\\', ['BlackCat', 'Config', 'Runtime', 'RuntimeDoctor']);
+
+        if (
+            !class_exists($configClass)
+            || !class_exists($doctorClass)
+            || !is_callable([$configClass, 'isInitialized'])
+            || !is_callable([$configClass, 'repo'])
+            || !is_callable([$doctorClass, 'inspect'])
+        ) {
+            $this->runtimeDoctorPhpAvailable = false;
+            return null;
+        }
+
+        $isInitialized = 'isInitialized';
+        if (!(bool) $configClass::$isInitialized()) {
+            $this->runtimeDoctorPhpAvailable = false;
+            return null;
+        }
+
+        $repoMethod = 'repo';
+        /** @var mixed $repo */
+        $repo = $configClass::$repoMethod();
+        if (!is_object($repo)) {
+            $this->runtimeDoctorPhpAvailable = false;
+            return null;
+        }
+
+        try {
+            /** @var mixed $report */
+            $report = $doctorClass::inspect($repo);
+            $findingsRaw = is_array($report) ? ($report['findings'] ?? null) : null;
+
+            /** @var list<array{severity:'info'|'warn'|'error',code:string,message:string}> $phpFindings */
+            $phpFindings = [];
+
+            if (is_array($findingsRaw)) {
+                foreach ($findingsRaw as $f) {
+                    if (!is_array($f)) {
+                        continue;
+                    }
+
+                    $code = $f['code'] ?? null;
+                    if (!is_string($code) || $code === '' || str_contains($code, "\0") || !str_starts_with($code, 'php_')) {
+                        continue;
+                    }
+
+                    $severity = $f['severity'] ?? 'warn';
+                    if (!is_string($severity) || !in_array($severity, ['info', 'warn', 'error'], true)) {
+                        $severity = 'warn';
+                    }
+
+                    $message = $f['message'] ?? '';
+                    if (!is_string($message) || str_contains($message, "\0")) {
+                        $message = '';
+                    }
+
+                    $phpFindings[] = [
+                        'severity' => $severity,
+                        'code' => $code,
+                        'message' => $message,
+                    ];
+                }
+            }
+
+            $this->runtimeDoctorPhpAvailable = true;
+            $this->runtimeDoctorPhpFindings = $phpFindings;
+            return $this->runtimeDoctorPhpFindings;
+        } catch (\Throwable $e) {
+            $msg = $e->getMessage();
+            if (str_contains($msg, "\0")) {
+                $msg = '';
+            }
+            $this->runtimeDoctorPhpAvailable = true;
+            $this->runtimeDoctorPhpError = $msg;
+            throw $e;
+        }
     }
 
     private function hydrateLastOkFromDiskIfAvailable(): void
