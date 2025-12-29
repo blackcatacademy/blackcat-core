@@ -23,6 +23,7 @@ final class AuditChain
     private const HEAD_FILE = 'audit.head.json';
     private const LOG_FILE = 'audit.log.ndjson';
     private const LOCK_FILE = '.audit.lock';
+    private const MAX_HEAD_BYTES = 64 * 1024; // 64 KiB (bounded read)
 
     public function __construct(
         public readonly string $dir,
@@ -237,12 +238,24 @@ final class AuditChain
             ];
         }
 
+        clearstatcache(true, $headPath);
         if (is_link($headPath)) {
             throw new AuditChainException('Refusing symlink head file: ' . $headPath);
         }
 
-        $raw = @file_get_contents($headPath);
-        if (!is_string($raw) || trim($raw) === '') {
+        $size = @filesize($headPath);
+        if (is_int($size) && $size > self::MAX_HEAD_BYTES) {
+            throw new AuditChainException('Audit head file is too large.');
+        }
+
+        $raw = @file_get_contents($headPath, false, null, 0, self::MAX_HEAD_BYTES + 1);
+        if (!is_string($raw) || $raw === '') {
+            throw new AuditChainException('Audit head file is empty/unreadable.');
+        }
+        if (strlen($raw) > self::MAX_HEAD_BYTES) {
+            throw new AuditChainException('Audit head file is too large.');
+        }
+        if (trim($raw) === '') {
             throw new AuditChainException('Audit head file is empty/unreadable.');
         }
 

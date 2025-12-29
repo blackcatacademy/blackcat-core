@@ -66,4 +66,19 @@ final class AuditChainTest extends TestCase
         $this->expectException(\RuntimeException::class);
         $ac->append('test.event');
     }
+
+    public function testRefusesOversizedHeadFile(): void
+    {
+        $dir = sys_get_temp_dir() . '/blackcat-core-audit-chain-headsize-' . bin2hex(random_bytes(6));
+        mkdir($dir, 0750, true);
+
+        $headPath = rtrim($dir, '/\\') . '/audit.head.json';
+        file_put_contents($headPath, str_repeat('x', 64 * 1024 + 10));
+
+        $ac = new AuditChain($dir);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('too large');
+        $ac->head();
+    }
 }
