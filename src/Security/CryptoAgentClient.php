@@ -138,7 +138,10 @@ final class CryptoAgentClient
         return null;
     }
 
-    public static function encrypt(string $basename, string $plaintext): string
+    /**
+     * @return array{ciphertext:string,key_version:string}
+     */
+    public static function encryptWithInfo(string $basename, string $plaintext): array
     {
         $socketPath = self::socketPathFromRuntimeConfig();
         if ($socketPath === null) {
@@ -164,10 +167,24 @@ final class CryptoAgentClient
             throw new CryptoAgentException('Crypto agent protocol violation: invalid ciphertext.');
         }
 
-        return trim($cipher);
+        $ver = $res['key_version'] ?? null;
+        if (!is_string($ver) || !preg_match('/^v[0-9]+$/', $ver)) {
+            throw new CryptoAgentException('Crypto agent protocol violation: invalid key_version.');
+        }
+
+        return ['ciphertext' => trim($cipher), 'key_version' => $ver];
     }
 
-    public static function decrypt(string $basename, string $ciphertext): ?string
+    public static function encrypt(string $basename, string $plaintext): string
+    {
+        $info = self::encryptWithInfo($basename, $plaintext);
+        return $info['ciphertext'];
+    }
+
+    /**
+     * @return array{plaintext:?string,key_version:?string}
+     */
+    public static function decryptWithInfo(string $basename, string $ciphertext): array
     {
         $socketPath = self::socketPathFromRuntimeConfig();
         if ($socketPath === null) {
@@ -186,7 +203,7 @@ final class CryptoAgentClient
                 throw new TrustKernelException('Denied by TrustKernel: secrets.crypto_decrypt');
             }
             if ($err === 'decrypt_failed') {
-                return null;
+                return ['plaintext' => null, 'key_version' => null];
             }
             throw new CryptoAgentException('Crypto agent error: ' . $err);
         }
@@ -196,12 +213,23 @@ final class CryptoAgentClient
             throw new CryptoAgentException('Crypto agent protocol violation: invalid plaintext_b64.');
         }
 
+        $ver = $res['key_version'] ?? null;
+        if (!is_string($ver) || !preg_match('/^v[0-9]+$/', $ver)) {
+            throw new CryptoAgentException('Crypto agent protocol violation: invalid key_version.');
+        }
+
         $plain = base64_decode($b64, true);
         if (!is_string($plain)) {
             throw new CryptoAgentException('Crypto agent protocol violation: invalid plaintext base64.');
         }
 
-        return $plain;
+        return ['plaintext' => $plain, 'key_version' => $ver];
+    }
+
+    public static function decrypt(string $basename, string $ciphertext): ?string
+    {
+        $info = self::decryptWithInfo($basename, $ciphertext);
+        return $info['plaintext'];
     }
 
     /**
@@ -268,4 +296,3 @@ final class CryptoAgentClient
         return $decoded;
     }
 }
-

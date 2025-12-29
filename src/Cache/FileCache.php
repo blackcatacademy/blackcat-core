@@ -7,6 +7,7 @@ use Psr\SimpleCache\InvalidArgumentException as PsrInvalidArgumentException;
 use BlackCat\Core\Cache\LockingCacheInterface;
 use BlackCat\Core\Security\KeyManager;
 use BlackCat\Core\Security\Crypto;
+use BlackCat\Core\Security\CryptoAgentClient;
 use BlackCat\Core\Log\Logger;
 
 /**
@@ -25,6 +26,7 @@ class FileCache implements LockingCacheInterface
     private ?string $cryptoKeysDir = null;
     private string $cryptoEnvName = 'CACHE_CRYPTO_KEY';
     private string $cryptoBasename = 'cache_crypto';
+    private bool $useKeylessCryptoAgent = false;
 
     // storage controls
     private int $gcProbability = 1; // numerator
@@ -121,6 +123,15 @@ class FileCache implements LockingCacheInterface
                 KeyManager::requireSodium();
             } catch (\Throwable $e) {
                 throw new \RuntimeException('libsodium extension required for FileCache encryption: ' . $e->getMessage());
+            }
+
+            $this->useKeylessCryptoAgent = class_exists(CryptoAgentClient::class, true) && CryptoAgentClient::isKeylessMode();
+            if ($this->useKeylessCryptoAgent) {
+                if (!CryptoAgentClient::isConfigured()) {
+                    throw new \RuntimeException('FileCache encryption requires crypto.agent.socket_path in keyless agent mode.');
+                }
+                // Keyless mode: do not attempt to export key bytes into the web runtime.
+                return;
             }
 
             try {
@@ -502,6 +513,24 @@ class FileCache implements LockingCacheInterface
         $payload = $data['value'];
         $version = $data['key_version'] ?? null;
 
+        if ($this->useKeylessCryptoAgent) {
+            try {
+                $plain = CryptoAgentClient::decrypt($this->cryptoBasename, (string) $payload);
+                if ($plain === null) {
+                    return $default;
+                }
+                $val = @unserialize($plain, ['allowed_classes' => false]);
+                if ($val === false && $plain !== serialize(false)) {
+                    return $default;
+                }
+                $this->counters['hits']++;
+                return $val;
+            } catch (\Throwable $e) {
+                $this->log('warning', 'decrypt_via_agent failed', $e);
+                return $default;
+            }
+        }
+
         if ($version !== null && $this->cryptoKeysDir !== null) {
             try {
                 $info = KeyManager::getRawKeyBytesByVersion(
@@ -580,6 +609,24 @@ class FileCache implements LockingCacheInterface
         } else {
             $plain = serialize($value);
 
+            if ($this->useKeylessCryptoAgent) {
+                try {
+                    $info = CryptoAgentClient::encryptWithInfo($this->cryptoBasename, $plain);
+                    $encrypted = $info['ciphertext'];
+                    $version = $info['key_version'];
+                } catch (\Throwable $e) {
+                    $this->log('error', 'encrypt_via_agent failed', $e);
+                    return false;
+                }
+
+                $data = [
+                    'expires' => $expires,
+                    'value' => $encrypted,
+                    'enc' => true,
+                    'key_version' => $version,
+                ];
+                $plain = '';
+            } else {
             try {
                 $info = KeyManager::getRawKeyBytes(
                     $this->cryptoEnvName,
@@ -620,6 +667,7 @@ class FileCache implements LockingCacheInterface
                 'key_version' => $version,
             ];
             $plain = '';
+            }
         }
 
         // probabilistic GC
