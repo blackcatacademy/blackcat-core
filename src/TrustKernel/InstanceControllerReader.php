@@ -9,6 +9,10 @@ final class InstanceControllerReader
     private const SNAPSHOT_SELECTOR = '0x9711715a'; // snapshot()
     private const RELEASE_REGISTRY_SELECTOR = '0x19ee073e'; // releaseRegistry()
     private const EXPECTED_COMPONENT_ID_SELECTOR = '0xd6c1b425'; // expectedComponentId()
+    private const REPORTER_AUTHORITY_SELECTOR = '0x44f644a9'; // reporterAuthority()
+    private const MAX_CHECKIN_AGE_SEC_SELECTOR = '0x011641f2'; // maxCheckInAgeSec()
+    private const LAST_CHECKIN_AT_SELECTOR = '0x11077470'; // lastCheckInAt()
+    private const LAST_CHECKIN_OK_SELECTOR = '0x23b44f3b'; // lastCheckInOk()
     private const ATTESTATIONS_SELECTOR = '0x940992a3'; // attestations(bytes32)
     private const ATTESTATION_UPDATED_AT_SELECTOR = '0xb54917aa'; // attestationUpdatedAt(bytes32)
     private const ATTESTATION_LOCKED_SELECTOR = '0xa93a4e86'; // attestationLocked(bytes32)
@@ -34,6 +38,30 @@ final class InstanceControllerReader
     {
         $hex = $this->rpc->ethCallQuorum($instanceControllerAddress, self::EXPECTED_COMPONENT_ID_SELECTOR, 'latest');
         return self::decodeBytes32($hex);
+    }
+
+    public function reporterAuthority(string $instanceControllerAddress): string
+    {
+        $hex = $this->rpc->ethCallQuorum($instanceControllerAddress, self::REPORTER_AUTHORITY_SELECTOR, 'latest');
+        return self::decodeAddress($hex);
+    }
+
+    public function maxCheckInAgeSec(string $instanceControllerAddress): int
+    {
+        $hex = $this->rpc->ethCallQuorum($instanceControllerAddress, self::MAX_CHECKIN_AGE_SEC_SELECTOR, 'latest');
+        return self::decodeUint64($hex);
+    }
+
+    public function lastCheckInAt(string $instanceControllerAddress): int
+    {
+        $hex = $this->rpc->ethCallQuorum($instanceControllerAddress, self::LAST_CHECKIN_AT_SELECTOR, 'latest');
+        return self::decodeUint64($hex);
+    }
+
+    public function lastCheckInOk(string $instanceControllerAddress): bool
+    {
+        $hex = $this->rpc->ethCallQuorum($instanceControllerAddress, self::LAST_CHECKIN_OK_SELECTOR, 'latest');
+        return self::decodeBool($hex);
     }
 
     public function attestation(string $instanceControllerAddress, string $keyBytes32): string
