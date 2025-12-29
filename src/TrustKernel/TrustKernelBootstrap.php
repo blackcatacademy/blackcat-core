@@ -10,6 +10,7 @@ final class TrustKernelBootstrap
 {
     private static ?Web3TransportInterface $defaultTransport = null;
     private static ?TrustKernel $cachedKernel = null;
+    private static bool $runtimeGateChecked = false;
 
     /**
      * Default transport used when boot methods are called with `$transport=null`.
@@ -161,6 +162,8 @@ final class TrustKernelBootstrap
             throw new \RuntimeException('TrustKernel is not configured (missing runtime config or trust.web3).');
         }
 
+        self::enforceBootstrapRuntimeGate($logger);
+
         return $kernel;
     }
 
@@ -176,6 +179,133 @@ final class TrustKernelBootstrap
         } catch (\Throwable $e) {
             $logger?->warning('[trust-kernel] unable to boot: ' . $e->getMessage());
             return null;
+        }
+    }
+
+    private static function enforceBootstrapRuntimeGate(?LoggerInterface $logger = null): void
+    {
+        if (self::$runtimeGateChecked) {
+            return;
+        }
+        self::$runtimeGateChecked = true;
+
+        // Only enforce for HTTP runtimes (boot should not break CLI tooling or background jobs).
+        if (PHP_SAPI === 'cli' || !isset($_SERVER['REQUEST_METHOD'])) {
+            return;
+        }
+
+        $configClass = implode('\\', ['BlackCat', 'Config', 'Runtime', 'Config']);
+        $doctorClass = implode('\\', ['BlackCat', 'Config', 'Runtime', 'RuntimeDoctor']);
+
+        if (
+            !class_exists($configClass)
+            || !class_exists($doctorClass)
+            || !is_callable([$configClass, 'isInitialized'])
+            || !is_callable([$configClass, 'repo'])
+            || !is_callable([$doctorClass, 'inspect'])
+        ) {
+            return;
+        }
+
+        $isInitialized = 'isInitialized';
+        if (!(bool) $configClass::$isInitialized()) {
+            return;
+        }
+
+        $repoMethod = 'repo';
+        /** @var mixed $repo */
+        $repo = $configClass::$repoMethod();
+        if (!is_object($repo) || !method_exists($repo, 'get')) {
+            return;
+        }
+
+        $get = 'get';
+        $enforcementRaw = $repo->$get('trust.enforcement', 'strict');
+        $enforcement = is_string($enforcementRaw) ? strtolower(trim($enforcementRaw)) : 'strict';
+        if (!in_array($enforcement, ['strict', 'warn'], true)) {
+            $enforcement = 'strict';
+        }
+
+        try {
+            /** @var mixed $report */
+            $report = $doctorClass::inspect($repo);
+            $findings = is_array($report) ? ($report['findings'] ?? null) : null;
+
+            if (!is_array($findings)) {
+                return;
+            }
+
+            $fatalStrict = [
+                'php_allow_url_include_enabled' => true,
+                'php_phar_readonly_disabled' => true,
+                'php_open_basedir_unset' => true,
+                'php_disable_functions_empty' => true,
+                'php_disable_functions_missing_dangerous' => true,
+                'php_display_errors_enabled' => true,
+                'php_enable_dl_enabled' => true,
+                'php_auto_prepend_file_set' => true,
+                'php_auto_append_file_set' => true,
+                'php_cgi_fix_pathinfo_enabled' => true,
+                'php_no_transport_for_web3' => true,
+            ];
+
+            /** @var list<string> $fatalCodes */
+            $fatalCodes = [];
+            /** @var list<string> $warnLines */
+            $warnLines = [];
+
+            foreach ($findings as $f) {
+                if (!is_array($f)) {
+                    continue;
+                }
+                $code = $f['code'] ?? null;
+                if (!is_string($code) || $code === '' || str_contains($code, "\0") || !str_starts_with($code, 'php_')) {
+                    continue;
+                }
+
+                $severity = $f['severity'] ?? 'warn';
+                if (!is_string($severity) || !in_array($severity, ['info', 'warn', 'error'], true)) {
+                    $severity = 'warn';
+                }
+
+                $message = $f['message'] ?? '';
+                if (!is_string($message) || str_contains($message, "\0")) {
+                    $message = '';
+                }
+
+                $isFatal = ($severity === 'error') || isset($fatalStrict[$code]);
+                if ($isFatal) {
+                    $fatalCodes[] = $code;
+                }
+
+                $line = '[trust-kernel] runtime doctor: ' . $code;
+                if (trim($message) !== '') {
+                    $line .= ' - ' . trim($message);
+                }
+                $warnLines[] = $line;
+            }
+
+            if ($warnLines !== []) {
+                foreach ($warnLines as $line) {
+                    $logger?->warning($line);
+                    @error_log($line);
+                }
+            }
+
+            if ($enforcement === 'strict' && $fatalCodes !== []) {
+                $fatalCodes = array_values(array_unique($fatalCodes));
+                sort($fatalCodes, SORT_STRING);
+                throw new \RuntimeException(
+                    'Runtime hardening gate failed (php.ini posture). Fix these findings: ' . implode(', ', $fatalCodes)
+                );
+            }
+        } catch (\Throwable $e) {
+            if ($enforcement === 'strict') {
+                throw $e;
+            }
+
+            $logger?->warning('[trust-kernel] runtime hardening gate skipped (warn mode): ' . $e->getMessage());
+            @error_log('[trust-kernel] runtime hardening gate skipped (warn mode): ' . $e->getMessage());
         }
     }
 }
