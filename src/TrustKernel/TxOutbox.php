@@ -119,12 +119,29 @@ final class TxOutbox
      */
     public function enqueue(array $payload): string
     {
+        return $this->enqueueWithPrefix('tx', $payload);
+    }
+
+    /**
+     * @param array<string,mixed> $payload
+     * @return string written file path
+     */
+    public function enqueueWithPrefix(string $prefix, array $payload): string
+    {
+        $prefix = strtolower(trim($prefix));
+        if ($prefix === '' || str_contains($prefix, "\0")) {
+            throw new TxOutboxException('Tx outbox prefix is invalid.');
+        }
+        if (!preg_match('/^[a-z][a-z0-9_-]{0,20}$/', $prefix)) {
+            throw new TxOutboxException('Tx outbox prefix must match /^[a-z][a-z0-9_-]{0,20}$/');
+        }
+
         $json = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
         if (!is_string($json)) {
             throw new TxOutboxException('Tx outbox payload JSON encode failed.');
         }
 
-        $base = 'tx.' . gmdate('Ymd\\THis\\Z') . '.' . bin2hex(random_bytes(6));
+        $base = $prefix . '.' . gmdate('Ymd\\THis\\Z') . '.' . bin2hex(random_bytes(6));
         $tmp = $this->dir . DIRECTORY_SEPARATOR . $base . '.tmp';
         $final = $this->dir . DIRECTORY_SEPARATOR . $base . '.json';
 
