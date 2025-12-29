@@ -96,4 +96,32 @@ final class TxOutboxTest extends TestCase
             @rmdir($dir);
         }
     }
+
+    public function testEnqueueRejectsOversizedPayload(): void
+    {
+        $dir = sys_get_temp_dir() . '/blackcat-core-tx-outbox-big-' . bin2hex(random_bytes(6));
+        mkdir($dir, 0700, true);
+
+        try {
+            $outbox = new TxOutbox($dir);
+
+            $this->expectException(TxOutboxException::class);
+            $this->expectExceptionMessage('too large');
+
+            $outbox->enqueue([
+                'schema_version' => 1,
+                'type' => 'blackcat.tx_request',
+                'to' => '0x1111111111111111111111111111111111111111',
+                'method' => 'reportIncident(bytes32)',
+                'args' => ['0x' . str_repeat('00', 32)],
+                // ensure > 256KiB after JSON encoding
+                'meta' => ['blob' => str_repeat('A', 300 * 1024)],
+            ]);
+        } finally {
+            foreach (glob($dir . '/*') ?: [] as $file) {
+                @unlink((string) $file);
+            }
+            @rmdir($dir);
+        }
+    }
 }

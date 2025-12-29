@@ -262,12 +262,21 @@ class FileCache implements LockingCacheInterface
             return false;
         }
 
+        $maxBytes = $this->maxEntryBytes > 0 ? $this->maxEntryBytes : 32 * 1024 * 1024; // hard safety cap
+        $size = @filesize($file);
+        if (is_int($size) && $size > $maxBytes) {
+            return false;
+        }
+
         $fp = @fopen($file, 'rb');
         if ($fp === false) return false;
         if (!flock($fp, LOCK_SH)) { fclose($fp); return false; }
-        $contents = stream_get_contents($fp);
+        $contents = stream_get_contents($fp, $maxBytes + 1);
         flock($fp, LOCK_UN);
         fclose($fp);
+        if (!is_string($contents) || strlen($contents) > $maxBytes) {
+            return false;
+        }
         return $contents;
     }
 

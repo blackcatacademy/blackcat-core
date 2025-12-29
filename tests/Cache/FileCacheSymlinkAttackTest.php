@@ -48,5 +48,31 @@ final class FileCacheSymlinkAttackTest extends TestCase
             @rmdir($cacheDir);
         }
     }
-}
 
+    public function testGetReturnsDefaultWhenCacheFileTooLarge(): void
+    {
+        $cacheDir = sys_get_temp_dir() . '/blackcat-core-cache-big-' . bin2hex(random_bytes(6));
+        mkdir($cacheDir, 0700, true);
+
+        try {
+            // Max entry 1KB, so a 2KB cache file must be rejected by safeFileRead.
+            $cache = new FileCache($cacheDir, false, null, 'CACHE_CRYPTO_KEY', 'cache_crypto', 0, 0, 0, 1024);
+            $key = 'example_key2';
+
+            $m = new \ReflectionMethod(FileCache::class, 'getPath');
+            $m->setAccessible(true);
+            /** @var string $cacheFile */
+            $cacheFile = $m->invoke($cache, $key);
+
+            file_put_contents($cacheFile, str_repeat('X', 2048));
+
+            $v = $cache->get($key, 'DEFAULT');
+            self::assertSame('DEFAULT', $v);
+        } finally {
+            foreach (glob($cacheDir . DIRECTORY_SEPARATOR . '*') ?: [] as $f) {
+                @unlink((string) $f);
+            }
+            @rmdir($cacheDir);
+        }
+    }
+}

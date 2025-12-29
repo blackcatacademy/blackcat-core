@@ -109,4 +109,23 @@ final class AuditChainTest extends TestCase
         $this->expectExceptionMessage('too large');
         $ac->head();
     }
+
+    public function testAppendRejectsOversizedEntry(): void
+    {
+        $dir = sys_get_temp_dir() . '/blackcat-core-audit-chain-entrysize-' . bin2hex(random_bytes(6));
+        mkdir($dir, 0750, true);
+
+        try {
+            $ac = new AuditChain($dir);
+
+            $this->expectException(\RuntimeException::class);
+            $this->expectExceptionMessage('too large');
+            $ac->append('test.big', ['blob' => str_repeat('B', 80 * 1024)]);
+        } finally {
+            foreach (glob($dir . '/*') ?: [] as $file) {
+                @unlink((string) $file);
+            }
+            @rmdir($dir);
+        }
+    }
 }

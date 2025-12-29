@@ -24,6 +24,7 @@ final class AuditChain
     private const LOG_FILE = 'audit.log.ndjson';
     private const LOCK_FILE = '.audit.lock';
     private const MAX_HEAD_BYTES = 64 * 1024; // 64 KiB (bounded read)
+    private const MAX_ENTRY_BYTES = 64 * 1024; // 64 KiB (anti-DoS/disk-fill)
 
     public readonly string $dir;
 
@@ -335,6 +336,9 @@ final class AuditChain
         $json = json_encode($entry, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         if (!is_string($json)) {
             throw new AuditChainException('Audit entry JSON encode failed.');
+        }
+        if (strlen($json) > self::MAX_ENTRY_BYTES) {
+            throw new AuditChainException('Audit entry is too large.');
         }
 
         $fp = @fopen($logPath, 'ab');

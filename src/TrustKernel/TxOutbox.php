@@ -19,6 +19,8 @@ final class TxOutboxException extends \RuntimeException {}
  */
 final class TxOutbox
 {
+    private const MAX_PAYLOAD_BYTES = 256 * 1024; // 256 KiB (anti-DoS/disk-fill)
+
     public readonly string $dir;
 
     public function __construct(
@@ -166,6 +168,9 @@ final class TxOutbox
         $json = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
         if (!is_string($json)) {
             throw new TxOutboxException('Tx outbox payload JSON encode failed.');
+        }
+        if (strlen($json) > self::MAX_PAYLOAD_BYTES) {
+            throw new TxOutboxException('Tx outbox payload is too large.');
         }
 
         $base = $prefix . '.' . gmdate('Ymd\\THis\\Z') . '.' . bin2hex(random_bytes(6));
