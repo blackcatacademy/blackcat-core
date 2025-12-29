@@ -152,6 +152,11 @@ final class DbCredentialsAgentClient
             throw new DbCredentialsAgentException('DB credentials agent socket path is invalid.');
         }
 
+        clearstatcache(true, $socketPath);
+        if (file_exists($socketPath) && is_link($socketPath)) {
+            throw new DbCredentialsAgentException('Refusing to connect to symlink socket path: ' . $socketPath);
+        }
+
         $endpoint = 'unix://' . $socketPath;
         $errno = 0;
         $errstr = '';
@@ -205,4 +210,3 @@ final class DbCredentialsAgentClient
         return $decoded;
     }
 }
-

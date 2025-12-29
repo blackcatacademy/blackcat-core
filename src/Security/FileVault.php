@@ -183,6 +183,16 @@ final class FileVault
      */
     public static function uploadAndEncrypt(string $srcTmp, string $destEnc)
     {
+        // Basic hardening: do not allow writing into existing symlinks (prevents symlink swap attacks).
+        if (file_exists($destEnc) && is_link($destEnc)) {
+            self::logError('uploadAndEncrypt: refusing to write to symlink destination: ' . $destEnc);
+            return false;
+        }
+        if (file_exists($destEnc . '.meta') && is_link($destEnc . '.meta')) {
+            self::logError('uploadAndEncrypt: refusing to write to symlink meta destination: ' . $destEnc . '.meta');
+            return false;
+        }
+
         if (FileVaultAgentClient::isConfigured()) {
             return self::uploadAndEncryptViaAgent($srcTmp, $destEnc);
         }
@@ -660,6 +670,11 @@ final class FileVault
             return false;
         }
 
+        if (file_exists($destPlain) && is_link($destPlain)) {
+            self::logError('decryptToFile: refusing to write to symlink destination: ' . $destPlain);
+            return false;
+        }
+
         $metaPath = $encPath . '.meta';
         $meta = null;
         if (is_readable($metaPath)) {
@@ -833,6 +848,15 @@ final class FileVault
 
     private static function uploadAndEncryptViaAgent(string $srcTmp, string $destEnc): string|false
     {
+        if (file_exists($destEnc) && is_link($destEnc)) {
+            self::logError('uploadAndEncrypt: refusing to write to symlink destination: ' . $destEnc);
+            return false;
+        }
+        if (file_exists($destEnc . '.meta') && is_link($destEnc . '.meta')) {
+            self::logError('uploadAndEncrypt: refusing to write to symlink meta destination: ' . $destEnc . '.meta');
+            return false;
+        }
+
         if (!is_readable($srcTmp)) {
             self::logError('uploadAndEncrypt: source not readable: ' . $srcTmp);
             return false;

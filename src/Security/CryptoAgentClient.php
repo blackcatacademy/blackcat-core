@@ -243,6 +243,11 @@ final class CryptoAgentClient
             throw new CryptoAgentException('Crypto agent socket path is invalid.');
         }
 
+        clearstatcache(true, $socketPath);
+        if (file_exists($socketPath) && is_link($socketPath)) {
+            throw new CryptoAgentException('Refusing to connect to symlink socket path: ' . $socketPath);
+        }
+
         $endpoint = 'unix://' . $socketPath;
         $errno = 0;
         $errstr = '';

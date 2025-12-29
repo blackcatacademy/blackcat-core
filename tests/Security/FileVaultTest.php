@@ -107,6 +107,79 @@ final class FileVaultTest extends TestCase
         $this->rmrf($base);
     }
 
+    public function testUploadRefusesSymlinkDestination(): void
+    {
+        if (!function_exists('symlink')) {
+            $this->markTestSkipped('symlink() is not available on this platform.');
+        }
+
+        $base = sys_get_temp_dir() . '/blackcat-core-filevault-symlink-' . bin2hex(random_bytes(6));
+        $keysDir = $base . '/keys';
+        $outDir = $base . '/out';
+        mkdir($keysDir, 0700, true);
+        mkdir($outDir, 0700, true);
+
+        $keyPath = $keysDir . '/filevault_key_v1.key';
+        file_put_contents($keyPath, random_bytes(32));
+        chmod($keyPath, 0400);
+
+        FileVault::setKeysDir($keysDir);
+
+        $plainPath = $base . '/plain.txt';
+        file_put_contents($plainPath, 'hello');
+
+        $target = $outDir . '/target.txt';
+        file_put_contents($target, 'x');
+
+        $encPath = $outDir . '/test.enc';
+        $ok = @symlink($target, $encPath);
+        if ($ok !== true) {
+            $this->markTestSkipped('Unable to create symlink on this platform/filesystem.');
+        }
+
+        self::assertFalse(FileVault::uploadAndEncrypt($plainPath, $encPath));
+
+        $this->rmrf($base);
+    }
+
+    public function testDecryptRefusesSymlinkDestination(): void
+    {
+        if (!function_exists('symlink')) {
+            $this->markTestSkipped('symlink() is not available on this platform.');
+        }
+
+        $base = sys_get_temp_dir() . '/blackcat-core-filevault-dec-symlink-' . bin2hex(random_bytes(6));
+        $keysDir = $base . '/keys';
+        $outDir = $base . '/out';
+        mkdir($keysDir, 0700, true);
+        mkdir($outDir, 0700, true);
+
+        $keyPath = $keysDir . '/filevault_key_v1.key';
+        file_put_contents($keyPath, random_bytes(32));
+        chmod($keyPath, 0400);
+
+        FileVault::setKeysDir($keysDir);
+
+        $plainPath = $base . '/plain.txt';
+        file_put_contents($plainPath, 'hello');
+
+        $encPath = $outDir . '/test.enc';
+        self::assertSame($encPath, FileVault::uploadAndEncrypt($plainPath, $encPath));
+
+        $realDest = $outDir . '/real.txt';
+        file_put_contents($realDest, 'x');
+
+        $dest = $outDir . '/dest.txt';
+        $ok = @symlink($realDest, $dest);
+        if ($ok !== true) {
+            $this->markTestSkipped('Unable to create symlink on this platform/filesystem.');
+        }
+
+        self::assertFalse(FileVault::decryptToFile($encPath, $dest));
+
+        $this->rmrf($base);
+    }
+
     private function rmrf(string $path): void
     {
         if (!file_exists($path)) {
@@ -129,4 +202,3 @@ final class FileVaultTest extends TestCase
         @rmdir($path);
     }
 }
-
