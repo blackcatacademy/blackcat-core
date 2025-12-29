@@ -183,6 +183,10 @@ final class FileVault
      */
     public static function uploadAndEncrypt(string $srcTmp, string $destEnc)
     {
+        if (FileVaultAgentClient::isConfigured()) {
+            return self::uploadAndEncryptViaAgent($srcTmp, $destEnc);
+        }
+
         if (!is_readable($srcTmp)) {
             self::logError('uploadAndEncrypt: source not readable: ' . $srcTmp);
             return false;
@@ -445,6 +449,10 @@ final class FileVault
             ? (int)$meta['plain_size']
             : null;
 
+        if (FileVaultAgentClient::isConfigured()) {
+            return self::decryptAndStreamViaAgent($encPath, $downloadName, $mimeType, $contentLength);
+        }
+
         try {
             $keyInfo = self::getFilevaultKeyInfo($specificKeyVersion);
             $key = &$keyInfo['raw'];
@@ -636,6 +644,335 @@ final class FileVault
             if (isset($key) && is_string($key) && $key !== '') {
                 try { KeyManager::memzero($key); } catch (\Throwable $_) {}
             }
+        }
+    }
+
+    /**
+     * Decrypt encrypted file to a destination file.
+     *
+     * - Does not send any headers / output.
+     * - Uses a temp file + atomic rename when possible.
+     */
+    public static function decryptToFile(string $encPath, string $destPlain): bool
+    {
+        if (!is_readable($encPath)) {
+            self::logError('decryptToFile: encrypted file not readable: ' . $encPath);
+            return false;
+        }
+
+        $metaPath = $encPath . '.meta';
+        $meta = null;
+        if (is_readable($metaPath)) {
+            $metaJson = file_get_contents($metaPath);
+            if ($metaJson !== false) {
+                $tmp = json_decode($metaJson, true);
+                if (is_array($tmp)) $meta = $tmp;
+            }
+        }
+
+        $fh = fopen($encPath, 'rb');
+        if ($fh === false) {
+            self::logError('decryptToFile: cannot open encrypted file: ' . $encPath);
+            return false;
+        }
+
+        $destDir = dirname($destPlain);
+        if (!is_dir($destDir)) {
+            if (!mkdir($destDir, 0750, true) && !is_dir($destDir)) {
+                fclose($fh);
+                self::logError('decryptToFile: failed to create destination directory: ' . $destDir);
+                return false;
+            }
+        }
+
+        $tmpOut = $destDir . DIRECTORY_SEPARATOR . '.tmp-' . bin2hex(random_bytes(6)) . '.plain';
+        $out = fopen($tmpOut, 'wb');
+        if ($out === false) {
+            fclose($fh);
+            self::logError('decryptToFile: cannot open destination for write: ' . $tmpOut);
+            return false;
+        }
+
+        try {
+            $versionByte = fread($fh, 1);
+            if ($versionByte === false || strlen($versionByte) !== 1) {
+                throw new \RuntimeException('failed reading version byte');
+            }
+            $version = ord($versionByte);
+            if ($version !== self::VERSION && $version !== self::LEGACY_VERSION) {
+                throw new \RuntimeException('unsupported version: ' . $version);
+            }
+
+            $specificKeyVersion = is_array($meta) ? ($meta['key_version'] ?? null) : null;
+            $fileKeyId = null;
+            $ivLenByte = null;
+            if ($version === self::VERSION) {
+                $b = fread($fh, 1);
+                if ($b === false || strlen($b) !== 1) {
+                    throw new \RuntimeException('failed reading key id len');
+                }
+                $keyIdLen = ord($b);
+                if ($keyIdLen > 0) {
+                    $keyIdRaw = fread($fh, $keyIdLen);
+                    if ($keyIdRaw === false || strlen($keyIdRaw) !== $keyIdLen) {
+                        throw new \RuntimeException('failed reading key id');
+                    }
+                    $fileKeyId = $keyIdRaw;
+                }
+                $ivLenByte = fread($fh, 1);
+                if ($ivLenByte === false || strlen($ivLenByte) !== 1) {
+                    throw new \RuntimeException('failed reading iv_len');
+                }
+            } else {
+                $ivLenByte = fread($fh, 1);
+                if ($ivLenByte === false || strlen($ivLenByte) !== 1) {
+                    throw new \RuntimeException('failed reading iv_len');
+                }
+            }
+
+            if (!is_string($specificKeyVersion) || $specificKeyVersion === '') {
+                $specificKeyVersion = $fileKeyId;
+            }
+            if (!is_string($specificKeyVersion) || trim($specificKeyVersion) === '') {
+                $specificKeyVersion = null;
+            }
+
+            try {
+                $keyInfo = self::getFilevaultKeyInfo(is_string($specificKeyVersion) ? (string) $specificKeyVersion : null);
+                $key = &$keyInfo['raw'];
+                $keyVersion = $keyInfo['version'];
+            } catch (\Throwable $e) {
+                throw new \RuntimeException('key retrieval failed');
+            }
+
+            $iv_len = ord((string) $ivLenByte);
+            $expectedIvLen = SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_NPUBBYTES;
+            if ($iv_len !== $expectedIvLen) {
+                throw new \RuntimeException('unreasonable iv_len: ' . $iv_len);
+            }
+
+            $iv = fread($fh, $iv_len);
+            if ($iv === false || strlen($iv) !== $iv_len) throw new \RuntimeException('failed reading iv/header');
+
+            $b = fread($fh, 1);
+            if ($b === false || strlen($b) !== 1) throw new \RuntimeException('failed reading tag_len');
+            $tag_len = ord($b);
+            if ($tag_len !== 0 && $tag_len !== SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_ABYTES) {
+                throw new \RuntimeException('unreasonable tag_len: ' . $tag_len);
+            }
+
+            $tag = '';
+            if ($tag_len > 0) {
+                $tag = fread($fh, $tag_len);
+                if ($tag === false || strlen($tag) !== $tag_len) throw new \RuntimeException('failed reading tag');
+            }
+
+            if ($tag_len > 0) {
+                $cipher = stream_get_contents($fh);
+                if ($cipher === false) throw new \RuntimeException('failed reading ciphertext');
+                $combined = $cipher . $tag;
+                $plain = sodium_crypto_aead_xchacha20poly1305_ietf_decrypt($combined, '', $iv, $key);
+                if ($plain === false) throw new \RuntimeException('single-pass decryption failed (auth)');
+                if (fwrite($out, $plain) === false) throw new \RuntimeException('write failed');
+            } else {
+                $state = sodium_crypto_secretstream_xchacha20poly1305_init_pull($iv, $key);
+                while (!feof($fh)) {
+                    $lenBuf = fread($fh, 4);
+                    if ($lenBuf === false || strlen($lenBuf) === 0) {
+                        break; // EOF
+                    }
+                    if (strlen($lenBuf) !== 4) throw new \RuntimeException('incomplete frame length header');
+                    $un = unpack('Nlen', $lenBuf);
+                    $frameLen = $un['len'] ?? 0;
+                    if ($frameLen <= 0) throw new \RuntimeException('invalid frame length: ' . $frameLen);
+                    $frame = fread($fh, $frameLen);
+                    if ($frame === false || strlen($frame) !== $frameLen) throw new \RuntimeException('failed reading frame payload');
+
+                    $res = sodium_crypto_secretstream_xchacha20poly1305_pull($state, $frame);
+                    if ($res === false || !is_array($res)) throw new \RuntimeException('secretstream pull failed (auth?)');
+                    [$plainChunk, $tagFrame] = $res;
+                    if ($plainChunk !== '') {
+                        if (fwrite($out, $plainChunk) === false) throw new \RuntimeException('write failed');
+                    }
+
+                    if ($tagFrame === SODIUM_CRYPTO_SECRETSTREAM_XCHACHA20POLY1305_TAG_FINAL) {
+                        break;
+                    }
+                }
+            }
+
+            fflush($out);
+            fclose($out);
+            fclose($fh);
+            $out = null;
+            $fh = null;
+
+            chmod($tmpOut, 0600);
+
+            if (!@rename($tmpOut, $destPlain)) {
+                if (!copy($tmpOut, $destPlain) || !unlink($tmpOut)) {
+                    @unlink($tmpOut);
+                    throw new \RuntimeException('failed to move tmp file to destination');
+                }
+            }
+            chmod($destPlain, 0600);
+
+            return true;
+        } catch (\Throwable $e) {
+            self::logError('decryptToFile: ' . $e->getMessage());
+            return false;
+        } finally {
+            if (is_resource($fh)) fclose($fh);
+            if (is_resource($out)) fclose($out);
+            @unlink($tmpOut);
+            if (isset($key) && is_string($key) && $key !== '') {
+                try { KeyManager::memzero($key); } catch (\Throwable $_) {}
+            }
+        }
+    }
+
+    private static function uploadAndEncryptViaAgent(string $srcTmp, string $destEnc): string|false
+    {
+        if (!is_readable($srcTmp)) {
+            self::logError('uploadAndEncrypt: source not readable: ' . $srcTmp);
+            return false;
+        }
+
+        $filesize = filesize($srcTmp);
+        if ($filesize === false) {
+            self::logError('uploadAndEncrypt: cannot stat source: ' . $srcTmp);
+            return false;
+        }
+
+        $destDir = dirname($destEnc);
+        if (!is_dir($destDir)) {
+            if (!mkdir($destDir, 0750, true) && !is_dir($destDir)) {
+                self::logError('uploadAndEncrypt: failed to create destination directory: ' . $destDir);
+                return false;
+            }
+        }
+
+        $tmpDest = $destDir . DIRECTORY_SEPARATOR . '.tmp-' . bin2hex(random_bytes(6)) . '.enc';
+        $out = fopen($tmpDest, 'wb');
+        if ($out === false) {
+            self::logError('uploadAndEncrypt: cannot open destination for write: ' . $tmpDest);
+            return false;
+        }
+
+        $in = fopen($srcTmp, 'rb');
+        if ($in === false) {
+            fclose($out);
+            @unlink($tmpDest);
+            self::logError('uploadAndEncrypt: cannot open source for read: ' . $srcTmp);
+            return false;
+        }
+
+        try {
+            $meta = FileVaultAgentClient::encryptStream('filevault_key', $filesize, $in, $out, self::$bridgeSlot ?: null);
+            fclose($in);
+            fclose($out);
+            $in = null;
+            $out = null;
+
+            $metaJson = json_encode($meta, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            if ($metaJson === false) {
+                throw new \RuntimeException('meta json encode failed');
+            }
+
+            $metaTmp = $tmpDest . '.meta';
+            if (file_put_contents($metaTmp, $metaJson, LOCK_EX) === false) {
+                @unlink($metaTmp);
+                throw new \RuntimeException('failed writing meta temp file');
+            }
+            chmod($metaTmp, 0600);
+            chmod($tmpDest, 0600);
+
+            if (!@rename($tmpDest, $destEnc)) {
+                if (!copy($tmpDest, $destEnc) || !unlink($tmpDest)) {
+                    @unlink($tmpDest);
+                    @unlink($metaTmp);
+                    throw new \RuntimeException('failed to move tmp file to destination');
+                }
+            }
+            if (!@rename($metaTmp, $destEnc . '.meta')) {
+                if (!copy($metaTmp, $destEnc . '.meta') || !unlink($metaTmp)) {
+                    self::logError('uploadAndEncrypt: meta move failed for ' . $destEnc . '.meta');
+                } else {
+                    chmod($destEnc . '.meta', 0600);
+                }
+            } else {
+                chmod($destEnc . '.meta', 0600);
+            }
+
+            return $destEnc;
+        } catch (\Throwable $e) {
+            self::logError('uploadAndEncrypt (agent): ' . $e->getMessage());
+            return false;
+        } finally {
+            if (is_resource($in)) fclose($in);
+            if (is_resource($out)) fclose($out);
+            @unlink($tmpDest);
+            @unlink($tmpDest . '.meta');
+        }
+    }
+
+    private static function decryptAndStreamViaAgent(string $encPath, string $downloadName, string $mimeType, ?int $contentLength): bool
+    {
+        $cipherSize = filesize($encPath);
+        if ($cipherSize === false) {
+            self::logError('decryptAndStream (agent): cannot stat encrypted file: ' . $encPath);
+            return false;
+        }
+
+        if (!headers_sent()) {
+            header('Content-Type: ' . $mimeType);
+            $safeName = basename((string)$downloadName);
+            header('Content-Disposition: attachment; filename="' . $safeName . '"');
+            if ($contentLength !== null) {
+                header('Content-Length: ' . (string)$contentLength);
+            } else {
+                header('Transfer-Encoding: chunked');
+            }
+        }
+
+        $in = fopen($encPath, 'rb');
+        if ($in === false) {
+            self::logError('decryptAndStream (agent): cannot open encrypted file: ' . $encPath);
+            return false;
+        }
+
+        $out = fopen('php://output', 'wb');
+        if ($out === false) {
+            fclose($in);
+            self::logError('decryptAndStream (agent): cannot open output stream');
+            return false;
+        }
+
+        try {
+            $res = FileVaultAgentClient::decryptStream('filevault_key', $cipherSize, $in, $out);
+            @ob_flush();
+            @flush();
+
+            // audit log (best-effort)
+            $metaPath = $encPath . '.meta';
+            $meta = null;
+            if (is_readable($metaPath)) {
+                $metaJson = file_get_contents($metaPath);
+                if ($metaJson !== false) {
+                    $tmp = json_decode($metaJson, true);
+                    if (is_array($tmp)) $meta = $tmp;
+                }
+            }
+            $auditKeyId = is_array($meta) && is_string($meta['key_id'] ?? null) ? (string) $meta['key_id'] : null;
+            self::maybeAudit($encPath, $downloadName, $contentLength ?? $res['plain_size'], $res['key_version'], $auditKeyId);
+
+            return true;
+        } catch (\Throwable $e) {
+            self::logError('decryptAndStream (agent): ' . $e->getMessage());
+            return false;
+        } finally {
+            fclose($in);
+            fclose($out);
         }
     }
 
