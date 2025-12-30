@@ -14,6 +14,7 @@ use Psr\SimpleCache\CacheInterface;
  * Optional $opts:
  *   - timeout: int seconds (default 8)
  *   - endpoint: verification URL (default google)
+ *   - allowed_hosts: list of allowed endpoint hosts (defaults to the endpoint host)
  *   - logger: null | string (class name) | callable | object
  *       If string and class exists, static methods will be used when possible (error/info/debug).
  *       If callable, will be called as fn($level, $message, $ctx = []).
