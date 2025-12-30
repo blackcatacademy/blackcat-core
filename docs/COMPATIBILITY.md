@@ -1,25 +1,22 @@
-# Compatibility facades (legacy names)
+# Compatibility / migration notes
 
-The BlackCat ecosystem evolved into separate modules. For smoother migrations, `blackcat-core` keeps a few **compatibility facades**.
+`blackcat-core` is a **fail-closed kernel**. To keep the attack surface minimal and avoid “shadow APIs”, it intentionally does **not** ship compatibility facades (`class_alias` shims) for other modules.
 
-They follow a strict rule:
-- **No duplicated source of truth** inside core
-- If the target module is installed → core `class_alias`-es the real implementation
-- If not installed → core fails fast with a clear “install X” error (or returns safe defaults)
+If you are migrating older code that referenced legacy names, update your imports to the dedicated module package.
 
-## Mapping
+## Common migration mapping
 
-- `BlackCat\Core\Messaging\Outbox` / `Inbox` → `blackcatacademy/blackcat-messaging`
+- `BlackCat\Core\Messaging\*` → `blackcatacademy/blackcat-messaging`
 - `BlackCat\Core\Mail\Mailer` → `blackcatacademy/blackcat-mailing`
 - `BlackCat\Core\Security\Auth` / `LoginLimiter` → `blackcatacademy/blackcat-auth`
-- `BlackCat\Core\Session\SessionManager` / `DbCachedSessionHandler` → `blackcatacademy/blackcat-sessions`
+- `BlackCat\Core\Session\*` → `blackcatacademy/blackcat-sessions`
 - global `JWT` → `blackcatacademy/blackcat-jwt`
 - global `RBAC` → `blackcatacademy/blackcat-rbac`
 - global `JobQueue` → `blackcatacademy/blackcat-jobs`
 - `BlackCat\Core\Payment\*` → `blackcatacademy/blackcat-gopay`
 
-## Recommendation
+## Why
 
-New code should:
-- depend on the dedicated module directly (not the facade)
-- rely on `blackcat-database` generated repositories (no raw SQL in domain modules)
+- Less code in the kernel = smaller audited surface.
+- No “safe defaults” that accidentally disable security when a module is missing.
+- Clear ownership: business logic and workers live in their dedicated repos.

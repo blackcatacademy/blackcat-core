@@ -97,4 +97,4 @@ See [Security](SECURITY.md).
 
 - Copy-paste snippets: [Bootstrap Examples](BOOTSTRAP_EXAMPLES.md)
 - Common setup/runtime issues: [Troubleshooting](TROUBLESHOOTING.md)
-- Legacy facade mapping: [Compatibility](COMPATIBILITY.md)
+- Migration notes / module boundaries: [Compatibility](COMPATIBILITY.md)

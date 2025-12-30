@@ -35,16 +35,11 @@ To keep a single source of truth and avoid duplicated business logic, these belo
 - **RBAC** → `blackcatacademy/blackcat-rbac`
 - **GoPay** → `blackcatacademy/blackcat-gopay`
 
-## Compatibility facades (optional)
+## No legacy facades
 
-Some legacy class names are kept as **thin facades**. When the target module is installed, the class is `class_alias`-ed to the real implementation; otherwise it fails fast with a clear error:
+For a fail-closed kernel and a clean single-source-of-truth model, `blackcat-core` intentionally does **not** ship `class_alias` compatibility facades for other modules.
 
-- `BlackCat\Core\Messaging\Outbox` / `Inbox` → `blackcatacademy/blackcat-messaging`
-- `BlackCat\Core\Mail\Mailer` → `blackcatacademy/blackcat-mailing`
-- `BlackCat\Core\Security\Auth` / `LoginLimiter` → `blackcatacademy/blackcat-auth`
-- Global `JWT`, `RBAC`, `JobQueue` → `blackcatacademy/blackcat-jwt`, `blackcatacademy/blackcat-rbac`, `blackcatacademy/blackcat-jobs`
-
-New code should depend on the dedicated module directly.
+If you need auth/sessions/jobs/jwt/rbac/messaging/payments, depend on the dedicated module directly (see list above).
 
 ## Install
 

@@ -29,7 +29,7 @@ Core does **not** own domain truth (schemas, views, auth flows, workers).
 
 - Freeze kernel boundaries and document them (README + `docs/*`).
 - Remove non-kernel leftovers (app-specific helpers, legacy SQL snippets).
-- Keep compatibility facades but document them clearly (`docs/COMPATIBILITY.md`).
+- Do not ship compatibility facades in core (use dedicated modules; see `docs/COMPATIBILITY.md`).
 - Add CI (phpunit + phpstan) and a minimal unit test suite for the kernel primitives.
 - Align ecosystem requirements (supported PHP version policy, required extensions).
 

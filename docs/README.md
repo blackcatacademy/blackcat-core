@@ -16,6 +16,6 @@
 - [Trust Kernel Status](TRUST_KERNEL_STATUS.md) — minimal health output (JSON) for monitoring/automation.
 - [Trust Watchdog](TRUST_WATCHDOG.md) — planned “security grid” worker (local + remote sentinel model).
 - [Troubleshooting](TROUBLESHOOTING.md) — common runtime/setup issues.
-- [Compatibility](COMPATIBILITY.md) — legacy facades and recommended migrations.
+- [Compatibility](COMPATIBILITY.md) — migration notes (no shims in core).
 - [Roadmap](ROADMAP.md) — planned stabilization and next steps.
 - [Versioning](VERSIONING.md) — SemVer and what is considered stable kernel API.

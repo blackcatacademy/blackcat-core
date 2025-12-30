@@ -29,7 +29,7 @@
     "ext-curl": "Used by some optional helpers (e.g. Recaptcha).",
     "ext-mbstring": "Improves SQL preview sanitization and multibyte handling in logs.",
     "blackcatacademy/blackcat-database": "Generated repositories + installer (single source of truth for schemas/views).",
-    "blackcatacademy/blackcat-sessions": "DB-backed sessions module (recommended over legacy core session helpers).",
+    "blackcatacademy/blackcat-sessions": "DB-backed sessions module.",
     "blackcatacademy/blackcat-mailing": "DB-backed notifications + mail worker.",
     "blackcatacademy/blackcat-messaging": "DB-backed outbox/inbox and messaging workers.",
     "blackcatacademy/blackcat-auth": "Authentication flows (register/login/reset/verify/magic-link/webauthn).",
