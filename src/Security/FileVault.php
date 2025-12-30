@@ -218,7 +218,8 @@ final class FileVault
             return false;
         }
 
-        $filesize = filesize($srcTmp) ?: 0;
+        $filesizeRaw = filesize($srcTmp);
+        $filesize = is_int($filesizeRaw) ? $filesizeRaw : null;
         $destDir = dirname($destEnc);
         if (self::isSymlinkPath($destDir)) {
             self::logError('uploadAndEncrypt: refusing to write into symlink directory: ' . $destDir);
@@ -270,7 +271,7 @@ final class FileVault
                 throw new \RuntimeException('failed writing key id');
             }
 
-            $useStream = ($filesize > self::STREAM_THRESHOLD);
+            $useStream = ($filesize === null) || ($filesize > self::STREAM_THRESHOLD);
 
             if ($useStream) {
                 // secretstream init_push
@@ -295,9 +296,11 @@ final class FileVault
                 $in = fopen($srcTmp, 'rb');
                 if ($in === false) throw new \RuntimeException('cannot open source for read: ' . $srcTmp);
 
+                $plainSize = 0;
                 while (!feof($in)) {
                     $chunk = fread($in, self::FRAME_SIZE);
                     if ($chunk === false) throw new \RuntimeException('read error from source');
+                    $plainSize += strlen($chunk);
                     $isFinal = feof($in);
                     $tag = $isFinal ? SODIUM_CRYPTO_SECRETSTREAM_XCHACHA20POLY1305_TAG_FINAL : SODIUM_CRYPTO_SECRETSTREAM_XCHACHA20POLY1305_TAG_MESSAGE;
                     $frame = sodium_crypto_secretstream_xchacha20poly1305_push($state, $chunk, '', $tag);
@@ -316,7 +319,7 @@ final class FileVault
 
                 // write meta atomically
                 $meta = [
-                    'plain_size' => $filesize,
+                    'plain_size' => $plainSize,
                     'mode' => 'stream',
                     'version' => self::VERSION,
                     'key_version' => $keyVersion,
@@ -362,8 +365,11 @@ final class FileVault
             }
 
             // SINGLE-PASS small file
-            $plaintext = file_get_contents($srcTmp);
+            $plaintext = file_get_contents($srcTmp, false, null, 0, self::STREAM_THRESHOLD + 1);
             if ($plaintext === false) throw new \RuntimeException('failed to read small source into memory');
+            if (strlen($plaintext) > self::STREAM_THRESHOLD) {
+                throw new \RuntimeException('source too large for single-pass mode');
+            }
 
             // AEAD encrypt
             $nonce = random_bytes(SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_NPUBBYTES);
