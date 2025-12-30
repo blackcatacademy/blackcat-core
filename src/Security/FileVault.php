@@ -27,6 +27,10 @@ final class FileVault
     private const LEGACY_VERSION = 1;
     private const STREAM_THRESHOLD = 20 * 1024 * 1024; // 20 MB
     private const FRAME_SIZE = 1 * 1024 * 1024; // 1 MB
+    private const MAX_META_BYTES = 32 * 1024; // meta is tiny; refuse oversized reads
+    private const MAX_SINGLEPASS_CIPHER_BYTES = self::STREAM_THRESHOLD + 1024; // allow small header overhead
+    private const MAX_SECRETSTREAM_FRAME_BYTES =
+        self::FRAME_SIZE + SODIUM_CRYPTO_SECRETSTREAM_XCHACHA20POLY1305_ABYTES;
 
     /* -------- configuration / dependency injection (no getenv / no $GLOBALS) -------- */
     /** @var string|null explicitly configured keys directory */
@@ -184,11 +188,11 @@ final class FileVault
     public static function uploadAndEncrypt(string $srcTmp, string $destEnc)
     {
         // Basic hardening: do not allow writing into existing symlinks (prevents symlink swap attacks).
-        if (file_exists($destEnc) && is_link($destEnc)) {
+        if (file_exists($destEnc) && self::isSymlinkPath($destEnc)) {
             self::logError('uploadAndEncrypt: refusing to write to symlink destination: ' . $destEnc);
             return false;
         }
-        if (file_exists($destEnc . '.meta') && is_link($destEnc . '.meta')) {
+        if (file_exists($destEnc . '.meta') && self::isSymlinkPath($destEnc . '.meta')) {
             self::logError('uploadAndEncrypt: refusing to write to symlink meta destination: ' . $destEnc . '.meta');
             return false;
         }
@@ -216,6 +220,11 @@ final class FileVault
 
         $filesize = filesize($srcTmp) ?: 0;
         $destDir = dirname($destEnc);
+        if (self::isSymlinkPath($destDir)) {
+            self::logError('uploadAndEncrypt: refusing to write into symlink directory: ' . $destDir);
+            if (isset($key) && is_string($key)) { KeyManager::memzero($key); }
+            return false;
+        }
         if (!is_dir($destDir)) {
             if (!mkdir($destDir, 0750, true) && !is_dir($destDir)) {
                 self::logError('uploadAndEncrypt: failed to create destination directory: ' . $destDir);
@@ -225,12 +234,19 @@ final class FileVault
             }
         }
 
-        // place tmp in same dir for atomic rename where possible
-        $tmpDest = $destDir . DIRECTORY_SEPARATOR . '.tmp-' . bin2hex(random_bytes(6)) . '.enc';
+        // place tmp in same dir for atomic rename where possible (use exclusive create to reduce symlink-race risk)
+        try {
+            $tmpDest = self::createExclusiveTempFile($destDir, '.enc');
+        } catch (\Throwable $e) {
+            self::logError('uploadAndEncrypt: temp file creation failed: ' . $e->getMessage());
+            if (isset($key) && is_string($key)) { KeyManager::memzero($key); }
+            return false;
+        }
 
         $out = fopen($tmpDest, 'wb');
         if ($out === false) {
             self::logError('uploadAndEncrypt: cannot open destination for write: ' . $tmpDest);
+            @unlink($tmpDest);
             if (isset($key) && is_string($key)) { KeyManager::memzero($key); }
             return false;
         }
@@ -312,8 +328,7 @@ final class FileVault
                 if ($metaJson === false) throw new \RuntimeException('meta json encode failed');
 
                 $metaTmp = $tmpDest . '.meta';
-                if (file_put_contents($metaTmp, $metaJson, LOCK_EX) === false) {
-                    @unlink($metaTmp);
+                if (!self::writeFileExclusive($metaTmp, $metaJson)) {
                     throw new \RuntimeException('failed writing meta temp file');
                 }
                 chmod($metaTmp, 0600);
@@ -323,7 +338,7 @@ final class FileVault
                 // atomic move with fallback
                 if (!@rename($tmpDest, $destEnc)) {
                     // rename might fail across devices — fallback to copy+unlink
-                    if (!copy($tmpDest, $destEnc) || !unlink($tmpDest)) {
+                    if (self::isSymlinkPath($destEnc) || !copy($tmpDest, $destEnc) || !unlink($tmpDest)) {
                         @unlink($tmpDest);
                         @unlink($metaTmp);
                         throw new \RuntimeException('failed to move tmp file to destination');
@@ -332,7 +347,7 @@ final class FileVault
                 // move meta
                 if (!@rename($metaTmp, $destEnc . '.meta')) {
                     // try copy+unlink fallback
-                    if (!copy($metaTmp, $destEnc . '.meta') || !unlink($metaTmp)) {
+                    if (self::isSymlinkPath($destEnc . '.meta') || !copy($metaTmp, $destEnc . '.meta') || !unlink($metaTmp)) {
                         // non-fatal: data is in place, meta failed — log and continue
                         self::logError('uploadAndEncrypt: meta move failed for ' . $destEnc . '.meta');
                     } else {
@@ -381,8 +396,7 @@ final class FileVault
             if ($metaJson === false) throw new \RuntimeException('meta json encode failed');
 
             $metaTmp = $tmpDest . '.meta';
-            if (file_put_contents($metaTmp, $metaJson, LOCK_EX) === false) {
-                @unlink($metaTmp);
+            if (!self::writeFileExclusive($metaTmp, $metaJson)) {
                 throw new \RuntimeException('failed writing meta temp file');
             }
             chmod($metaTmp, 0600);
@@ -390,14 +404,14 @@ final class FileVault
 
             if (!@rename($tmpDest, $destEnc)) {
                 // fallback copy+unlink
-                if (!copy($tmpDest, $destEnc) || !unlink($tmpDest)) {
+                if (self::isSymlinkPath($destEnc) || !copy($tmpDest, $destEnc) || !unlink($tmpDest)) {
                     @unlink($tmpDest);
                     @unlink($metaTmp);
                     throw new \RuntimeException('failed to move tmp file to destination');
                 }
             }
             if (!@rename($metaTmp, $destEnc . '.meta')) {
-                if (!copy($metaTmp, $destEnc . '.meta') || !unlink($metaTmp)) {
+                if (self::isSymlinkPath($destEnc . '.meta') || !copy($metaTmp, $destEnc . '.meta') || !unlink($metaTmp)) {
                     self::logError('uploadAndEncrypt: meta move failed for ' . $destEnc . '.meta');
                 } else {
                     chmod($destEnc . '.meta', 0600);
@@ -443,46 +457,39 @@ final class FileVault
             self::logError('decryptAndStream: encrypted file not readable: ' . $encPath);
             return false;
         }
-
-        $metaPath = $encPath . '.meta';
-        $meta = null;
-        if (is_readable($metaPath)) {
-            $metaJson = file_get_contents($metaPath);
-            if ($metaJson !== false) {
-                $tmp = json_decode($metaJson, true);
-                if (is_array($tmp)) $meta = $tmp;
-            }
+        if (self::isSymlinkPath($encPath)) {
+            self::logError('decryptAndStream: refusing to read symlink ciphertext: ' . $encPath);
+            return false;
         }
+
+        $meta = self::readMetaBestEffort($encPath);
 
         $specificKeyVersion = $meta['key_version'] ?? null;
         $contentLength = (is_int($meta['plain_size'] ?? null) || ctype_digit((string)($meta['plain_size'] ?? '')))
             ? (int)$meta['plain_size']
             : null;
 
-        if (FileVaultAgentClient::isConfigured()) {
-            return self::decryptAndStreamViaAgent($encPath, $downloadName, $mimeType, $contentLength);
-        }
+        $safeName = self::sanitizeHeaderFilename($downloadName);
+        $safeMime = self::sanitizeMimeType($mimeType);
 
-        try {
-            $keyInfo = self::getFilevaultKeyInfo($specificKeyVersion);
-            $key = &$keyInfo['raw'];
-            $keyVersion = $keyInfo['version'];
-        } catch (\Throwable $e) {
-            self::logError('decryptAndStream: key retrieval failed: ' . $e->getMessage());
-            return false;
+        if (FileVaultAgentClient::isConfigured()) {
+            return self::decryptAndStreamViaAgent($encPath, $safeName, $safeMime, $contentLength);
         }
 
         $fh = fopen($encPath, 'rb');
         if ($fh === false) {
             self::logError('decryptAndStream: cannot open encrypted file: ' . $encPath);
-            // wipe key
-            try { KeyManager::memzero($key); } catch (\Throwable $_) {}
             return false;
         }
 
         $success = false;
         $outTotal = 0;
         try {
+            $cipherSize = filesize($encPath);
+            if ($cipherSize === false) {
+                throw new \RuntimeException('ciphertext stat failed');
+            }
+
             // version
             $versionByte = fread($fh, 1);
             if ($versionByte === false || strlen($versionByte) !== 1) {
@@ -551,6 +558,22 @@ final class FileVault
                 }
             }
 
+            if (!is_string($specificKeyVersion) || trim($specificKeyVersion) === '' || str_contains($specificKeyVersion, "\0")) {
+                $specificKeyVersion = $fileKeyId;
+            }
+            if (!is_string($specificKeyVersion) || trim($specificKeyVersion) === '' || str_contains($specificKeyVersion, "\0")) {
+                $specificKeyVersion = null;
+            }
+
+            try {
+                $keyInfo = self::getFilevaultKeyInfo($specificKeyVersion);
+                $key = &$keyInfo['raw'];
+                $keyVersion = $keyInfo['version'];
+            } catch (\Throwable $e) {
+                self::logError('decryptAndStream: key retrieval failed: ' . $e->getMessage());
+                return false;
+            }
+
             // iv_len
             $iv_len = ord($ivLenByte);
             $expectedIvLen = SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_NPUBBYTES;
@@ -569,6 +592,10 @@ final class FileVault
                 throw new \RuntimeException('unreasonable tag_len: ' . $tag_len);
             }
 
+            if ($tag_len > 0 && $cipherSize !== false && $cipherSize > self::MAX_SINGLEPASS_CIPHER_BYTES) {
+                throw new \RuntimeException('single-pass ciphertext too large');
+            }
+
             $tag = '';
             if ($tag_len > 0) {
                 $tag = fread($fh, $tag_len);
@@ -577,8 +604,7 @@ final class FileVault
 
             // Prepare headers
             if (!headers_sent()) {
-                header('Content-Type: ' . $mimeType);
-                $safeName = basename((string)$downloadName);
+                header('Content-Type: ' . $safeMime);
                 header('Content-Disposition: attachment; filename="' . $safeName . '"');
                 if ($contentLength !== null) {
                     header('Content-Length: ' . (string)$contentLength);
@@ -626,6 +652,9 @@ final class FileVault
                 $un = unpack('Nlen', $lenBuf);
                 $frameLen = $un['len'] ?? 0;
                 if ($frameLen <= 0) throw new \RuntimeException('invalid frame length: ' . $frameLen);
+                if ($frameLen > self::MAX_SECRETSTREAM_FRAME_BYTES) {
+                    throw new \RuntimeException('unreasonable frame length: ' . $frameLen);
+                }
                 $frame = fread($fh, $frameLen);
                 if ($frame === false || strlen($frame) !== $frameLen) throw new \RuntimeException('failed reading frame payload');
 
@@ -669,21 +698,17 @@ final class FileVault
             self::logError('decryptToFile: encrypted file not readable: ' . $encPath);
             return false;
         }
+        if (self::isSymlinkPath($encPath)) {
+            self::logError('decryptToFile: refusing to read symlink ciphertext: ' . $encPath);
+            return false;
+        }
 
-        if (file_exists($destPlain) && is_link($destPlain)) {
+        if (file_exists($destPlain) && self::isSymlinkPath($destPlain)) {
             self::logError('decryptToFile: refusing to write to symlink destination: ' . $destPlain);
             return false;
         }
 
-        $metaPath = $encPath . '.meta';
-        $meta = null;
-        if (is_readable($metaPath)) {
-            $metaJson = file_get_contents($metaPath);
-            if ($metaJson !== false) {
-                $tmp = json_decode($metaJson, true);
-                if (is_array($tmp)) $meta = $tmp;
-            }
-        }
+        $meta = self::readMetaBestEffort($encPath);
 
         $fh = fopen($encPath, 'rb');
         if ($fh === false) {
@@ -692,6 +717,11 @@ final class FileVault
         }
 
         $destDir = dirname($destPlain);
+        if (self::isSymlinkPath($destDir)) {
+            fclose($fh);
+            self::logError('decryptToFile: refusing to write into symlink directory: ' . $destDir);
+            return false;
+        }
         if (!is_dir($destDir)) {
             if (!mkdir($destDir, 0750, true) && !is_dir($destDir)) {
                 fclose($fh);
@@ -700,15 +730,28 @@ final class FileVault
             }
         }
 
-        $tmpOut = $destDir . DIRECTORY_SEPARATOR . '.tmp-' . bin2hex(random_bytes(6)) . '.plain';
+        try {
+            $tmpOut = self::createExclusiveTempFile($destDir, '.plain');
+        } catch (\Throwable $e) {
+            fclose($fh);
+            self::logError('decryptToFile: temp file creation failed: ' . $e->getMessage());
+            return false;
+        }
+
         $out = fopen($tmpOut, 'wb');
         if ($out === false) {
             fclose($fh);
             self::logError('decryptToFile: cannot open destination for write: ' . $tmpOut);
+            @unlink($tmpOut);
             return false;
         }
 
         try {
+            $cipherSize = filesize($encPath);
+            if ($cipherSize === false) {
+                throw new \RuntimeException('ciphertext stat failed');
+            }
+
             $versionByte = fread($fh, 1);
             if ($versionByte === false || strlen($versionByte) !== 1) {
                 throw new \RuntimeException('failed reading version byte');
@@ -776,6 +819,10 @@ final class FileVault
                 throw new \RuntimeException('unreasonable tag_len: ' . $tag_len);
             }
 
+            if ($tag_len > 0 && $cipherSize !== false && $cipherSize > self::MAX_SINGLEPASS_CIPHER_BYTES) {
+                throw new \RuntimeException('single-pass ciphertext too large');
+            }
+
             $tag = '';
             if ($tag_len > 0) {
                 $tag = fread($fh, $tag_len);
@@ -800,6 +847,9 @@ final class FileVault
                     $un = unpack('Nlen', $lenBuf);
                     $frameLen = $un['len'] ?? 0;
                     if ($frameLen <= 0) throw new \RuntimeException('invalid frame length: ' . $frameLen);
+                    if ($frameLen > self::MAX_SECRETSTREAM_FRAME_BYTES) {
+                        throw new \RuntimeException('unreasonable frame length: ' . $frameLen);
+                    }
                     $frame = fread($fh, $frameLen);
                     if ($frame === false || strlen($frame) !== $frameLen) throw new \RuntimeException('failed reading frame payload');
 
@@ -848,11 +898,11 @@ final class FileVault
 
     private static function uploadAndEncryptViaAgent(string $srcTmp, string $destEnc): string|false
     {
-        if (file_exists($destEnc) && is_link($destEnc)) {
+        if (file_exists($destEnc) && self::isSymlinkPath($destEnc)) {
             self::logError('uploadAndEncrypt: refusing to write to symlink destination: ' . $destEnc);
             return false;
         }
-        if (file_exists($destEnc . '.meta') && is_link($destEnc . '.meta')) {
+        if (file_exists($destEnc . '.meta') && self::isSymlinkPath($destEnc . '.meta')) {
             self::logError('uploadAndEncrypt: refusing to write to symlink meta destination: ' . $destEnc . '.meta');
             return false;
         }
@@ -869,6 +919,10 @@ final class FileVault
         }
 
         $destDir = dirname($destEnc);
+        if (self::isSymlinkPath($destDir)) {
+            self::logError('uploadAndEncrypt: refusing to write into symlink directory: ' . $destDir);
+            return false;
+        }
         if (!is_dir($destDir)) {
             if (!mkdir($destDir, 0750, true) && !is_dir($destDir)) {
                 self::logError('uploadAndEncrypt: failed to create destination directory: ' . $destDir);
@@ -876,10 +930,16 @@ final class FileVault
             }
         }
 
-        $tmpDest = $destDir . DIRECTORY_SEPARATOR . '.tmp-' . bin2hex(random_bytes(6)) . '.enc';
+        try {
+            $tmpDest = self::createExclusiveTempFile($destDir, '.enc');
+        } catch (\Throwable $e) {
+            self::logError('uploadAndEncrypt: temp file creation failed: ' . $e->getMessage());
+            return false;
+        }
         $out = fopen($tmpDest, 'wb');
         if ($out === false) {
             self::logError('uploadAndEncrypt: cannot open destination for write: ' . $tmpDest);
+            @unlink($tmpDest);
             return false;
         }
 
@@ -904,22 +964,21 @@ final class FileVault
             }
 
             $metaTmp = $tmpDest . '.meta';
-            if (file_put_contents($metaTmp, $metaJson, LOCK_EX) === false) {
-                @unlink($metaTmp);
+            if (!self::writeFileExclusive($metaTmp, $metaJson)) {
                 throw new \RuntimeException('failed writing meta temp file');
             }
             chmod($metaTmp, 0600);
             chmod($tmpDest, 0600);
 
             if (!@rename($tmpDest, $destEnc)) {
-                if (!copy($tmpDest, $destEnc) || !unlink($tmpDest)) {
+                if (self::isSymlinkPath($destEnc) || !copy($tmpDest, $destEnc) || !unlink($tmpDest)) {
                     @unlink($tmpDest);
                     @unlink($metaTmp);
                     throw new \RuntimeException('failed to move tmp file to destination');
                 }
             }
             if (!@rename($metaTmp, $destEnc . '.meta')) {
-                if (!copy($metaTmp, $destEnc . '.meta') || !unlink($metaTmp)) {
+                if (self::isSymlinkPath($destEnc . '.meta') || !copy($metaTmp, $destEnc . '.meta') || !unlink($metaTmp)) {
                     self::logError('uploadAndEncrypt: meta move failed for ' . $destEnc . '.meta');
                 } else {
                     chmod($destEnc . '.meta', 0600);
@@ -949,9 +1008,8 @@ final class FileVault
         }
 
         if (!headers_sent()) {
-            header('Content-Type: ' . $mimeType);
-            $safeName = basename((string)$downloadName);
-            header('Content-Disposition: attachment; filename="' . $safeName . '"');
+            header('Content-Type: ' . self::sanitizeMimeType($mimeType));
+            header('Content-Disposition: attachment; filename="' . self::sanitizeHeaderFilename($downloadName) . '"');
             if ($contentLength !== null) {
                 header('Content-Length: ' . (string)$contentLength);
             } else {
@@ -978,15 +1036,7 @@ final class FileVault
             @flush();
 
             // audit log (best-effort)
-            $metaPath = $encPath . '.meta';
-            $meta = null;
-            if (is_readable($metaPath)) {
-                $metaJson = file_get_contents($metaPath);
-                if ($metaJson !== false) {
-                    $tmp = json_decode($metaJson, true);
-                    if (is_array($tmp)) $meta = $tmp;
-                }
-            }
+            $meta = self::readMetaBestEffort($encPath);
             $auditKeyId = is_array($meta) && is_string($meta['key_id'] ?? null) ? (string) $meta['key_id'] : null;
             self::maybeAudit($encPath, $downloadName, $contentLength ?? $res['plain_size'], $res['key_version'], $auditKeyId);
 
@@ -1095,5 +1145,136 @@ final class FileVault
         }
 
         return 'v' . substr(hash('crc32', $id), 0, 4);
+    }
+
+    private static function isSymlinkPath(string $path): bool
+    {
+        $trimmed = rtrim($path, "/\\");
+        if ($trimmed === '') {
+            $trimmed = $path;
+        }
+        return is_link($trimmed);
+    }
+
+    private static function readMetaBestEffort(string $encPath): array
+    {
+        $metaPath = $encPath . '.meta';
+        if (!is_readable($metaPath)) {
+            return [];
+        }
+        if (self::isSymlinkPath($metaPath)) {
+            self::logError('FileVault meta path is a symlink, ignoring: ' . $metaPath);
+            return [];
+        }
+        if (!is_file($metaPath)) {
+            return [];
+        }
+
+        $raw = self::safeReadFileBounded($metaPath, self::MAX_META_BYTES);
+        if (!is_string($raw) || trim($raw) === '') {
+            self::logError('FileVault meta read failed/too large, ignoring: ' . $metaPath);
+            return [];
+        }
+
+        $tmp = json_decode($raw, true);
+        return is_array($tmp) ? $tmp : [];
+    }
+
+    private static function safeReadFileBounded(string $path, int $maxBytes): string|false
+    {
+        if ($maxBytes < 0) {
+            return false;
+        }
+
+        $fh = @fopen($path, 'rb');
+        if ($fh === false) {
+            return false;
+        }
+
+        try {
+            $data = stream_get_contents($fh, $maxBytes + 1);
+            if ($data === false) {
+                return false;
+            }
+            if (strlen($data) > $maxBytes) {
+                return false;
+            }
+            return $data;
+        } finally {
+            fclose($fh);
+        }
+    }
+
+    private static function writeFileExclusive(string $path, string $contents): bool
+    {
+        $fh = @fopen($path, 'xb');
+        if ($fh === false) {
+            return false;
+        }
+        try {
+            $len = strlen($contents);
+            $offset = 0;
+            while ($offset < $len) {
+                $n = fwrite($fh, substr($contents, $offset));
+                if ($n === false || $n === 0) {
+                    return false;
+                }
+                $offset += $n;
+            }
+            fflush($fh);
+            return true;
+        } finally {
+            fclose($fh);
+        }
+    }
+
+    private static function createExclusiveTempFile(string $dir, string $suffix): string
+    {
+        $dir = rtrim($dir, DIRECTORY_SEPARATOR);
+        $attempts = 0;
+        while (true) {
+            $attempts++;
+            if ($attempts > 128) {
+                throw new \RuntimeException('tempfile_create_failed');
+            }
+            $candidate = $dir . DIRECTORY_SEPARATOR . '.tmp-' . bin2hex(random_bytes(6)) . $suffix;
+            $fh = @fopen($candidate, 'xb');
+            if ($fh === false) {
+                continue;
+            }
+            fclose($fh);
+            return $candidate;
+        }
+    }
+
+    private static function sanitizeHeaderFilename(string $name): string
+    {
+        $name = basename($name);
+        $name = str_replace(["\0", "\r", "\n"], '', $name);
+        $name = trim($name);
+        if ($name === '') {
+            return 'download.bin';
+        }
+        // Remove quotes/backslashes to avoid breaking Content-Disposition.
+        $name = str_replace(['"', '\\'], '_', $name);
+        // Replace other control chars.
+        $name = preg_replace('/[\\x00-\\x1F\\x7F]/', '_', $name) ?? $name;
+        if (strlen($name) > 180) {
+            $name = substr($name, 0, 180);
+        }
+        return $name !== '' ? $name : 'download.bin';
+    }
+
+    private static function sanitizeMimeType(string $mimeType): string
+    {
+        $mimeType = str_replace(["\0", "\r", "\n"], '', $mimeType);
+        $mimeType = trim($mimeType);
+        if ($mimeType === '' || strlen($mimeType) > 128) {
+            return 'application/octet-stream';
+        }
+        if (!preg_match('~^[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+-]*/[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+-]*$~', $mimeType)) {
+            return 'application/octet-stream';
+        }
+        return strtolower($mimeType);
     }
 }
