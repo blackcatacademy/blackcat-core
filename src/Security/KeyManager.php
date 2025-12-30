@@ -591,6 +591,10 @@ final class KeyManager
 
         // simple lockfile to avoid concurrent rotations
         $lockFile = $dir . '/.keymgr.lock';
+        clearstatcache(true, $lockFile);
+        if (file_exists($lockFile) && is_link($lockFile)) {
+            throw new KeyManagerException('rotateKey: lockfile must not be a symlink: ' . $lockFile);
+        }
         $fp = @fopen($lockFile, 'c');
         if ($fp === false) {
             throw new KeyManagerException('rotateKey: cannot open lockfile ' . $lockFile);
@@ -967,20 +971,69 @@ final class KeyManager
     private static function atomicWriteKeyFile(string $path, string $raw): void
     {
         $dir = dirname($path);
+        $dir = rtrim($dir, "/\\");
+        if ($dir === '' || str_contains($dir, "\0")) {
+            throw new \RuntimeException('Invalid keys directory path.');
+        }
+
+        if (is_link($dir)) {
+            throw new \RuntimeException('Keys directory must not be a symlink: ' . $dir);
+        }
+
         if (!is_dir($dir)) {
-            if (!@mkdir($dir, 0750, true)) {
+            if (!@mkdir($dir, 0750, true) || !is_dir($dir)) {
                 throw new \RuntimeException('Failed to create keys directory: ' . $dir);
             }
         }
+        @chmod($dir, 0750);
+        clearstatcache(true, $dir);
+        if (@readlink($dir) !== false) {
+            throw new \RuntimeException('Keys directory must not be a symlink: ' . $dir);
+        }
+        if (DIRECTORY_SEPARATOR !== '\\') {
+            $st = @stat($dir);
+            if (is_array($st)) {
+                $mode = (int) ($st['mode'] ?? 0);
+                $perms = $mode & 0o777;
+                if (($perms & 0o002) !== 0) {
+                    throw new \RuntimeException('Keys directory must not be world-writable: ' . $dir);
+                }
+            }
+        }
+
+        clearstatcache(true, $path);
+        if (file_exists($path) && is_link($path)) {
+            throw new \RuntimeException('Key file must not be a symlink: ' . $path);
+        }
 
         $tmp = $path . '.tmp-' . bin2hex(random_bytes(6));
-        $written = @file_put_contents($tmp, $raw, LOCK_EX);
-        if ($written === false || $written !== strlen($raw)) {
+        $fp = @fopen($tmp, 'xb');
+        if ($fp === false) {
             @unlink($tmp);
-            throw new \RuntimeException('Failed to write key temp file');
+            throw new \RuntimeException('Failed to open key temp file for exclusive write');
+        }
+
+        try {
+            $len = strlen($raw);
+            $offset = 0;
+            while ($offset < $len) {
+                $n = fwrite($fp, substr($raw, $offset));
+                if ($n === false || $n === 0) {
+                    throw new \RuntimeException('Failed to write key temp file');
+                }
+                $offset += $n;
+            }
+            fflush($fp);
+        } finally {
+            fclose($fp);
         }
 
         @chmod($tmp, 0400);
+
+        if (is_link($tmp)) {
+            @unlink($tmp);
+            throw new \RuntimeException('Key temp file must not be a symlink');
+        }
 
         if (!@rename($tmp, $path)) {
             @unlink($tmp);

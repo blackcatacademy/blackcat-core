@@ -287,6 +287,22 @@ class FileCache implements LockingCacheInterface
             @mkdir($destDir, 0700, true);
             @chmod($destDir, 0700);
         }
+        clearstatcache(true, $destDir);
+        if (is_link($destDir)) {
+            $this->log('critical', 'Refusing to write cache entry into symlink directory', null, ['dir' => $destDir]);
+            return false;
+        }
+        $destReal = realpath($destDir);
+        if ($destReal === false) {
+            $this->log('critical', 'Refusing to write cache entry: cannot resolve destDir realpath', null, ['dir' => $destDir]);
+            return false;
+        }
+        $cachePrefix = rtrim($this->cacheDirReal, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+        $destWithSep = rtrim($destReal, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+        if (!str_starts_with($destWithSep, $cachePrefix)) {
+            $this->log('critical', 'Refusing to write cache entry outside cacheDir', null, ['dir' => $destDir, 'real' => $destReal]);
+            return false;
+        }
 
         // Create temp file in same directory as destination to ensure atomic rename
         $tmp = @tempnam($destDir, 'fc_');

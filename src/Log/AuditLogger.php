@@ -114,6 +114,24 @@ final class AuditLogger
         if (@readlink($auditDir) !== false) {
             throw new \RuntimeException('AuditLogger: audit dir must not be a symlink: ' . $auditDir);
         }
+        $auditDirReal = realpath($auditDir);
+        if ($auditDirReal === false || !is_dir($auditDirReal)) {
+            throw new \RuntimeException('AuditLogger: audit dir realpath failed: ' . $auditDir);
+        }
+        $auditDirReal = rtrim($auditDirReal, DIRECTORY_SEPARATOR);
+        if (DIRECTORY_SEPARATOR !== '\\') {
+            $docRoot = $_SERVER['DOCUMENT_ROOT'] ?? null;
+            if (is_string($docRoot) && trim($docRoot) !== '' && !str_contains($docRoot, "\0")) {
+                $docReal = realpath($docRoot);
+                if ($docReal !== false && is_dir($docReal)) {
+                    $docPrefix = rtrim($docReal, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+                    $auditWithSep = $auditDirReal . DIRECTORY_SEPARATOR;
+                    if (str_starts_with($auditWithSep, $docPrefix)) {
+                        throw new \RuntimeException('AuditLogger: audit dir must not be under DOCUMENT_ROOT: ' . $auditDirReal);
+                    }
+                }
+            }
+        }
         if (DIRECTORY_SEPARATOR !== '\\') {
             $st = @stat($auditDir);
             if (is_array($st)) {

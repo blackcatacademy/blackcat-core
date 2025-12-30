@@ -1405,6 +1405,11 @@ final class TrustKernel
             return;
         }
 
+        $path = trim($path);
+        if ($path === '' || str_contains($path, "\0") || strlen($path) > 8192) {
+            return;
+        }
+
         $payload = [
             'version' => 1,
             'chain_id' => $this->config->chainId,
@@ -1426,18 +1431,69 @@ final class TrustKernel
         }
 
         $dir = dirname($path);
+        if ($dir === '' || $dir === '.' || str_contains($dir, "\0")) {
+            return;
+        }
+        $dirTrim = rtrim($dir, "/\\");
+        if ($dirTrim === '') {
+            $dirTrim = $dir;
+        }
+        if (is_link($dirTrim)) {
+            return;
+        }
+        if (is_link($path)) {
+            return;
+        }
+        if (!is_dir($dir)) {
+            return;
+        }
+
+        // Refuse persisting state under the public web root if DOCUMENT_ROOT is known.
+        $docRoot = $_SERVER['DOCUMENT_ROOT'] ?? null;
+        if (is_string($docRoot) && trim($docRoot) !== '' && !str_contains($docRoot, "\0")) {
+            $docReal = realpath($docRoot);
+            $dirReal = realpath($dir);
+            if (is_string($docReal) && is_string($dirReal)) {
+                $docPrefix = rtrim($docReal, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+                $dirWithSep = rtrim($dirReal, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+                if (str_starts_with($dirWithSep, $docPrefix)) {
+                    $this->logger?->warning('[trust-kernel] refusing to persist last-ok state under DOCUMENT_ROOT');
+                    return;
+                }
+            }
+        }
+
         $base = basename($path);
         $tmp = $dir . DIRECTORY_SEPARATOR . '.' . $base . '.' . bin2hex(random_bytes(6)) . '.tmp';
 
         try {
-            if (@file_put_contents($tmp, $json . "\n") === false) {
+            $fp = @fopen($tmp, 'xb');
+            if ($fp === false) {
                 return;
             }
-            @chmod($tmp, 0644);
+
+            try {
+                $payloadBytes = $json . "\n";
+                $len = strlen($payloadBytes);
+                $offset = 0;
+                while ($offset < $len) {
+                    $n = fwrite($fp, substr($payloadBytes, $offset));
+                    if ($n === false || $n === 0) {
+                        throw new \RuntimeException('write_failed');
+                    }
+                    $offset += $n;
+                }
+                fflush($fp);
+            } finally {
+                fclose($fp);
+            }
+
+            @chmod($tmp, 0640);
             if (!@rename($tmp, $path)) {
                 @unlink($tmp);
                 return;
             }
+            @chmod($path, 0640);
             $this->lastOkStateMtime = @filemtime($path) ?: $this->lastOkStateMtime;
         } catch (\Throwable) {
             @unlink($tmp);
