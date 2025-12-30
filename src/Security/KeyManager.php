@@ -1256,8 +1256,8 @@ final class KeyManager
     {
         $configClass = implode('\\', ['BlackCat', 'Config', 'Runtime', 'Config']);
         if (!class_exists($configClass) || !is_callable([$configClass, 'repo'])) {
-            // Legacy stacks: preserve existing behavior.
-            return true;
+            // Security-first default: do not allow ENV keys unless explicitly enabled via runtime config.
+            return false;
         }
 
         try {

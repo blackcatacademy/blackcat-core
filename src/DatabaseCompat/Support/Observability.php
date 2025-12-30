@@ -93,9 +93,6 @@ final class Observability
             'db'     => $db->id(),
             'driver' => (string)($db->driver() ?? ''),
         ];
-        if ($tag = \getenv('BC_SQL_TAG')) {
-            $meta['tag'] = self::clip($tag, self::COMMENT_VAL_MAX);
-        }
         return self::normalizeMeta($meta);
     }
 
@@ -131,10 +128,6 @@ final class Observability
     public static function shouldSample(array $meta): bool
     {
         $rateSource = $meta['sample'] ?? null;
-        if ($rateSource === null || $rateSource === '') {
-            $env = \getenv('BC_OBS_SAMPLE');
-            $rateSource = ($env === false || $env === '') ? 1.0 : $env;
-        }
         $rate = \max(0.0, \min(1.0, (float)$rateSource));
         if ($rate <= 0.0) return false;
         if ($rate >= 1.0) return true;
@@ -230,8 +223,7 @@ final class Observability
     public static function ensureCorr(array $meta): array
     {
         if (empty($meta['corr'])) {
-            $env = \getenv('BC_CORR');
-            $meta['corr'] = ($env && $env !== '') ? self::clip($env, self::COMMENT_VAL_MAX) : self::newId(10);
+            $meta['corr'] = self::newId(10);
         }
         return $meta;
     }

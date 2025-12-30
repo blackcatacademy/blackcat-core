@@ -170,7 +170,7 @@ final class Database
         $givenOptions = $config['options'] ?? [];
         $initCommands = $config['init_commands'] ?? [];
         $appName = (string)($config['appName'] ?? 'blackcat');
-        $requireSqlComment = (bool)($config['requireSqlComment'] ?? (getenv('BC_REQUIRE_SQL_COMMENT') === '1'));
+        $requireSqlComment = (bool)($config['requireSqlComment'] ?? false);
         $replicaCfg = $config['replica'] ?? null;
         $stickMs = (int)($config['replicaStickMs'] ?? 500);
         // Replica health-gate (optional)
@@ -278,7 +278,7 @@ final class Database
         $inst->replicaMaxLagMs = isset($config['replicaMaxLagMs']) ? (int)$config['replicaMaxLagMs'] : null;
         $inst->replicaHealthCheckSec = max(1, (int)($config['replicaHealthCheckSec'] ?? 2));
 
-        $requireSqlComment = (bool)($config['requireSqlComment'] ?? (getenv('BC_REQUIRE_SQL_COMMENT') === '1'));
+        $requireSqlComment = (bool)($config['requireSqlComment'] ?? false);
         if ($requireSqlComment) {
             $inst->requireSqlComment(true);
         }
@@ -1697,7 +1697,7 @@ final class Database
         $this->notifyStart($sql, $params, $route);
 
         try {
-            if (getenv('BC_ORDER_GUARD') === '1') {
+            if (($this->config['orderGuard'] ?? false) === true || ($this->config['orderGuard'] ?? null) === 1 || ($this->config['orderGuard'] ?? null) === '1') {
                 if (preg_match('~\bORDER\s+(?!BY\b)~i', $sql)) {
                     $bt = array_slice(debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS), 0, 8);
                     $where = array_map(fn($f)=>($f['file'] ?? '?').':'.($f['line'] ?? '?'), $bt);
