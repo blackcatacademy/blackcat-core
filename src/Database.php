@@ -425,7 +425,17 @@ final class Database
         $s = ltrim($sql);
         // strip simple comments
         if (str_starts_with($s, '/*')) { $s = preg_replace('~/\*.*?\*/~s', '', $s) ?? $s; $s = ltrim($s); }
-        if (str_starts_with($s, '--')) { $s = preg_replace('~--.*?$~m', '', $s) ?? $s; $s = ltrim($s); }
+        if (str_starts_with($s, '--')) {
+            $isLineComment = true;
+            if ($this->isMysql()) {
+                $next = $s[2] ?? '';
+                $isLineComment = $next !== '' && ord($next) <= 0x20;
+            }
+            if ($isLineComment) {
+                $s = preg_replace('~--.*?$~m', '', $s) ?? $s;
+                $s = ltrim($s);
+            }
+        }
         if (!preg_match('~^([A-Z]+)~i', $s, $m)) return $this->pdoPrimary();
         $verb = strtoupper($m[1]);
 
@@ -1321,7 +1331,17 @@ final class Database
     private function isWriteSql(string $sql): bool {
         $s = ltrim($sql);
         if (str_starts_with($s, '/*')) { $s = preg_replace('~/\*.*?\*/~s', '', $s) ?? $s; $s = ltrim($s); }
-        if (str_starts_with($s, '--')) { $s = preg_replace('~--.*?$~m', '', $s) ?? $s; $s = ltrim($s); }
+        if (str_starts_with($s, '--')) {
+            $isLineComment = true;
+            if ($this->isMysql()) {
+                $next = $s[2] ?? '';
+                $isLineComment = $next !== '' && ord($next) <= 0x20;
+            }
+            if ($isLineComment) {
+                $s = preg_replace('~--.*?$~m', '', $s) ?? $s;
+                $s = ltrim($s);
+            }
+        }
         if (!preg_match('~^([A-Z]+)~i', $s, $m)) return false;
         $verb = strtoupper($m[1]);
         return in_array($verb, ['INSERT','UPDATE','DELETE','REPLACE','MERGE','TRUNCATE','ALTER','CREATE','DROP','RENAME','GRANT','REVOKE','VACUUM'], true);
@@ -1914,6 +1934,10 @@ final class Database
         $len = strlen($sql);
         $out = '';
 
+        // MySQL/MariaDB only treats "--" as a comment when followed by whitespace/control.
+        // Other dialects (e.g. Postgres) treat any "--" as a line comment.
+        $mysqlDashDashNeedsSpace = $this->isMysql();
+
         $NORMAL = 0;
         $SINGLE = 1;
         $DOUBLE = 2;
@@ -1942,14 +1966,28 @@ final class Database
                     continue;
                 }
                 if ($ch === '-' && ($i + 1) < $len && $sql[$i + 1] === '-') {
+                    if ($mysqlDashDashNeedsSpace) {
+                        $next = ($i + 2) < $len ? $sql[$i + 2] : '';
+                        // In MySQL/MariaDB "--" begins a comment only when followed by
+                        // whitespace/control (otherwise it is subtraction of a negative).
+                        if ($next === '' || ord($next) > 0x20) {
+                            $out .= $ch;
+                            continue;
+                        }
+                    }
                     $state = $LINE_COMMENT;
                     $out .= '  ';
                     $i++;
                     continue;
                 }
                 if ($ch === '#') {
-                    $state = $LINE_COMMENT;
-                    $out .= ' ';
+                    // MySQL/MariaDB supports "#" line comments; other dialects treat "#" as an operator/token.
+                    if ($mysqlDashDashNeedsSpace) {
+                        $state = $LINE_COMMENT;
+                        $out .= ' ';
+                        continue;
+                    }
+                    $out .= $ch;
                     continue;
                 }
                 if ($ch === '/' && ($i + 1) < $len && $sql[$i + 1] === '*') {

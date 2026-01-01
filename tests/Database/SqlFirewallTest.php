@@ -67,9 +67,86 @@ final class SqlFirewallTest extends TestCase
         self::assertSame(1, (int) $v2);
     }
 
+    public function testMysqlDashDashRequiresWhitespaceForLineComment(): void
+    {
+        $db = $this->bootPretendMysql();
+
+        // MySQL treats "--" as a line comment only when followed by whitespace/control.
+        // "1--2" is parsed as "1 - -2", so the semicolon is real and must be blocked.
+        $this->expectException(DatabaseException::class);
+        $this->expectExceptionMessage('SQL firewall');
+        $db->fetchValue('SELECT 1--2; SELECT 2');
+    }
+
+    public function testMysqlDashDashWithWhitespaceIsLineComment(): void
+    {
+        $db = $this->bootPretendMysql();
+
+        // Here the second statement is inside the comment, so firewall should allow the query.
+        $v = $db->fetchValue('SELECT 1-- 2; SELECT 2');
+        self::assertSame(1, (int) $v);
+    }
+
+    public function testPgsqlTreatsDashDashAsLineCommentEvenWithoutWhitespace(): void
+    {
+        $db = $this->bootPretendPgsql();
+
+        // Postgres treats any "--" as a line comment.
+        $v = $db->fetchValue('SELECT 1--2; SELECT 2');
+        self::assertSame(1, (int) $v);
+    }
+
+    public function testPgsqlDoesNotTreatHashAsLineComment(): void
+    {
+        $db = $this->bootPretendPgsql();
+
+        $this->expectException(DatabaseException::class);
+        $this->expectExceptionMessage('SQL firewall');
+        $db->fetchValue('SELECT 1#2; SELECT 2');
+    }
+
     private function bootSqlite(): Database
     {
         $pdo = new \PDO('sqlite::memory:');
+        Database::initFromPdo($pdo, ['sqlFirewallMode' => 'strict']);
+        return Database::getInstance();
+    }
+
+    private function bootPretendMysql(): Database
+    {
+        return $this->bootPretendDriver('mysql', '8.0.36');
+    }
+
+    private function bootPretendPgsql(): Database
+    {
+        return $this->bootPretendDriver('pgsql', null);
+    }
+
+    private function bootPretendDriver(string $driver, ?string $serverVersion): Database
+    {
+        $pdo = new class($driver, $serverVersion) extends \PDO {
+            private string $driverName;
+            private ?string $serverVersion;
+
+            public function __construct(string $driverName, ?string $serverVersion)
+            {
+                $this->driverName = $driverName;
+                $this->serverVersion = $serverVersion;
+                parent::__construct('sqlite::memory:');
+            }
+
+            public function getAttribute(int $attribute): mixed
+            {
+                if ($attribute === \PDO::ATTR_DRIVER_NAME) {
+                    return $this->driverName;
+                }
+                if ($attribute === \PDO::ATTR_SERVER_VERSION && $this->serverVersion !== null) {
+                    return $this->serverVersion;
+                }
+                return parent::getAttribute($attribute);
+            }
+        };
+
         Database::initFromPdo($pdo, ['sqlFirewallMode' => 'strict']);
         return Database::getInstance();
     }
