@@ -1739,12 +1739,24 @@ final class Database
                 throw new DatabaseException('Failed to prepare statement.');
             }
 
-            $isSequential = array_values($params) === $params;
+            // MySQL/MariaDB strict mode rejects empty-string for BOOL/TINYINT columns.
+            // pdo_mysql may bind `false` as "" when no explicit param type is used.
+            // Normalize booleans to 0/1 for MySQL to avoid 1366 errors.
+            $execParams = $params;
+            if ($this->isMysql()) {
+                foreach ($execParams as $k => $v) {
+                    if (is_bool($v)) {
+                        $execParams[$k] = $v ? 1 : 0;
+                    }
+                }
+            }
+
+            $isSequential = array_values($execParams) === $execParams;
             if ($isSequential) {
-                $stmt->execute($params);
+                $stmt->execute($execParams);
             } else {
                 $norm = [];
-                foreach ($params as $k => $v) {
+                foreach ($execParams as $k => $v) {
                     $kk = is_string($k) && $k !== '' && $k[0] !== ':' ? ':'.$k : (string)$k;
                     $norm[$kk] = $v;
                 }
@@ -1919,7 +1931,13 @@ final class Database
         if (preg_match('~\\bLOCAL\\s+INFILE\\b~', $u)) $violations[] = 'local_infile';
         if (preg_match('~\\bBENCHMARK\\s*\\(~', $u)) $violations[] = 'benchmark';
         if (preg_match('~\\bSLEEP\\s*\\(~', $u)) $violations[] = 'sleep';
-        if (preg_match('~\\bGET_LOCK\\s*\\(~', $u)) $violations[] = 'get_lock';
+        // Allow MySQL lock primitives when used as a standalone statement (internal DDL/install guards).
+        // Still blocks their use in more complex queries where they are commonly a SQLi escalation signal.
+        $isSimpleMysqlLockFn = (bool) preg_match(
+            '~^\\s*SELECT\\s+(GET_LOCK|RELEASE_LOCK|RELEASE_ALL_LOCKS|IS_FREE_LOCK|IS_USED_LOCK)\\s*\\(~',
+            $u
+        );
+        if (!$isSimpleMysqlLockFn && preg_match('~\\bGET_LOCK\\s*\\(~', $u)) $violations[] = 'get_lock';
 
         // Postgres: server-side COPY is a common escalation vector if DB creds are over-privileged.
         if ($this->isPg() && preg_match('~^\\s*COPY\\b~i', $u)) {
