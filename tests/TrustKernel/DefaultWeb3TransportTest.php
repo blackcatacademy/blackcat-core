@@ -67,6 +67,18 @@ final class DefaultWeb3TransportTest extends TestCase
         self::invokeAssertAllowedRpcUrl('https://[fd00::1]');
     }
 
+    public function testRejectsIpv6ZoneIdInHost(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        self::invokeAssertAllowedRpcUrl('https://[fd00::1%25eth0]');
+    }
+
+    public function testRejectsIpv6ZoneIdInHostWhenNotPercentEncoded(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        self::invokeAssertAllowedRpcUrl('https://[fd00::1%eth0]');
+    }
+
     private static function invokeAssertAllowedRpcUrl(string $url): void
     {
         $ref = new \ReflectionMethod(DefaultWeb3Transport::class, 'assertAllowedRpcUrl');

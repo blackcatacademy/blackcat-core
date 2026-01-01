@@ -176,6 +176,7 @@ final class DefaultWeb3Transport implements Web3TransportInterface
             throw new \InvalidArgumentException('RPC URL must include a host.');
         }
         $host = self::normalizeHost($host);
+        $host = self::rejectIpv6ZoneIdInHost($host);
 
         // SSRF hardening: reject private/reserved IP literals (except loopback).
         if (filter_var($host, FILTER_VALIDATE_IP) !== false && !self::isLoopbackHost($host)) {
@@ -219,5 +220,27 @@ final class DefaultWeb3Transport implements Web3TransportInterface
             }
         }
         return $host;
+    }
+
+    /**
+     * IPv6 zone identifiers (RFC 6874) are used for non-global scopes (e.g. link-local),
+     * which must never be allowed as RPC targets. They are also commonly percent-encoded
+     * in URLs ("%25eth0") and bypass FILTER_VALIDATE_IP checks if not handled explicitly.
+     */
+    private static function rejectIpv6ZoneIdInHost(string $host): string
+    {
+        // Fast path: no percent → no zone id.
+        if (!str_contains($host, '%')) {
+            return $host;
+        }
+
+        // If this looks like an IP literal with a zone id, reject (fail closed).
+        $base = explode('%', $host, 2)[0] ?? '';
+        if (is_string($base) && $base !== '' && filter_var($base, FILTER_VALIDATE_IP) !== false) {
+            throw new \InvalidArgumentException('RPC URL host must not include an IPv6 zone identifier.');
+        }
+
+        // Percent-encoding in hostnames is unusual and error-prone; disallow to avoid SSRF bypass tricks.
+        throw new \InvalidArgumentException('Invalid RPC URL host.');
     }
 }
