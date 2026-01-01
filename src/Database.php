@@ -1937,6 +1937,7 @@ final class Database
         // MySQL/MariaDB only treats "--" as a comment when followed by whitespace/control.
         // Other dialects (e.g. Postgres) treat any "--" as a line comment.
         $mysqlDashDashNeedsSpace = $this->isMysql();
+        $pgDollarQuotes = $this->isPg();
 
         $NORMAL = 0;
         $SINGLE = 1;
@@ -1964,6 +1965,27 @@ final class Database
                     $state = $BACKTICK;
                     $out .= ' ';
                     continue;
+                }
+                // Postgres: dollar-quoted bodies (DO $$...$$; CREATE FUNCTION ... $$...$$;).
+                // These can contain semicolons that are not SQL statement separators.
+                if ($pgDollarQuotes && $ch === '$') {
+                    $delimEnd = strpos($sql, '$', $i + 1);
+                    if ($delimEnd !== false) {
+                        $tag = substr($sql, $i + 1, $delimEnd - ($i + 1));
+                        if (is_string($tag) && preg_match('/^[A-Za-z0-9_]*$/', $tag) === 1) {
+                            $delim = '$' . $tag . '$';
+                            $endPos = strpos($sql, $delim, $delimEnd + 1);
+                            if ($endPos !== false) {
+                                $blockEnd = $endPos + strlen($delim);
+                                for ($k = $i; $k < $blockEnd; $k++) {
+                                    $c = $sql[$k];
+                                    $out .= ($c === "\n" || $c === "\r") ? $c : ' ';
+                                }
+                                $i = $blockEnd - 1;
+                                continue;
+                            }
+                        }
+                    }
                 }
                 if ($ch === '-' && ($i + 1) < $len && $sql[$i + 1] === '-') {
                     if ($mysqlDashDashNeedsSpace) {

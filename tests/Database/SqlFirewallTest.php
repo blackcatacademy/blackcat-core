@@ -105,6 +105,17 @@ final class SqlFirewallTest extends TestCase
         $db->fetchValue('SELECT 1#2; SELECT 2');
     }
 
+    public function testPgsqlDollarQuotedBodiesDoNotTripMultiStatementGuard(): void
+    {
+        $db = $this->bootPretendPgsql();
+
+        $violations = $this->sqlFirewallViolations($db, "DO $$ BEGIN PERFORM 1; END $$;");
+        self::assertSame([], $violations);
+
+        $violations2 = $this->sqlFirewallViolations($db, 'DO $tag$ BEGIN PERFORM 1; END $tag$;');
+        self::assertSame([], $violations2);
+    }
+
     private function bootSqlite(): Database
     {
         $pdo = new \PDO('sqlite::memory:');
@@ -149,6 +160,22 @@ final class SqlFirewallTest extends TestCase
 
         Database::initFromPdo($pdo, ['sqlFirewallMode' => 'strict']);
         return Database::getInstance();
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function sqlFirewallViolations(Database $db, string $sql): array
+    {
+        $ref = new \ReflectionClass(Database::class);
+        $m = $ref->getMethod('sqlFirewallViolations');
+        $m->setAccessible(true);
+        $res = $m->invoke($db, $sql);
+        if (!is_array($res)) {
+            self::fail('sqlFirewallViolations() did not return array.');
+        }
+        /** @var list<string> $res */
+        return $res;
     }
 
     private function resetDatabaseSingleton(): void
