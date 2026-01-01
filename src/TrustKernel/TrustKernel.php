@@ -21,6 +21,19 @@ final class TrustKernel
     private ?IntegrityManifestV1 $manifest = null;
     private ?int $manifestMtime = null;
 
+    /** @var null|list<array{code:string,message:string}> Cached controller code sanity errors (null = not checked yet / transient failure). */
+    private ?array $controllerCodeSanityCachedErrors = null;
+
+    private ?string $phpFingerprintCachedSha256 = null;
+
+    private ?string $composerLockCachedSha256 = null;
+    private ?int $composerLockCachedMtime = null;
+    private ?int $composerLockCachedSize = null;
+
+    private ?string $imageDigestCachedSha256 = null;
+    private ?int $imageDigestCachedMtime = null;
+    private ?int $imageDigestCachedSize = null;
+
     private ?TrustKernelStatus $lastStatus = null;
     private ?int $lastStatusAt = null;
     private ?string $lastStatusRequestId = null;
@@ -161,12 +174,21 @@ final class TrustKernel
         $computedRoot = null;
         $paused = false;
         $trustedNow = false;
+        $integrityOk = true;
+        $probeReleaseRegistry = null;
+        /** @var array<string,array{value:string,locked:bool}> $probeAttestations */
+        $probeAttestations = [];
         $computedComposerLockSha256 = null;
         $computedPhpFingerprintSha256 = null;
         $computedImageDigestSha256 = null;
 
         try {
-            $snapshot = $this->controller->snapshot($this->config->instanceController);
+            // First stage: fetch only snapshot + releaseRegistry pointer.
+            // Attestation keys are probed later *only if required by the active policy* to keep
+            // RPC surface minimal and avoid unnecessary calls in tests / legacy policies.
+            $probe = $this->controller->kernelProbe($this->config->instanceController, []);
+            $snapshot = $probe['snapshot'] ?? null;
+            $probeReleaseRegistry = $probe['release_registry'] ?? null;
             $rpcOkNow = true;
         } catch (\Throwable $e) {
             $addError('rpc_error', $e->getMessage());
@@ -445,6 +467,7 @@ final class TrustKernel
             }
 
             try {
+                $integrityOk = true;
                 $manifest = $this->loadManifestIfNeeded();
                 $computedRoot = $this->config->mode === 'full'
                     ? $this->integrity->computeAndVerifyRootStrict($manifest)
@@ -453,6 +476,7 @@ final class TrustKernel
                 $activeRoot = Bytes32::normalizeHex($snapshot->activeRoot);
                 $computedRootNorm = Bytes32::normalizeHex($computedRoot);
                 if (!hash_equals($activeRoot, $computedRootNorm)) {
+                    $integrityOk = false;
                     $addError('integrity_root_mismatch', 'Integrity root mismatch.');
                 }
 
@@ -464,22 +488,65 @@ final class TrustKernel
                 // the local manifest must provide a matching `uri` (do NOT allow skipping by removing it).
                 if ($activeUriHash === $zero) {
                     if ($manifestUriHash !== null) {
+                        $integrityOk = false;
                         $addError('uri_hash_mismatch', 'URI hash mismatch.');
                     }
                 } else {
                     if ($manifestUriHash === null) {
+                        $integrityOk = false;
                         $addError('uri_hash_missing', 'URI hash is missing from integrity manifest.');
                     } else {
                         $expectedUriHash = Bytes32::normalizeHex($manifestUriHash);
                         if (!hash_equals($expectedUriHash, $activeUriHash)) {
+                            $integrityOk = false;
                             $addError('uri_hash_mismatch', 'URI hash mismatch.');
                         }
                     }
                 }
             } catch (IntegrityViolationException $e) {
+                $integrityOk = false;
                 $addError($e->violationCode, $e->getMessage());
             } catch (\Throwable $e) {
+                $integrityOk = false;
                 $addError('integrity_check_failed', $e->getMessage());
+            }
+
+            // If local integrity is already broken (tamper or mismatch), skip further on-chain
+            // provenance checks to reduce load and avoid turning integrity failures into an RPC DoS vector.
+            if (!$integrityOk) {
+                $trustedNow = false;
+            } else {
+            // Probe required policy attestations only after local integrity passed.
+            $requiredAttestationKeys = [];
+            if ($requiresRuntimeConfigAttestation) {
+                $requiredAttestationKeys[] = $runtimeConfigAttestationKeyForCheck ?? $this->config->runtimeConfigAttestationKey;
+            }
+            if ($requiresHttpAllowedHostsAttestation) {
+                $requiredAttestationKeys[] = $this->config->httpAllowedHostsAttestationKeyV1;
+            }
+            if ($requiresComposerLockAttestation) {
+                $requiredAttestationKeys[] = $this->config->composerLockAttestationKeyV1;
+            }
+            if ($requiresPhpFingerprintAttestation) {
+                $requiredAttestationKeys[] = $this->config->phpFingerprintAttestationKeyV2;
+            }
+            if ($requiresImageDigestAttestation) {
+                $requiredAttestationKeys[] = $this->config->imageDigestAttestationKeyV1;
+            }
+
+            if ($requiredAttestationKeys !== []) {
+                try {
+                    $probe2 = $this->controller->kernelProbe($this->config->instanceController, $requiredAttestationKeys);
+                    $att = $probe2['attestations'] ?? null;
+                    if (is_array($att)) {
+                        /** @var array<string,array{value:string,locked:bool}> $att */
+                        $probeAttestations = $att;
+                    }
+                    $probeReleaseRegistry = is_string($probe2['release_registry'] ?? null) ? (string) $probe2['release_registry'] : $probeReleaseRegistry;
+                } catch (\Throwable $e) {
+                    $addError('rpc_error', $e->getMessage());
+                    $rpcOkNow = false;
+                }
             }
 
             // Optional hardening (policy v3): bind runtime config to on-chain attestation.
@@ -530,14 +597,19 @@ final class TrustKernel
                             }
                         }
 
-                        $onChain = Bytes32::normalizeHex($this->controller->attestation($this->config->instanceController, $key));
+                        $att = $probeAttestations[$key] ?? null;
+                        if (!is_array($att) || !isset($att['value'], $att['locked']) || !is_string($att['value']) || !is_bool($att['locked'])) {
+                            $addError('runtime_config_attestation_failed', 'Runtime config attestation value is not available.');
+                        } else {
+                            $onChain = Bytes32::normalizeHex($att['value']);
 
-                        if (!hash_equals($expectedNorm, $onChain)) {
-                            $addError('runtime_config_commitment_mismatch', 'Runtime config commitment mismatch.');
-                        }
+                            if (!hash_equals($expectedNorm, $onChain)) {
+                                $addError('runtime_config_commitment_mismatch', 'Runtime config commitment mismatch.');
+                            }
 
-                        if (!$this->controller->attestationLocked($this->config->instanceController, $key)) {
-                            $addError('runtime_config_commitment_unlocked', 'Runtime config commitment key is not locked.');
+                            if (!$att['locked']) {
+                                $addError('runtime_config_commitment_unlocked', 'Runtime config commitment key is not locked.');
+                            }
                         }
                     }
                 } catch (\Throwable $e) {
@@ -555,14 +627,17 @@ final class TrustKernel
                         $key = Bytes32::normalizeHex($this->config->httpAllowedHostsAttestationKeyV1);
                         $expectedNorm = Bytes32::normalizeHex($expected);
 
-                        $onChain = Bytes32::normalizeHex(
-                            $this->controller->attestation($this->config->instanceController, $key)
-                        );
-                        if (!hash_equals($expectedNorm, $onChain)) {
-                            $addError('http_allowed_hosts_commitment_mismatch', 'HTTP allowed hosts commitment mismatch.');
-                        }
-                        if (!$this->controller->attestationLocked($this->config->instanceController, $key)) {
-                            $addError('http_allowed_hosts_commitment_unlocked', 'HTTP allowed hosts commitment key is not locked.');
+                        $att = $probeAttestations[$key] ?? null;
+                        if (!is_array($att) || !isset($att['value'], $att['locked']) || !is_string($att['value']) || !is_bool($att['locked'])) {
+                            $addError('http_allowed_hosts_attestation_failed', 'HTTP allowed hosts attestation value is not available.');
+                        } else {
+                            $onChain = Bytes32::normalizeHex($att['value']);
+                            if (!hash_equals($expectedNorm, $onChain)) {
+                                $addError('http_allowed_hosts_commitment_mismatch', 'HTTP allowed hosts commitment mismatch.');
+                            }
+                            if (!$att['locked']) {
+                                $addError('http_allowed_hosts_commitment_unlocked', 'HTTP allowed hosts commitment key is not locked.');
+                            }
                         }
                     }
                 } catch (\Throwable $e) {
@@ -577,14 +652,17 @@ final class TrustKernel
                         $computedComposerLockSha256 = $this->computeComposerLockSha256Bytes32OrThrow();
 
                         $key = Bytes32::normalizeHex($this->config->composerLockAttestationKeyV1);
-                        $onChain = Bytes32::normalizeHex(
-                            $this->controller->attestation($this->config->instanceController, $key)
-                        );
-                        if (!hash_equals(Bytes32::normalizeHex($computedComposerLockSha256), $onChain)) {
-                            $addError('composer_lock_commitment_mismatch', 'composer.lock commitment mismatch.');
-                        }
-                        if (!$this->controller->attestationLocked($this->config->instanceController, $key)) {
-                            $addError('composer_lock_commitment_unlocked', 'composer.lock commitment key is not locked.');
+                        $att = $probeAttestations[$key] ?? null;
+                        if (!is_array($att) || !isset($att['value'], $att['locked']) || !is_string($att['value']) || !is_bool($att['locked'])) {
+                            $addError('composer_lock_attestation_failed', 'composer.lock attestation value is not available.');
+                        } else {
+                            $onChain = Bytes32::normalizeHex($att['value']);
+                            if (!hash_equals(Bytes32::normalizeHex($computedComposerLockSha256), $onChain)) {
+                                $addError('composer_lock_commitment_mismatch', 'composer.lock commitment mismatch.');
+                            }
+                            if (!$att['locked']) {
+                                $addError('composer_lock_commitment_unlocked', 'composer.lock commitment key is not locked.');
+                            }
                         }
                     }
 
@@ -592,14 +670,17 @@ final class TrustKernel
                         $computedPhpFingerprintSha256 = $this->computePhpFingerprintSha256Bytes32();
 
                         $key = Bytes32::normalizeHex($this->config->phpFingerprintAttestationKeyV2);
-                        $onChain = Bytes32::normalizeHex(
-                            $this->controller->attestation($this->config->instanceController, $key)
-                        );
-                        if (!hash_equals(Bytes32::normalizeHex($computedPhpFingerprintSha256), $onChain)) {
-                            $addError('php_fingerprint_commitment_mismatch', 'PHP fingerprint commitment mismatch.');
-                        }
-                        if (!$this->controller->attestationLocked($this->config->instanceController, $key)) {
-                            $addError('php_fingerprint_commitment_unlocked', 'PHP fingerprint commitment key is not locked.');
+                        $att = $probeAttestations[$key] ?? null;
+                        if (!is_array($att) || !isset($att['value'], $att['locked']) || !is_string($att['value']) || !is_bool($att['locked'])) {
+                            $addError('php_fingerprint_attestation_failed', 'PHP fingerprint attestation value is not available.');
+                        } else {
+                            $onChain = Bytes32::normalizeHex($att['value']);
+                            if (!hash_equals(Bytes32::normalizeHex($computedPhpFingerprintSha256), $onChain)) {
+                                $addError('php_fingerprint_commitment_mismatch', 'PHP fingerprint commitment mismatch.');
+                            }
+                            if (!$att['locked']) {
+                                $addError('php_fingerprint_commitment_unlocked', 'PHP fingerprint commitment key is not locked.');
+                            }
                         }
                     }
 
@@ -607,14 +688,17 @@ final class TrustKernel
                         $computedImageDigestSha256 = $this->readImageDigestSha256Bytes32OrThrow();
 
                         $key = Bytes32::normalizeHex($this->config->imageDigestAttestationKeyV1);
-                        $onChain = Bytes32::normalizeHex(
-                            $this->controller->attestation($this->config->instanceController, $key)
-                        );
-                        if (!hash_equals(Bytes32::normalizeHex($computedImageDigestSha256), $onChain)) {
-                            $addError('image_digest_commitment_mismatch', 'Image digest commitment mismatch.');
-                        }
-                        if (!$this->controller->attestationLocked($this->config->instanceController, $key)) {
-                            $addError('image_digest_commitment_unlocked', 'Image digest commitment key is not locked.');
+                        $att = $probeAttestations[$key] ?? null;
+                        if (!is_array($att) || !isset($att['value'], $att['locked']) || !is_string($att['value']) || !is_bool($att['locked'])) {
+                            $addError('image_digest_attestation_failed', 'Image digest attestation value is not available.');
+                        } else {
+                            $onChain = Bytes32::normalizeHex($att['value']);
+                            if (!hash_equals(Bytes32::normalizeHex($computedImageDigestSha256), $onChain)) {
+                                $addError('image_digest_commitment_mismatch', 'Image digest commitment mismatch.');
+                            }
+                            if (!$att['locked']) {
+                                $addError('image_digest_commitment_unlocked', 'Image digest commitment key is not locked.');
+                            }
                         }
                     }
                 } catch (\Throwable $e) {
@@ -626,7 +710,7 @@ final class TrustKernel
             // - the source of truth is the on-chain pointer stored in the InstanceController
             // - runtime config may additionally *pin* the expected registry address (optional)
             try {
-                $rrOnController = strtolower($this->controller->releaseRegistry($this->config->instanceController));
+                $rrOnController = is_string($probeReleaseRegistry) ? strtolower($probeReleaseRegistry) : strtolower($this->controller->releaseRegistry($this->config->instanceController));
                 $rrConfigured = $this->config->releaseRegistry !== null ? strtolower(trim($this->config->releaseRegistry)) : null;
 
                 if ($rrConfigured !== null && $rrConfigured !== $rrOnController) {
@@ -644,26 +728,15 @@ final class TrustKernel
             }
 
             // Optional sanity check: if the InstanceController is an EIP-1167 clone, ensure it points to a live implementation.
-            try {
-                $code = $this->rpc->ethGetCodeQuorum($this->config->instanceController, 'latest');
-                $proxyImpl = self::tryParseEip1167Implementation($code);
-                if ($proxyImpl !== null) {
-                    $implCode = $this->rpc->ethGetCodeQuorum($proxyImpl, 'latest');
-                    if ($implCode === '0x' || $implCode === '0x0') {
-                        $addError('controller_impl_no_code', 'InstanceController EIP-1167 implementation has no code.');
-                    }
-                } else {
-                    if ($code === '0x' || $code === '0x0') {
-                        $addError('controller_no_code', 'InstanceController has no code.');
-                    }
-                }
-            } catch (\Throwable $e) {
-                $addError('controller_code_sanity_failed', 'InstanceController code sanity check failed: ' . $e->getMessage());
+            // Run this only in non-request contexts (CLI runner) to avoid per-request RPC overhead.
+            if ($requestId === null) {
+                $this->checkControllerCodeSanityCached($addError);
             }
 
             $trustedNow = $errors === [];
             if ($trustedNow) {
                 $this->lastOkAt = $now;
+            }
             }
         }
 
@@ -929,8 +1002,71 @@ final class TrustKernel
         return $status;
     }
 
+    /**
+     * Perform (and cache) InstanceController code sanity checks.
+     *
+     * The controller code is immutable; after a successful read, cache the resulting errors list:
+     * - []  => OK, do not call RPC again for this check
+     * - [..] => persistent failure, report without repeated RPC
+     *
+     * On transient RPC failures, do not cache so the next check can retry.
+     *
+     * @param callable(string,string):void $addError
+     */
+    private function checkControllerCodeSanityCached(callable $addError): void
+    {
+        if ($this->controllerCodeSanityCachedErrors !== null) {
+            foreach ($this->controllerCodeSanityCachedErrors as $err) {
+                $addError($err['code'], $err['message']);
+            }
+            return;
+        }
+
+        try {
+            $errors = [];
+
+            $code = $this->rpc->ethGetCodeQuorum($this->config->instanceController, 'latest');
+            $proxyImpl = self::tryParseEip1167Implementation($code);
+            if ($proxyImpl !== null) {
+                $implCode = $this->rpc->ethGetCodeQuorum($proxyImpl, 'latest');
+                if ($implCode === '0x' || $implCode === '0x0') {
+                    $errors[] = [
+                        'code' => 'controller_impl_no_code',
+                        'message' => 'InstanceController EIP-1167 implementation has no code.',
+                    ];
+                }
+            } else {
+                if ($code === '0x' || $code === '0x0') {
+                    $errors[] = [
+                        'code' => 'controller_no_code',
+                        'message' => 'InstanceController has no code.',
+                    ];
+                }
+            }
+
+            // Cache only after a successful RPC read.
+            $this->controllerCodeSanityCachedErrors = $errors;
+
+            foreach ($errors as $err) {
+                $addError($err['code'], $err['message']);
+            }
+        } catch (\Throwable $e) {
+            $addError('controller_code_sanity_failed', 'InstanceController code sanity check failed: ' . $e->getMessage());
+        }
+    }
+
     private function computeComposerLockSha256Bytes32OrThrow(): string
     {
+        if ($this->composerLockCachedSha256 !== null && $this->composerLockCachedMtime !== null && $this->composerLockCachedSize !== null) {
+            $path = rtrim(trim($this->config->integrityRootDir), "/\\") . DIRECTORY_SEPARATOR . 'composer.lock';
+            clearstatcache(true, $path);
+            $mtime = @filemtime($path);
+            $size = @filesize($path);
+            if (is_int($mtime) && is_int($size) && $mtime === $this->composerLockCachedMtime && $size === $this->composerLockCachedSize) {
+                return $this->composerLockCachedSha256;
+            }
+        }
+
         $rootDir = $this->config->integrityRootDir;
         $rootDir = rtrim(trim($rootDir), "/\\");
         if ($rootDir === '' || str_contains($rootDir, "\0")) {
@@ -971,11 +1107,19 @@ final class TrustKernel
         }
 
         /** @var array<string,mixed> $decoded */
-        return CanonicalJson::sha256Bytes32($decoded);
+        $sha = CanonicalJson::sha256Bytes32($decoded);
+        $this->composerLockCachedSha256 = $sha;
+        $this->composerLockCachedMtime = @filemtime($path) ?: null;
+        $this->composerLockCachedSize = @filesize($path) ?: null;
+        return $sha;
     }
 
     private function computePhpFingerprintSha256Bytes32(): string
     {
+        if ($this->phpFingerprintCachedSha256 !== null) {
+            return $this->phpFingerprintCachedSha256;
+        }
+
         $extensions = get_loaded_extensions();
         sort($extensions, SORT_STRING);
 
@@ -988,12 +1132,14 @@ final class TrustKernel
             $map[$ext] = is_string($version) && trim($version) !== '' ? trim($version) : null;
         }
 
-        return CanonicalJson::sha256Bytes32([
+        $sha = CanonicalJson::sha256Bytes32([
             'schema_version' => 2,
             'type' => 'blackcat.php.fingerprint',
             'php_version' => PHP_VERSION,
             'extensions' => $map,
         ]);
+        $this->phpFingerprintCachedSha256 = $sha;
+        return $sha;
     }
 
     private function readImageDigestSha256Bytes32OrThrow(): string
@@ -1002,6 +1148,15 @@ final class TrustKernel
         $path = trim($path);
         if ($path === '' || str_contains($path, "\0")) {
             throw new TrustKernelException('Image digest file path is invalid.');
+        }
+
+        if ($this->imageDigestCachedSha256 !== null && $this->imageDigestCachedMtime !== null && $this->imageDigestCachedSize !== null) {
+            clearstatcache(true, $path);
+            $mtime = @filemtime($path);
+            $size = @filesize($path);
+            if (is_int($mtime) && is_int($size) && $mtime === $this->imageDigestCachedMtime && $size === $this->imageDigestCachedSize) {
+                return $this->imageDigestCachedSha256;
+            }
         }
 
         if (is_link($path)) {
@@ -1041,7 +1196,11 @@ final class TrustKernel
             throw new TrustKernelException('Image digest must be 32 bytes of hex (sha256).');
         }
 
-        return '0x' . strtolower($digest);
+        $out = '0x' . strtolower($digest);
+        $this->imageDigestCachedSha256 = $out;
+        $this->imageDigestCachedMtime = @filemtime($path) ?: null;
+        $this->imageDigestCachedSize = @filesize($path) ?: null;
+        return $out;
     }
 
     private static function currentRequestId(): ?string

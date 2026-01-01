@@ -98,7 +98,13 @@ final class HttpKernel
 
         // Boot TrustKernel early to install guards before any app logic.
         try {
-            $kernel = KernelBootstrap::bootOrFail($logger, $transport);
+            // Use the "if configured" bootstrap and enforce fail-closed here (via `$options`),
+            // so monitoring endpoints can opt out of request gating (e.g. `/health`) while
+            // still requiring `blackcat-config` + `trust.web3` to be present.
+            $kernel = KernelBootstrap::bootIfConfigured($logger, $transport);
+            if ($kernel === null) {
+                throw new \RuntimeException('TrustKernel is not configured (missing runtime config or trust.web3).');
+            }
         } catch (\Throwable $e) {
             $logger?->error('[http-kernel] kernel bootstrap failed: ' . $e->getMessage());
             return self::genericErrorResponse(503);

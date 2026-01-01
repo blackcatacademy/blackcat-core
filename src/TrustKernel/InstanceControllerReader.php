@@ -28,6 +28,94 @@ final class InstanceControllerReader
         return self::decodeSnapshot($hex);
     }
 
+    /**
+     * Batch read commonly used kernel fields to reduce RPC round-trips.
+     *
+     * Returns:
+     * - snapshot()
+     * - releaseRegistry()
+     * - attestations(key) + attestationLocked(key) for each provided key
+     *
+     * @param list<string> $attestationKeysBytes32
+     * @return array{
+     *   snapshot:InstanceControllerSnapshot,
+     *   release_registry:string,
+     *   attestations:array<string,array{value:string,locked:bool}>
+     * }
+     */
+    public function kernelProbe(string $instanceControllerAddress, array $attestationKeysBytes32): array
+    {
+        $instanceControllerAddress = self::normalizeAddress($instanceControllerAddress);
+
+        $keys = [];
+        foreach ($attestationKeysBytes32 as $i => $k) {
+            if (!is_string($k)) {
+                throw new \InvalidArgumentException('Invalid attestation key type at index ' . $i . ' (expected string).');
+            }
+            $k = Bytes32::normalizeHex($k);
+            $keys[$k] = true;
+        }
+        $keyList = array_keys($keys);
+        sort($keyList, SORT_STRING);
+
+        $calls = [
+            [
+                'to' => $instanceControllerAddress,
+                'data' => self::SNAPSHOT_SELECTOR,
+            ],
+            [
+                'to' => $instanceControllerAddress,
+                'data' => self::RELEASE_REGISTRY_SELECTOR,
+            ],
+        ];
+
+        foreach ($keyList as $k) {
+            $calls[] = [
+                'to' => $instanceControllerAddress,
+                'data' => self::ATTESTATIONS_SELECTOR . substr($k, 2),
+            ];
+        }
+        foreach ($keyList as $k) {
+            $calls[] = [
+                'to' => $instanceControllerAddress,
+                'data' => self::ATTESTATION_LOCKED_SELECTOR . substr($k, 2),
+            ];
+        }
+
+        $results = $this->rpc->ethCallBatchQuorum($calls, 'latest');
+
+        $snapshotHex = $results[0] ?? null;
+        $rrHex = $results[1] ?? null;
+        if (!is_string($snapshotHex) || !is_string($rrHex)) {
+            throw new \RuntimeException('Invalid kernel probe response shape.');
+        }
+
+        $snapshot = self::decodeSnapshot($snapshotHex);
+        $releaseRegistry = self::decodeAddress($rrHex);
+
+        $attestations = [];
+        $n = count($keyList);
+        for ($i = 0; $i < $n; $i++) {
+            $key = $keyList[$i];
+            $valueHex = $results[2 + $i] ?? null;
+            $lockedHex = $results[2 + $n + $i] ?? null;
+            if (!is_string($valueHex) || !is_string($lockedHex)) {
+                throw new \RuntimeException('Invalid kernel probe response index for key ' . $key . '.');
+            }
+
+            $attestations[$key] = [
+                'value' => self::decodeBytes32($valueHex),
+                'locked' => self::decodeBool($lockedHex),
+            ];
+        }
+
+        return [
+            'snapshot' => $snapshot,
+            'release_registry' => $releaseRegistry,
+            'attestations' => $attestations,
+        ];
+    }
+
     public function releaseRegistry(string $instanceControllerAddress): string
     {
         $hex = $this->rpc->ethCallQuorum($instanceControllerAddress, self::RELEASE_REGISTRY_SELECTOR, 'latest');
@@ -137,6 +225,22 @@ final class InstanceControllerReader
             $genesisAt,
             $lastUpgradeAt,
         );
+    }
+
+    private static function normalizeAddress(string $address): string
+    {
+        $address = trim($address);
+        if ($address === '' || str_contains($address, "\0")) {
+            throw new \InvalidArgumentException('Invalid EVM address.');
+        }
+        if (!preg_match('/^0x[a-fA-F0-9]{40}$/', $address)) {
+            throw new \InvalidArgumentException('Invalid EVM address.');
+        }
+        $address = '0x' . strtolower(substr($address, 2));
+        if ($address === '0x0000000000000000000000000000000000000000') {
+            throw new \InvalidArgumentException('Invalid EVM address (zero).');
+        }
+        return $address;
     }
 
     private static function decodeAddress(string $hex): string
