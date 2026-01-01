@@ -21,7 +21,8 @@ final class HttpKernelOptions
      *
      * This list is used to:
      * - reject forwarding headers from untrusted sources (anti-spoofing),
-     * - optionally honor X-Forwarded-Proto=https when the peer is trusted.
+     * - optionally honor HTTPS forwarding headers (X-Forwarded-Proto / RFC 7239 Forwarded: proto=...)
+     *   when the peer is trusted.
      *
      * Runtime config may override/extend this via `http.trusted_proxies`.
      *
@@ -37,9 +38,10 @@ final class HttpKernelOptions
      */
     public bool $rejectUntrustedForwardedHeaders = true;
 
-    /**
+     /**
      * If true, and the immediate peer is a trusted proxy, treat X-Forwarded-Proto=https as HTTPS
-     * for the rest of the request (best-effort, sets $_SERVER['HTTPS']).
+     * (and/or RFC 7239 Forwarded: proto=https) as HTTPS for the rest of the request
+     * (best-effort, sets $_SERVER['HTTPS']).
      */
     public bool $honorTrustedForwardedProto = true;
 

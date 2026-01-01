@@ -9,7 +9,8 @@ namespace BlackCat\Core\Security;
  *
  * Goals:
  * - Prevent clients from spoofing forwarding headers (proto/host/for) unless they come from a trusted proxy.
- * - Optionally "honor" X-Forwarded-Proto=https when the immediate peer is trusted.
+ * - Optionally honor HTTPS forwarding headers (X-Forwarded-Proto / RFC 7239 Forwarded: proto=...)
+ *   when the immediate peer is trusted.
  *
  * This is not a WAF. It is a conservative safety belt for kernel-only deployments.
  */
@@ -62,7 +63,26 @@ final class TrustedProxyGuard
     public static function forwardedProto(array $server): ?string
     {
         $raw = $server['HTTP_X_FORWARDED_PROTO'] ?? null;
-        if (!is_string($raw)) {
+        if (is_string($raw)) {
+            $proto = self::normalizeForwardedProtoToken($raw);
+            if ($proto !== null) {
+                return $proto;
+            }
+        }
+
+        // RFC 7239: Forwarded: proto=https; for=...; by=...
+        $forwarded = $server['HTTP_FORWARDED'] ?? null;
+        if (is_string($forwarded)) {
+            return self::parseRfc7239ForwardedProto($forwarded);
+        }
+
+        return null;
+    }
+
+    private static function normalizeForwardedProtoToken(string $raw): ?string
+    {
+        $raw = trim($raw);
+        if ($raw === '' || str_contains($raw, "\0")) {
             return null;
         }
 
@@ -78,6 +98,130 @@ final class TrustedProxyGuard
         }
 
         return null;
+    }
+
+    private static function parseRfc7239ForwardedProto(string $raw): ?string
+    {
+        $raw = trim($raw);
+        if ($raw === '' || str_contains($raw, "\0")) {
+            return null;
+        }
+
+        // Parse only the first Forwarded element (left-most), which corresponds to the
+        // original request (best-effort). Do not attempt to interpret a chain.
+        $element = '';
+        $inQuotes = false;
+        $len = strlen($raw);
+        for ($i = 0; $i < $len; $i++) {
+            $ch = $raw[$i];
+            if ($ch === '"') {
+                $inQuotes = !$inQuotes;
+            }
+            if ($ch === ',' && !$inQuotes) {
+                break;
+            }
+            $element .= $ch;
+        }
+
+        $element = trim($element);
+        if ($element === '') {
+            return null;
+        }
+
+        $params = self::splitOutsideQuotes($element, ';');
+        foreach ($params as $param) {
+            $param = trim($param);
+            if ($param === '') {
+                continue;
+            }
+
+            $eqPos = strpos($param, '=');
+            if ($eqPos === false) {
+                continue;
+            }
+
+            $key = strtolower(trim(substr($param, 0, $eqPos)));
+            if ($key !== 'proto') {
+                continue;
+            }
+
+            $valueRaw = trim(substr($param, $eqPos + 1));
+            if ($valueRaw === '') {
+                return null;
+            }
+
+            $value = self::unquoteForwardedValue($valueRaw);
+            $value = strtolower(trim($value));
+
+            if ($value === 'https') {
+                return 'https';
+            }
+            if ($value === 'http') {
+                return 'http';
+            }
+
+            return null;
+        }
+
+        return null;
+    }
+
+    /**
+     * Split a string by a delimiter, ignoring delimiters inside quotes.
+     *
+     * @return list<string>
+     */
+    private static function splitOutsideQuotes(string $raw, string $delimiter): array
+    {
+        $out = [];
+        $buf = '';
+        $inQuotes = false;
+
+        $len = strlen($raw);
+        for ($i = 0; $i < $len; $i++) {
+            $ch = $raw[$i];
+            if ($ch === '"') {
+                $inQuotes = !$inQuotes;
+            }
+
+            if ($ch === $delimiter && !$inQuotes) {
+                $out[] = $buf;
+                $buf = '';
+                continue;
+            }
+
+            $buf .= $ch;
+        }
+
+        $out[] = $buf;
+        return $out;
+    }
+
+    private static function unquoteForwardedValue(string $raw): string
+    {
+        $raw = trim($raw);
+        if ($raw === '') {
+            return '';
+        }
+
+        if ($raw[0] !== '"' || !str_ends_with($raw, '"')) {
+            return $raw;
+        }
+
+        $inner = substr($raw, 1, -1);
+        $out = '';
+        $len = strlen($inner);
+        for ($i = 0; $i < $len; $i++) {
+            $ch = $inner[$i];
+            if ($ch === '\\' && $i + 1 < $len) {
+                $i++;
+                $out .= $inner[$i];
+                continue;
+            }
+            $out .= $ch;
+        }
+
+        return $out;
     }
 
     /**
@@ -221,4 +365,3 @@ final class TrustedProxyGuard
         return (($ipByte & $mask) === ($netByte & $mask));
     }
 }
-
