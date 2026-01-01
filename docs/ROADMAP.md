@@ -29,7 +29,7 @@ Core does **not** own domain truth (schemas, views, auth flows, workers).
 
 - Freeze kernel boundaries and document them (README + `docs/*`).
 - Remove non-kernel leftovers (app-specific helpers, legacy SQL snippets).
-- Keep compatibility facades but document them clearly (`docs/COMPATIBILITY.md`).
+- Do not ship compatibility facades in core (use dedicated modules; see `docs/COMPATIBILITY.md`).
 - Add CI (phpunit + phpstan) and a minimal unit test suite for the kernel primitives.
 - Align ecosystem requirements (supported PHP version policy, required extensions).
 
@@ -52,3 +52,47 @@ Core does **not** own domain truth (schemas, views, auth flows, workers).
 - Add structured examples (bootstrap templates for services and CLI tools).
 - Add a small troubleshooting guide (common env/extension issues).
 - Document recommended module composition presets (minimal / standard / high-security / multi-tenant).
+
+## Stage 4 — Trust Kernel (Web3) (planned)
+
+Goal: make `blackcat-core` sufficient for **minimal installs** while still enforcing a strict, auditable trust chain in production.
+
+Core owns only the **runtime enforcement surface**. Contracts, installers, and CLI live elsewhere.
+
+### Single source of truth (boundaries)
+
+- On-chain authority + upgrade/attestation state machine: `blackcatacademy/blackcat-kernel-contracts`
+- Signed release artifacts, hashing/Merkle primitives: `blackcatacademy/blackcat-integrity`
+- Runtime config + file permission checks + policy defaults: `blackcatacademy/blackcat-config`
+- Operational commands (optional): `blackcatacademy/blackcat-cli`
+- Install/upgrade ceremony + secure bootstrap (optional tooling): `blackcatacademy/blackcat-installer` / `blackcatacademy/blackcat-install` / `blackcatacademy/blackcat-deployer`
+
+### Runtime responsibilities (what core must enforce)
+
+- **TrustKernel reader**: read on-chain state via EVM JSON-RPC (multi-RPC quorum; verify `chain_id`) and validate the contract address + code hash.
+- **Local integrity**: compute/verify a local Merkle/tree root (or checksum set) for installed components and compare it to the on-chain attested root.
+- **Fail-closed in prod**: if trust is unavailable or stale, enter safe-mode and expose a deterministic status for monitoring/CLI to consume.
+  - Recommended prod default: `max_stale_sec = 180` (writes paused immediately on quorum loss; reads may be allowed until stale, then fail-closed).
+- **Key gating** (critical): do not release/unwrap security-critical secrets unless trust checks pass (FTP tampering must not enable “silent reconfiguration”).
+- **Pluggable policy**: tiered behavior (dev warns, prod refuses) must be a policy object, not ad-hoc `if`s scattered across repos.
+
+### Minimal install flow (core-only on the server)
+
+- A separate “setup device” (offline-ish) requests/creates the per-install smart contract and verifies it on-chain.
+- Multiple signers confirm the setup (multi-sig threshold), ideally from separate devices.
+- The server installs only `blackcat-core` (and its required deps), plus a runtime config file that contains:
+  - chain + RPC quorum configuration,
+  - contract addresses,
+  - local integrity inputs (`trust.integrity.root_dir`, `trust.integrity.manifest`),
+  - the chosen trust mode (root+URI vs full detail),
+  - strict production policy defaults.
+
+## Stage 5 — Trust Watchdog (“security grid”) (planned)
+
+Goal: add an optional worker/sentinel layer that:
+- detects missing check-ins / RPC quorum loss / suspicious state changes,
+- triggers emergency actions (pause / incident reporting) via a remote trust anchor,
+- minimizes the attacker’s time window and makes incidents auditable.
+
+Design notes:
+- [Trust Watchdog](TRUST_WATCHDOG.md)

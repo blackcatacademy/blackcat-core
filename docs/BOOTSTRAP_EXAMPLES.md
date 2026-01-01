@@ -56,17 +56,22 @@ composer require blackcatacademy/blackcat-core blackcatacademy/blackcat-database
 composer require blackcat/crypto blackcatacademy/blackcat-database-crypto
 ```
 
-### 3) Configure env (example)
+### 3) Configure runtime config (recommended, no env)
 
-```bash
-export BLACKCAT_DB_ENCRYPTION_MAP="/path/to/encryption-map.json"
-export BLACKCAT_KEYS_DIR="/path/to/keys"
+Create a runtime config file (recommended locations include `/etc/blackcat/config.json` or `~/.config/blackcat/config.runtime.json`):
 
-# optional (recommended for slot config/rotation policies):
-export BLACKCAT_CRYPTO_MANIFEST="/path/to/crypto-manifest.json"
+```json
+{
+  "crypto": {
+    "keys_dir": "/srv/blackcat/keys",
+    "manifest": "/etc/blackcat/crypto.manifest.json"
+  }
+}
 ```
 
-### 4) Bootstrap (Database + ingress sanity-check)
+To enable the Trust Kernel, add `trust.integrity` + `trust.web3` to the same runtime config file (see `blackcat-config` docs).
+
+### 4) Bootstrap (TrustKernel + Database + ingress sanity-check)
 
 ```php
 <?php
@@ -76,6 +81,11 @@ require __DIR__ . '/vendor/autoload.php';
 
 use BlackCat\Core\Database;
 use BlackCat\Database\Crypto\IngressLocator;
+use BlackCat\Core\TrustKernel\TrustKernelBootstrap;
+
+// Optional: installs DB/key access guards when runtime config is available and `trust.web3` is configured.
+// For "trust required" production deployments, prefer `bootFromBlackCatConfigOrFail()`.
+$trust = TrustKernelBootstrap::bootIfConfiguredFromBlackCatConfig();
 
 Database::init([
     'dsn' => $_ENV['DB_DSN'] ?? 'pgsql:host=127.0.0.1;port=5432;dbname=app',
@@ -86,11 +96,8 @@ Database::init([
     'dangerousSqlGuard' => true,
 ]);
 
-// If BLACKCAT_DB_ENCRYPTION_REQUIRED=1, this throws unless ingress is configured.
-$ingress = IngressLocator::adapter();
-if ($ingress !== null) {
-    // validate the adapter can encrypt a sample payload
-    $ingress->encrypt('example_table', ['example' => 'value']);
-}
+// Fail-closed by default: this throws unless ingress is configured.
+$ingress = IngressLocator::requireAdapter();
+// validate the adapter can encrypt a sample payload
+$ingress->encrypt('example_table', ['example' => 'value']);
 ```
-

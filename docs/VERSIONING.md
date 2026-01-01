@@ -24,5 +24,4 @@ The stable surface is the namespaced API under:
 
 ## Compatibility facades
 
-Some legacy names exist as facades (see `docs/COMPATIBILITY.md`). They are maintained on a best-effort basis and are not the preferred API for new code.
-
+`blackcat-core` does not ship compatibility facades for other modules. For migration notes and module boundaries, see `docs/COMPATIBILITY.md`.

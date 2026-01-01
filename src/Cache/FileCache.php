@@ -7,6 +7,7 @@ use Psr\SimpleCache\InvalidArgumentException as PsrInvalidArgumentException;
 use BlackCat\Core\Cache\LockingCacheInterface;
 use BlackCat\Core\Security\KeyManager;
 use BlackCat\Core\Security\Crypto;
+use BlackCat\Core\Security\CryptoAgentClient;
 use BlackCat\Core\Log\Logger;
 
 /**
@@ -25,6 +26,7 @@ class FileCache implements LockingCacheInterface
     private ?string $cryptoKeysDir = null;
     private string $cryptoEnvName = 'CACHE_CRYPTO_KEY';
     private string $cryptoBasename = 'cache_crypto';
+    private bool $useKeylessCryptoAgent = false;
 
     // storage controls
     private int $gcProbability = 1; // numerator
@@ -121,6 +123,15 @@ class FileCache implements LockingCacheInterface
                 KeyManager::requireSodium();
             } catch (\Throwable $e) {
                 throw new \RuntimeException('libsodium extension required for FileCache encryption: ' . $e->getMessage());
+            }
+
+            $this->useKeylessCryptoAgent = class_exists(CryptoAgentClient::class, true) && CryptoAgentClient::isKeylessMode();
+            if ($this->useKeylessCryptoAgent) {
+                if (!CryptoAgentClient::isConfigured()) {
+                    throw new \RuntimeException('FileCache encryption requires crypto.agent.socket_path in keyless agent mode.');
+                }
+                // Keyless mode: do not attempt to export key bytes into the web runtime.
+                return;
             }
 
             try {
@@ -231,7 +242,7 @@ class FileCache implements LockingCacheInterface
     /**
      * Normalize TTL input into seconds.
      *
-     * @param int|DateInterval|null $ttl
+     * @param int|\DateInterval|null $ttl
      * @return int|null seconds or null for unlimited
      */
     private function normalizeTtl($ttl): ?int
@@ -246,12 +257,26 @@ class FileCache implements LockingCacheInterface
     }
 
     private function safeFileRead(string $file): string|false {
+        clearstatcache(true, $file);
+        if (!is_file($file) || is_link($file) || !$this->isPathInCacheDir($file)) {
+            return false;
+        }
+
+        $maxBytes = $this->maxEntryBytes > 0 ? $this->maxEntryBytes : 32 * 1024 * 1024; // hard safety cap
+        $size = @filesize($file);
+        if (is_int($size) && $size > $maxBytes) {
+            return false;
+        }
+
         $fp = @fopen($file, 'rb');
         if ($fp === false) return false;
         if (!flock($fp, LOCK_SH)) { fclose($fp); return false; }
-        $contents = stream_get_contents($fp);
+        $contents = stream_get_contents($fp, $maxBytes + 1);
         flock($fp, LOCK_UN);
         fclose($fp);
+        if (!is_string($contents) || strlen($contents) > $maxBytes) {
+            return false;
+        }
         return $contents;
     }
 
@@ -261,6 +286,22 @@ class FileCache implements LockingCacheInterface
         if (!is_dir($destDir)) {
             @mkdir($destDir, 0700, true);
             @chmod($destDir, 0700);
+        }
+        clearstatcache(true, $destDir);
+        if (is_link($destDir)) {
+            $this->log('critical', 'Refusing to write cache entry into symlink directory', null, ['dir' => $destDir]);
+            return false;
+        }
+        $destReal = realpath($destDir);
+        if ($destReal === false) {
+            $this->log('critical', 'Refusing to write cache entry: cannot resolve destDir realpath', null, ['dir' => $destDir]);
+            return false;
+        }
+        $cachePrefix = rtrim($this->cacheDirReal, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+        $destWithSep = rtrim($destReal, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+        if (!str_starts_with($destWithSep, $cachePrefix)) {
+            $this->log('critical', 'Refusing to write cache entry outside cacheDir', null, ['dir' => $destDir, 'real' => $destReal]);
+            return false;
         }
 
         // Create temp file in same directory as destination to ensure atomic rename
@@ -324,10 +365,21 @@ class FileCache implements LockingCacheInterface
             @mkdir($locksDir, 0700, true);
             @chmod($locksDir, 0700);
         }
+        clearstatcache(true, $locksDir);
+        if (is_link($locksDir) || !$this->isPathInCacheDir($locksDir)) {
+            return null;
+        }
         $lockFile = $locksDir . DIRECTORY_SEPARATOR . $safe . '.lock';
+        if (is_link($lockFile)) {
+            return null;
+        }
         $token = bin2hex(random_bytes(16));
         $expireAt = time() + max(1, (int)$ttlSeconds);
-        $payload = json_encode(['token' => $token, 'expires' => $expireAt], JSON_UNESCAPED_SLASHES);
+        try {
+            $payload = json_encode(['token' => $token, 'expires' => $expireAt], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+        } catch (\JsonException) {
+            return null;
+        }
 
         // Try atomic create via fopen('x')
         $fp = @fopen($lockFile, 'x'); // fails if file exists
@@ -341,22 +393,23 @@ class FileCache implements LockingCacheInterface
         }
 
         // if file exists, check if stale
-        if (is_file($lockFile) && is_readable($lockFile)) {
-            $raw = @file_get_contents($lockFile);
-            if ($raw !== false) {
-                $dec = @json_decode($raw, true);
-                if (is_array($dec) && isset($dec['expires']) && is_numeric($dec['expires'])) {
-                    if ((int)$dec['expires'] < time()) {
-                        // stale -> try to remove and acquire once more
+        $raw = $this->safeFileRead($lockFile);
+        if ($raw !== false) {
+            $dec = @json_decode($raw, true);
+            if (is_array($dec) && isset($dec['expires']) && is_numeric($dec['expires'])) {
+                if ((int)$dec['expires'] < time()) {
+                    // stale -> try to remove and acquire once more
+                    clearstatcache(true, $lockFile);
+                    if (@readlink($lockFile) === false && $this->isPathInCacheDir($lockFile)) {
                         @unlink($lockFile);
-                        $fp2 = @fopen($lockFile, 'x');
-                        if ($fp2 !== false) {
-                            fwrite($fp2, $payload);
-                            fflush($fp2);
-                            fclose($fp2);
-                            @chmod($lockFile, 0600);
-                            return $token;
-                        }
+                    }
+                    $fp2 = @fopen($lockFile, 'x');
+                    if ($fp2 !== false) {
+                        fwrite($fp2, $payload);
+                        fflush($fp2);
+                        fclose($fp2);
+                        @chmod($lockFile, 0600);
+                        return $token;
                     }
                 }
             }
@@ -373,8 +426,8 @@ class FileCache implements LockingCacheInterface
     {
         $safe = preg_replace('/[^A-Za-z0-9_\-]/', '_', self::substrSafe($name, 0, 64));
         $lockFile = $this->cacheDirReal . DIRECTORY_SEPARATOR . 'locks' . DIRECTORY_SEPARATOR . $safe . '.lock';
-        if (!is_file($lockFile) || !is_readable($lockFile)) return false;
-        $raw = @file_get_contents($lockFile);
+        if (!is_file($lockFile) || !is_readable($lockFile) || is_link($lockFile) || !$this->isPathInCacheDir($lockFile)) return false;
+        $raw = $this->safeFileRead($lockFile);
         if ($raw === false) return false;
         $dec = @json_decode($raw, true);
         if (!is_array($dec) || !isset($dec['token'])) return false;
@@ -435,19 +488,17 @@ class FileCache implements LockingCacheInterface
                 }
             }
 
-            if ($expired) {
-                $expiredFiles++;
-                $expiredSize += $size;
-                // Light GC: remove max 1000 expired files per run
-                if ($processedExpired < $maxGcPerRun) {
-                    if ($this->isPathInCacheDir($path)) {
+                if ($expired) {
+                    $expiredFiles++;
+                    $expiredSize += $size;
+                    // Light GC: remove max 1000 expired files per run
+                    if ($processedExpired < $maxGcPerRun) {
                         @unlink($path);
+                        $processedExpired++;
                     }
-                    $processedExpired++;
-                }
-            } else {
-                $activeFiles++;
-                $activeSize += $size;
+                } else {
+                    $activeFiles++;
+                    $activeSize += $size;
             }
         }
 
@@ -500,7 +551,25 @@ class FileCache implements LockingCacheInterface
         $payload = $data['value'];
         $version = $data['key_version'] ?? null;
 
-        if ($version !== null) {
+        if ($this->useKeylessCryptoAgent) {
+            try {
+                $plain = CryptoAgentClient::decrypt($this->cryptoBasename, (string) $payload);
+                if ($plain === null) {
+                    return $default;
+                }
+                $val = @unserialize($plain, ['allowed_classes' => false]);
+                if ($val === false && $plain !== serialize(false)) {
+                    return $default;
+                }
+                $this->counters['hits']++;
+                return $val;
+            } catch (\Throwable $e) {
+                $this->log('warning', 'decrypt_via_agent failed', $e);
+                return $default;
+            }
+        }
+
+        if ($version !== null && $this->cryptoKeysDir !== null) {
             try {
                 $info = KeyManager::getRawKeyBytesByVersion(
                     $this->cryptoEnvName,
@@ -561,7 +630,7 @@ class FileCache implements LockingCacheInterface
      *
      * @param string $key
      * @param mixed $value
-     * @param int|DateInterval|null $ttl
+     * @param int|\DateInterval|null $ttl
      * @return bool True on success, false on failure
      *
      * @throws CacheInvalidArgumentException
@@ -578,6 +647,24 @@ class FileCache implements LockingCacheInterface
         } else {
             $plain = serialize($value);
 
+            if ($this->useKeylessCryptoAgent) {
+                try {
+                    $info = CryptoAgentClient::encryptWithInfo($this->cryptoBasename, $plain);
+                    $encrypted = $info['ciphertext'];
+                    $version = $info['key_version'];
+                } catch (\Throwable $e) {
+                    $this->log('error', 'encrypt_via_agent failed', $e);
+                    return false;
+                }
+
+                $data = [
+                    'expires' => $expires,
+                    'value' => $encrypted,
+                    'enc' => true,
+                    'key_version' => $version,
+                ];
+                $plain = '';
+            } else {
             try {
                 $info = KeyManager::getRawKeyBytes(
                     $this->cryptoEnvName,
@@ -591,8 +678,8 @@ class FileCache implements LockingCacheInterface
                 return false;
             }
 
-            $raw = $info['raw'] ?? null;
-            $version = $info['version'] ?? null;
+            $raw = $info['raw'];
+            $version = $info['version'];
 
             if (!is_string($raw) || strlen($raw) !== KeyManager::keyByteLen()) {
                 try { KeyManager::memzero($raw); } catch (\Throwable $_) {}
@@ -618,6 +705,7 @@ class FileCache implements LockingCacheInterface
                 'key_version' => $version,
             ];
             $plain = '';
+            }
         }
 
         // probabilistic GC
@@ -758,7 +846,7 @@ class FileCache implements LockingCacheInterface
      * Stores multiple key/value pairs.
      *
      * @param iterable<string,mixed> $values
-     * @param int|DateInterval|null $ttl
+     * @param int|\DateInterval|null $ttl
      * @return bool
      *
      * @throws CacheInvalidArgumentException
@@ -841,9 +929,12 @@ class FileCache implements LockingCacheInterface
             $fp = @fopen($path, 'rb');
             if ($fp === false) continue;
             if (!flock($fp, LOCK_SH)) { fclose($fp); continue; }
-            $raw = $raw = stream_get_contents($fp, 32768, 0);
+            $raw = stream_get_contents($fp, 32768, 0);
             flock($fp, LOCK_UN);
             fclose($fp);
+            if ($raw === false) {
+                continue;
+            }
             $data = @unserialize($raw, ['allowed_classes' => false]);
             if (is_array($data) && isset($data['expires']) && $data['expires'] !== null && $data['expires'] < time()) {
                 if ($this->isPathInCacheDir($path)) @unlink($path);

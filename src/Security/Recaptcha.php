@@ -3,6 +3,8 @@ declare(strict_types=1);
 
 namespace BlackCat\Core\Security;
 
+use Psr\SimpleCache\CacheInterface;
+
 /**
  * Simple reCAPTCHA v2/v3 verifier.
  *
@@ -12,6 +14,7 @@ namespace BlackCat\Core\Security;
  * Optional $opts:
  *   - timeout: int seconds (default 8)
  *   - endpoint: verification URL (default google)
+ *   - allowed_hosts: list of allowed endpoint hosts (defaults to the endpoint host)
  *   - logger: null | string (class name) | callable | object
  *       If string and class exists, static methods will be used when possible (error/info/debug).
  *       If callable, will be called as fn($level, $message, $ctx = []).
@@ -21,16 +24,17 @@ namespace BlackCat\Core\Security;
  */
 final class Recaptcha
 {
+    private const MAX_BODY_BYTES = 64 * 1024;
+
     private string $secret;
     private float $minScore;
     private int $timeout;
     private string $endpoint;
-    /** @var null|string|callable|object */
-    private $logger;
-    /** @var null|callable */
-    private $httpClient;
-    /** @var null|object */
-    private $cache;
+    /** @var list<string> */
+    private array $allowedHosts = [];
+    private mixed $logger = null;
+    private mixed $httpClient = null;
+    private ?CacheInterface $cache = null;
 
     public function __construct(string $secret, float $minScore = 0.4, array $opts = [])
     {
@@ -38,6 +42,7 @@ final class Recaptcha
         $this->minScore = max(0.0, min(1.0, $minScore));
         $this->timeout = (int)($opts['timeout'] ?? 8);
         $this->endpoint = $opts['endpoint'] ?? 'https://www.google.com/recaptcha/api/siteverify';
+        $this->allowedHosts = self::normalizeAllowedHosts($opts['allowed_hosts'] ?? null, $this->endpoint);
 
         $loggerOpt = $opts['logger'] ?? null;
         if (is_string($loggerOpt) && class_exists($loggerOpt)) {
@@ -51,7 +56,8 @@ final class Recaptcha
         }
 
         $this->httpClient = isset($opts['httpClient']) && is_callable($opts['httpClient']) ? $opts['httpClient'] : null;
-        $this->cache = $opts['cache'] ?? null;
+        $cacheOpt = $opts['cache'] ?? null;
+        $this->cache = $cacheOpt instanceof CacheInterface ? $cacheOpt : null;
     }
 
     /**
@@ -68,6 +74,12 @@ final class Recaptcha
         if (trim($token) === '') {
             $this->logDebug('recaptcha token empty');
             return ['ok' => false, 'score' => null, 'action' => null, 'raw' => null, 'error' => 'token_empty'];
+        }
+
+        $endpointError = self::validateHttpsEndpoint($this->endpoint, $this->allowedHosts);
+        if ($endpointError !== null) {
+            $this->logError('recaptcha bad endpoint', ['code' => $endpointError]);
+            return ['ok' => false, 'score' => null, 'action' => null, 'raw' => null, 'error' => $endpointError];
         }
 
         // optional short-term cache: many clients re-send same token — avoid duplicate remote calls
@@ -99,14 +111,20 @@ final class Recaptcha
             return ['ok' => false, 'score' => null, 'action' => null, 'raw' => null, 'error' => 'http_exception'];
         }
 
+        $body = (string) ($resp['body'] ?? '');
+        if (strlen($body) > self::MAX_BODY_BYTES) {
+            $this->logError('Recaptcha response too large', ['bytes' => strlen($body)]);
+            return ['ok' => false, 'score' => null, 'action' => null, 'raw' => null, 'error' => 'response_too_large'];
+        }
+
         if (!isset($resp['code']) || (int)$resp['code'] !== 200) {
             $this->logError('Recaptcha non-200', ['code' => $resp['code'] ?? null, 'err' => $resp['error'] ?? null]);
             return ['ok' => false, 'score' => null, 'action' => null, 'raw' => null, 'error' => 'recaptcha_http_' . ((int)($resp['code'] ?? 0))];
         }
 
-        $data = json_decode($resp['body'] ?? '', true);
+        $data = json_decode($body, true);
         if (!is_array($data)) {
-            $this->logError('Recaptcha invalid json', ['body' => substr((string)($resp['body'] ?? ''), 0, 200)]);
+            $this->logError('Recaptcha invalid json', ['body' => substr($body, 0, 200)]);
             return ['ok' => false, 'score' => null, 'action' => null, 'raw' => null, 'error' => 'invalid_json'];
         }
 
@@ -155,23 +173,61 @@ final class Recaptcha
         if (!function_exists('curl_init')) {
             throw new \RuntimeException('Recaptcha requires ext-curl or a custom httpClient callable (opts["httpClient"]).');
         }
+        if (!defined('CURLPROTO_HTTPS')) {
+            throw new \RuntimeException('Recaptcha requires curl with HTTPS support.');
+        }
+
+        $timeout = max(1, min(30, $timeout));
+
         $ch = curl_init($url);
         if ($ch === false) {
             throw new \RuntimeException('Recaptcha curl_init failed.');
         }
+
+        $buffer = '';
+        $maxBytes = self::MAX_BODY_BYTES;
         curl_setopt_array($ch, [
-            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_RETURNTRANSFER => false,
             CURLOPT_POST => true,
             CURLOPT_POSTFIELDS => http_build_query($postFields),
+            CURLOPT_HTTPHEADER => [
+                'Accept: application/json',
+                'Content-Type: application/x-www-form-urlencoded',
+            ],
+            CURLOPT_USERAGENT => 'BlackCat-Core/1.0 (recaptcha)',
+            CURLOPT_FOLLOWLOCATION => false,
+            CURLOPT_MAXREDIRS => 0,
             CURLOPT_TIMEOUT => $timeout,
             CURLOPT_CONNECTTIMEOUT => max(1, (int)floor($timeout / 2)),
+            CURLOPT_PROTOCOLS => CURLPROTO_HTTPS,
+            CURLOPT_REDIR_PROTOCOLS => CURLPROTO_HTTPS,
+            CURLOPT_SSL_VERIFYPEER => true,
+            CURLOPT_SSL_VERIFYHOST => 2,
+            CURLOPT_WRITEFUNCTION => static function ($ch, string $data) use (&$buffer, $maxBytes): int {
+                $buffer .= $data;
+                if (strlen($buffer) > $maxBytes) {
+                    return 0;
+                }
+                return strlen($data);
+            },
         ]);
-        $body = curl_exec($ch);
-        $err = curl_error($ch);
-        $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
 
-        return ['code' => $code, 'body' => $body === false ? '' : (string)$body, 'error' => $err ?: null];
+        try {
+            $ok = curl_exec($ch);
+            $err = curl_error($ch);
+            $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+
+            if ($ok === false) {
+                if (strlen($buffer) > self::MAX_BODY_BYTES) {
+                    return ['code' => 0, 'body' => '', 'error' => 'response_too_large'];
+                }
+                return ['code' => 0, 'body' => '', 'error' => $err ?: 'curl_error'];
+            }
+
+            return ['code' => $code, 'body' => $buffer, 'error' => $err ?: null];
+        } finally {
+            unset($ch);
+        }
     }
 
     /* ----------------------
@@ -246,5 +302,120 @@ final class Recaptcha
             } catch (\Throwable $_) {}
             return;
         }
+    }
+
+    /**
+     * @param mixed $rawAllowedHosts
+     * @return list<string>
+     */
+    private static function normalizeAllowedHosts(mixed $rawAllowedHosts, string $endpoint): array
+    {
+        $hosts = [];
+
+        if (is_array($rawAllowedHosts)) {
+            foreach ($rawAllowedHosts as $h) {
+                if (!is_string($h)) {
+                    continue;
+                }
+                $h = self::normalizeHost($h);
+                if ($h === '') {
+                    continue;
+                }
+                $hosts[] = $h;
+            }
+        }
+
+        if ($hosts === []) {
+            /** @var array<string,mixed>|false $parts */
+            $parts = parse_url($endpoint);
+            $host = is_array($parts) ? ($parts['host'] ?? null) : null;
+            if (is_string($host) && $host !== '') {
+                $h = self::normalizeHost($host);
+                if ($h !== '') {
+                    $hosts[] = $h;
+                }
+            }
+        }
+
+        $hosts = array_values(array_unique($hosts));
+        sort($hosts, SORT_STRING);
+        return $hosts;
+    }
+
+    /**
+     * @param list<string> $allowedHosts
+     * @return string|null error code
+     */
+    private static function validateHttpsEndpoint(string $url, array $allowedHosts): ?string
+    {
+        $url = trim($url);
+        if ($url === '' || str_contains($url, "\0") || strlen($url) > 2048) {
+            return 'bad_endpoint';
+        }
+
+        /** @var array<string,mixed>|false $parts */
+        $parts = parse_url($url);
+        if (!is_array($parts)) {
+            return 'bad_endpoint';
+        }
+
+        $scheme = $parts['scheme'] ?? null;
+        $host = $parts['host'] ?? null;
+        $user = $parts['user'] ?? null;
+        $pass = $parts['pass'] ?? null;
+        $fragment = $parts['fragment'] ?? null;
+        $port = $parts['port'] ?? null;
+
+        if (!is_string($scheme) || strtolower($scheme) !== 'https') {
+            return 'bad_endpoint_scheme';
+        }
+        if (!is_string($host) || $host === '') {
+            return 'bad_endpoint_host';
+        }
+        if (is_string($user) || is_string($pass)) {
+            return 'bad_endpoint_userinfo';
+        }
+        if (is_string($fragment) && $fragment !== '') {
+            return 'bad_endpoint_fragment';
+        }
+        if ($port !== null) {
+            if (!is_int($port) || $port < 1 || $port > 65535) {
+                return 'bad_endpoint_port';
+            }
+        }
+
+        $host = self::normalizeHost($host);
+        if ($host === '' || str_contains($host, "\0")) {
+            return 'bad_endpoint_host';
+        }
+
+        // SSRF hardening: reject private/reserved IP literals (including loopback).
+        if (filter_var($host, FILTER_VALIDATE_IP) !== false) {
+            $flags = FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE;
+            if (filter_var($host, FILTER_VALIDATE_IP, $flags) === false) {
+                return 'bad_endpoint_ip';
+            }
+        }
+
+        if ($allowedHosts !== [] && !in_array($host, $allowedHosts, true)) {
+            return 'bad_endpoint_host_not_allowed';
+        }
+
+        return null;
+    }
+
+    private static function normalizeHost(string $host): string
+    {
+        $host = strtolower(trim($host));
+        if ($host === '') {
+            return '';
+        }
+        if (str_starts_with($host, '[') && str_ends_with($host, ']') && strlen($host) > 2) {
+            $inner = substr($host, 1, -1);
+            if (is_string($inner) && $inner !== '') {
+                $host = $inner;
+            }
+        }
+        return $host;
     }
 }

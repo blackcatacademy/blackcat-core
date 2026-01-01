@@ -13,8 +13,8 @@ use BlackCat\Core\Log\Logger;
 final class LoggerPsrAdapter implements LoggerInterface
 {
     /**
-     * @param string|Stringable $message
-     * @param array $context
+     * @param string|\Stringable $message
+     * @param array<string,mixed> $context
      */
     public function log($level, string|\Stringable $message, array $context = []): void
     {
@@ -36,7 +36,7 @@ final class LoggerPsrAdapter implements LoggerInterface
                 case LogLevel::EMERGENCY:
                 case LogLevel::ALERT:
                 case LogLevel::CRITICAL:
-                    Logger::critical((string)$message, $context['user_id'] ?? null, $context, $context['token'] ?? null);
+                    Logger::critical((string)$message, $context['user_id'] ?? null, $context);
                     break;
 
                 case LogLevel::ERROR:
@@ -68,12 +68,12 @@ final class LoggerPsrAdapter implements LoggerInterface
         }
     }
 
-    public function emergency($message, array $context = []): void { $this->log(LogLevel::EMERGENCY, $message, $context); }
-    public function alert($message, array $context = []): void     { $this->log(LogLevel::ALERT,     $message, $context); }
-    public function critical($message, array $context = []): void  { $this->log(LogLevel::CRITICAL,  $message, $context); }
-    public function error($message, array $context = []): void     { $this->log(LogLevel::ERROR,     $message, $context); }
-    public function warning($message, array $context = []): void   { $this->log(LogLevel::WARNING,   $message, $context); }
-    public function notice($message, array $context = []): void    { $this->log(LogLevel::NOTICE,    $message, $context); }
-    public function info($message, array $context = []): void      { $this->log(LogLevel::INFO,      $message, $context); }
-    public function debug($message, array $context = []): void     { $this->log(LogLevel::DEBUG,     $message, $context); }
+    public function emergency(string|\Stringable $message, array $context = []): void { $this->log(LogLevel::EMERGENCY, $message, $context); }
+    public function alert(string|\Stringable $message, array $context = []): void     { $this->log(LogLevel::ALERT,     $message, $context); }
+    public function critical(string|\Stringable $message, array $context = []): void  { $this->log(LogLevel::CRITICAL,  $message, $context); }
+    public function error(string|\Stringable $message, array $context = []): void     { $this->log(LogLevel::ERROR,     $message, $context); }
+    public function warning(string|\Stringable $message, array $context = []): void   { $this->log(LogLevel::WARNING,   $message, $context); }
+    public function notice(string|\Stringable $message, array $context = []): void    { $this->log(LogLevel::NOTICE,    $message, $context); }
+    public function info(string|\Stringable $message, array $context = []): void      { $this->log(LogLevel::INFO,      $message, $context); }
+    public function debug(string|\Stringable $message, array $context = []): void     { $this->log(LogLevel::DEBUG,     $message, $context); }
 }

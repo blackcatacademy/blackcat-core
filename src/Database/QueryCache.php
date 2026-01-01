@@ -263,12 +263,6 @@ final class QueryCache
         $j   = ($amp > 0) ? random_int(-$amp, $amp) : 0;
         return max(1, $ttl + $j);
     }
-    private function applyJitter(int|\DateInterval|null $ttl): int|\DateInterval|null
-    {
-        if (!is_int($ttl) || $ttl <= 1 || $this->ttlJitterPercent <= 0) return $ttl;
-        return $this->jitterTtl($ttl);
-    }
-    private function applyTtlJitter(int $ttl): int { return $this->jitterTtl($ttl); }
 
     // Internal helper with backoff (exponential-ish + jitter)
     private function backoffSleep(int $attempt): void
@@ -324,15 +318,16 @@ final class QueryCache
         if (is_int($ttl) && $ttl > 0) { $ttl = $this->jitterTtl($ttl); }
         $lockName = 'q:' . $nsKey;
         $token = null;
+        $locks = $this->locks;
 
         try {
             $deadline = microtime(true) + $this->lockWaitSec;
 
-            if ($this->locks) {
+            if ($locks !== null) {
                 $attempt = 0;
                 // Try to acquire the lock non-blocking; if not, re-check cache with backoff.
                 do {
-                    $token = $this->locks->acquireLock($lockName, $this->lockWaitSec);
+                    $token = $locks->acquireLock($lockName, $this->lockWaitSec);
                     if ($token !== null) { $this->lockAcquired++; break; }
 
                     // Someone else is computing -> exponential backoff + re-check
@@ -365,7 +360,7 @@ final class QueryCache
             return $val;
         } finally {
             if ($token !== null) {
-                try { $this->locks?->releaseLock($lockName, $token); } catch (\Throwable $_) {}
+                try { $locks?->releaseLock($lockName, $token); } catch (\Throwable $_) {}
             }
         }
     }

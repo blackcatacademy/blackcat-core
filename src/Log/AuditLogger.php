@@ -17,11 +17,21 @@ namespace BlackCat\Core\Log;
 
 final class AuditLogger
 {
+    private static ?string $auditDirOverride = null;
+
+    /**
+     * Override audit directory resolution for non-ENV environments.
+     */
+    public static function setAuditDir(string $dir): void
+    {
+        self::$auditDirOverride = rtrim($dir, DIRECTORY_SEPARATOR);
+    }
+
     /**
      * Public API: attempt to write audit entry to DB, fallback to file.
      * Returns true on success (DB or file), false on failure.
      *
-     * @param PDO|null $pdo
+     * @param \PDO|null $pdo
      * @param mixed $actorId anything that can be stringified (or null)
      * @param string $action
      * @param string $payloadEnc JSON or encoded payload string
@@ -51,6 +61,9 @@ final class AuditLogger
      */
     private static function resolveAuditDir(): string
     {
+        if (self::$auditDirOverride !== null) {
+            return self::$auditDirOverride;
+        }
         if (!empty($_ENV['AUDIT_PATH'])) {
             return rtrim($_ENV['AUDIT_PATH'], DIRECTORY_SEPARATOR);
         }
@@ -78,17 +91,56 @@ final class AuditLogger
      * @param string $keyVersion
      * @param array $meta
      * @return bool
-     * @throws RuntimeException
+     * @throws \RuntimeException
      */
     private static function fileFallback(string $timestamp, string $actorId, string $action, string $payloadEnc, string $keyVersion, array $meta): bool
     {
         $auditDir = self::resolveAuditDir();
+        $auditDir = rtrim($auditDir, DIRECTORY_SEPARATOR);
+        if ($auditDir === '' || str_contains($auditDir, "\0")) {
+            throw new \RuntimeException('AuditLogger: invalid audit dir');
+        }
+        if (is_link($auditDir)) {
+            throw new \RuntimeException('AuditLogger: audit dir must not be a symlink: ' . $auditDir);
+        }
         // ensure dir exists
         if (!is_dir($auditDir)) {
             if (!@mkdir($auditDir, 0700, true) && !is_dir($auditDir)) {
                 throw new \RuntimeException('AuditLogger: failed to create audit dir: ' . $auditDir);
             }
             @chmod($auditDir, 0700);
+        }
+        clearstatcache(true, $auditDir);
+        if (@readlink($auditDir) !== false) {
+            throw new \RuntimeException('AuditLogger: audit dir must not be a symlink: ' . $auditDir);
+        }
+        $auditDirReal = realpath($auditDir);
+        if ($auditDirReal === false || !is_dir($auditDirReal)) {
+            throw new \RuntimeException('AuditLogger: audit dir realpath failed: ' . $auditDir);
+        }
+        $auditDirReal = rtrim($auditDirReal, DIRECTORY_SEPARATOR);
+        if (DIRECTORY_SEPARATOR !== '\\') {
+            $docRoot = $_SERVER['DOCUMENT_ROOT'] ?? null;
+            if (is_string($docRoot) && trim($docRoot) !== '' && !str_contains($docRoot, "\0")) {
+                $docReal = realpath($docRoot);
+                if ($docReal !== false && is_dir($docReal)) {
+                    $docPrefix = rtrim($docReal, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+                    $auditWithSep = $auditDirReal . DIRECTORY_SEPARATOR;
+                    if (str_starts_with($auditWithSep, $docPrefix)) {
+                        throw new \RuntimeException('AuditLogger: audit dir must not be under DOCUMENT_ROOT: ' . $auditDirReal);
+                    }
+                }
+            }
+        }
+        if (DIRECTORY_SEPARATOR !== '\\') {
+            $st = @stat($auditDir);
+            if (is_array($st)) {
+                $mode = (int) ($st['mode'] ?? 0);
+                $perms = $mode & 0o777;
+                if (($perms & 0o002) !== 0) {
+                    throw new \RuntimeException('AuditLogger: audit dir must not be world-writable: ' . $auditDir);
+                }
+            }
         }
 
         $entry = [
@@ -135,6 +187,9 @@ final class AuditLogger
         }
 
         $final = $auditDir . DIRECTORY_SEPARATOR . 'audit.log';
+        if (is_link($final)) {
+            throw new \RuntimeException('AuditLogger: refusing symlink audit.log: ' . $final);
+        }
 
         // If final doesn't exist, try rename (atomic create)
         if (!file_exists($final)) {
@@ -153,7 +208,7 @@ final class AuditLogger
         }
 
         // final exists -> append safely
-        $ok = self::appendFile($final, file_get_contents($tmp));
+        $ok = self::appendFile($final, $line);
         @unlink($tmp);
         if ($ok) {
             @chmod($final, 0600);
@@ -170,6 +225,9 @@ final class AuditLogger
      */
     private static function appendFile(string $file, string $line): bool
     {
+        if (is_link($file)) {
+            return false;
+        }
         $fp = @fopen($file, 'cb');
         if ($fp === false) return false;
         $ok = false;
