@@ -18,7 +18,9 @@
 
 - Core prefers **versioned key files**: `<basename>_vN.key` (example: `crypto_key_v1.key`).
   - Symptom: `Key not configured: ... (no key file, no env)`
-  - Fix: provision the key file in your keys dir, or set the relevant env var (base64).
+  - Fix:
+    - provision the key file in your keys dir and configure `crypto.keys_dir` via `blackcat-config` runtime config, or
+    - (legacy/dev only) explicitly allow ENV fallback via `crypto.allow_env_keys=true` in runtime config.
 
 ## SQL comment required
 
@@ -33,10 +35,10 @@ If `requireSqlComment` is enabled, every non-trivial query must be prefixed with
 
 Repositories and services can auto-load the crypto ingress via `BlackCat\\Database\\Crypto\\IngressLocator`.
 
-- If you set `BLACKCAT_DB_ENCRYPTION_REQUIRED=1`, missing ingress becomes a hard error.
+- DB crypto ingress is **fail-closed by default**: if it cannot boot, it throws.
 - Common causes:
-  - `BLACKCAT_DB_ENCRYPTION_MAP` not set or points to a non-existent file
-  - `BLACKCAT_KEYS_DIR` not set or missing key files
+  - missing runtime config key `crypto.keys_dir` or missing key files
+  - `blackcatacademy/blackcat-database` packages are not present (expected `packages/*/schema/encryption-map.json`)
   - Missing packages: `blackcat/crypto` + `blackcatacademy/blackcat-database-crypto`
 
 ## File cache permissions (FileCache)
@@ -44,4 +46,3 @@ Repositories and services can auto-load the crypto ingress via `BlackCat\\Databa
 `BlackCat\\Core\\Cache\\FileCache` expects to create and write files under its cache directory.
 
 - Fix: ensure the cache directory exists, is writable, and has restrictive permissions (`0700`).
-

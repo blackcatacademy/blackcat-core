@@ -1,0 +1,23 @@
+# BlackCat minimal front controller (template)
+#
+# Goal:
+# - route all requests through index.php
+# - deny direct access to other PHP entrypoints (reduces "upload a php backdoor" risk)
+#
+# Note: Requires Apache with mod_rewrite enabled. Adjust for Nginx/Caddy accordingly.
+
+RewriteEngine On
+
+# Deny access to PHP files other than index.php
+RewriteCond %{REQUEST_URI} \.php$ [NC]
+RewriteCond %{REQUEST_URI} !/index\.php$ [NC]
+RewriteRule .* - [F,L]
+
+# Prevent access to common sensitive paths (best effort; still keep them outside web root)
+RedirectMatch 403 ^/(vendor|config|docs|tests|scripts|sql|var)/?
+
+# Route everything else to index.php (front controller)
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^ index.php [L]
+

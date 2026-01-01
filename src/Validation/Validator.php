@@ -78,7 +78,7 @@ final class Validator
 
     public static function stringSanitized(string $s, int $maxLen = 0): string
     {
-        $out = preg_replace('/[\x00-\x1F\x7F]/u', '', trim($s));
+        $out = preg_replace('/[\x00-\x1F\x7F]/u', '', trim($s)) ?? '';
         if ($maxLen <= 0) {
             return $out;
         }

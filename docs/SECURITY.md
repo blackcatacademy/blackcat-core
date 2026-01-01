@@ -8,9 +8,17 @@ Higher-level security features (auth flows, crypto manifests, DB ingress) live i
 
 `BlackCat\Core\Security\KeyManager` loads keys from:
 1) key files (preferred): `<basename>_vN.key`
-2) environment variables (fallback): base64-encoded
+2) environment variables (legacy fallback): base64-encoded
 
 Key length is enforced (libsodium AEAD key length for crypto keys).
+
+Security note:
+- When `blackcat-config` runtime config is present, ENV key fallback is **disabled by default**.
+- To explicitly allow ENV fallback (legacy/dev only), set `crypto.allow_env_keys=true` in the runtime config.
+
+Optional trust hook:
+- `KeyManager::setAccessGuard()` can be used to fail-closed before any key material is read/rotated.
+  The Trust Kernel bootstrap installs this guard automatically.
 
 ## Crypto (AEAD)
 
@@ -42,3 +50,77 @@ Notes:
 
 - If you provide `opts['httpClient']` (callable), no additional PHP extensions are required.
 - Otherwise it uses `ext-curl` (optional). If `ext-curl` is not available, it throws a clear runtime error.
+
+## Trust Kernel (Web3, optional but recommended for production)
+
+If you install `blackcat-config` and configure `trust.web3` + `trust.integrity`, core can enforce an external trust authority:
+- reads on-chain state from the per-install `InstanceController`,
+- validates the active root against `ReleaseRegistry` (`isTrustedRoot`) when the controller has a non-zero `releaseRegistry` pointer,
+  and optionally pins the expected registry address via runtime config,
+- verifies local files against an integrity manifest,
+- blocks DB writes immediately on RPC quorum loss,
+- allows reads (including key reads) only until `max_stale_sec`, then fails closed.
+- optionally persists a `last OK` snapshot on disk to allow stale reads across process restarts,
+  but only consumes it when the file is protected from runtime writes (no symlink, not writable, not owned by the runtime user, not group/world-writable).
+
+Integrity notes:
+- If the on-chain `activeUriHash` is non-zero, the local integrity manifest must include a matching `uri`.
+  Removing `uri` from the manifest must not become a bypass.
+- When `trust.web3.mode="full"`, the integrity root is treated as **immutable**: unexpected files under `trust.integrity.root_dir`
+  fail the trust check (prevents “upload a new backdoor file that is not in the manifest”).
+
+Policy hash notes:
+- `TrustPolicyV1` (schema v1): `mode` + `max_stale_sec` (treated as **strict** enforcement).
+- `TrustPolicyV2` (schema v2): adds `enforcement` (`strict` | `warn`).
+  - `warn` is a **dev-only** posture and emits loud warnings; production policy should commit to `strict`.
+- `TrustPolicyV3` (schema v3): adds **runtime config attestation** (binds the runtime config to an on-chain bytes32 slot).
+  - in `strict` mode, a mismatched / missing attestation fails closed
+  - the attestation key is `sha256("blackcat.runtime_config.canonical_sha256.v1")`
+  - the recommended value is `sha256(canonical_json(runtime_config))` (see `blackcat-config` `runtime:attestation:runtime-config`)
+
+Bootstrap helper:
+
+```php
+use BlackCat\Core\TrustKernel\TrustKernelBootstrap;
+
+// Production (trust required): fail-closed.
+// Throws if config is missing/invalid or trust.web3 is not configured.
+$trust = TrustKernelBootstrap::bootFromBlackCatConfigOrFail();
+
+// Library/optional: returns null when runtime config is missing or trust.web3 is not configured.
+// Throws on invalid config (fail-closed).
+$trustOptional = TrustKernelBootstrap::bootIfConfiguredFromBlackCatConfig();
+
+// Legacy best-effort: returns null on any error (NOT recommended for production).
+$trustLegacy = TrustKernelBootstrap::tryBootFromBlackCatConfig();
+```
+
+### Auto-bootstrap (guard safety net)
+
+To reduce accidental misconfiguration (e.g., forgetting to bootstrap), core primitives attempt a one-time auto-bootstrap:
+- `KeyManager` will attempt to boot the Trust Kernel before reading/rotating key material.
+- `Database` will attempt to boot the Trust Kernel before DB writes and before raw PDO access checks.
+
+Auto-bootstrap uses `BlackCat\Core\Kernel\KernelBootstrap::bootIfConfigured()`:
+- returns `null` when the Trust Kernel is not configured,
+- throws (fail-closed) on invalid runtime config / TrustKernel config.
+
+If `blackcatacademy/blackcat-config` is installed, auto-bootstrap is **trust-required** and will use
+`KernelBootstrap::bootOrFail()` (missing runtime config / missing `trust.web3` becomes a hard failure).
+
+For production, always prefer an explicit, early bootstrap via `KernelBootstrap::bootOrFail()`.
+
+## Bypass resistance (policy)
+
+The Trust Kernel installs guards at the **kernel primitive level** (`KeyManager`, `Database`).
+To keep this security model intact across the ecosystem, bypass paths must be forbidden:
+
+- Do not instantiate raw `PDO` (use `BlackCat\Core\Database`).
+- Do not call `Database::getPdo()` (raw PDO access is guarded/denied; use wrapper methods).
+- Do not read `*.key` files directly (use `BlackCat\Core\Security\KeyManager`).
+
+Recommended CI check (requires `blackcatacademy/blackcat-config`):
+
+```bash
+php vendor/bin/config security:scan .
+```

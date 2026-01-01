@@ -17,6 +17,16 @@ class ConnectionGoneException extends DatabaseException {}
 final class Database
 {
     private static ?self $instance = null;
+    /** @var null|callable(string):void */
+    private static $writeGuard = null;
+    private static bool $writeGuardLocked = false;
+    /** @var null|callable(string):void */
+    private static $readGuard = null;
+    private static bool $readGuardLocked = false;
+    /** @var null|callable(string):void */
+    private static $pdoAccessGuard = null;
+    private static bool $pdoAccessGuardLocked = false;
+    private static bool $trustKernelAutoBootAttempted = false;
     private ?\PDO $pdo = null;
     /** Optional read-replica PDO */
     private ?\PDO $pdoRead = null;
@@ -56,6 +66,9 @@ final class Database
     private bool $dangerousSqlGuard = false;
     // Guard: placeholder mismatch (warn only)
     private bool $placeholderGuard = false;
+    // SQL firewall: blocks obvious SQL injection escalation primitives (multi-statements, file IO, etc.).
+    /** @var 'strict'|'warn'|'off' */
+    private string $sqlFirewallMode = 'strict';
     // Observers + ring buffer of recent queries
     /** @var array<\BlackCat\Database\Support\QueryObserver> */
     private array $observers = [];
@@ -95,12 +108,15 @@ final class Database
         $m = [];
         // mysql & pgsql by host/port/dbname
         if (preg_match('~^(mysql|pgsql):.*?host=([^;]+)(?:;port=([0-9]+))?.*?(?:;dbname=([^;]+))?~i', $dsn, $m)) {
-            $drv = strtolower($m[1]); $host = $m[2] ?? 'localhost'; $port = $m[3] ?? ($drv==='mysql'?'3306':'5432'); $db = $m[4] ?? '';
+            $drv = strtolower($m[1]);
+            $host = $m[2];
+            $port = (($m[3] ?? '') !== '') ? (string)$m[3] : ($drv === 'mysql' ? '3306' : '5432');
+            $db = $m[4] ?? '';
             return "{$drv}://{$host}:{$port}/{$db}";
         }
         // sqlite path / :memory:
         if (preg_match('~^sqlite:(?://)?(.+)$~i', $dsn, $m)) {
-            $path = $m[1] ?? '';
+            $path = $m[1];
             if (stripos($path, ':memory:') === 0) return 'sqlite://memory';
             // strip query/fragment
             $path = preg_replace('~[?#].*$~', '', $path) ?? $path;
@@ -135,6 +151,11 @@ final class Database
      *   // Replica health-gate:
      *   'replicaMaxLagMs' => 250,                 // e.g. 250 ms
      *   'replicaHealthCheckSec' => 2
+     *   // SQL firewall (recommended):
+     *   //  - strict: throw on violations (default)
+     *   //  - warn: log and continue (dev only)
+     *   //  - off: disable (not recommended)
+     *   'sqlFirewallMode' => 'strict'|'warn'|'off',
      * ]
      */
     public static function init(array $config, ?LoggerInterface $logger = null): void
@@ -149,7 +170,7 @@ final class Database
         $givenOptions = $config['options'] ?? [];
         $initCommands = $config['init_commands'] ?? [];
         $appName = (string)($config['appName'] ?? 'blackcat');
-        $requireSqlComment = (bool)($config['requireSqlComment'] ?? (getenv('BC_REQUIRE_SQL_COMMENT') === '1'));
+        $requireSqlComment = (bool)($config['requireSqlComment'] ?? false);
         $replicaCfg = $config['replica'] ?? null;
         $stickMs = (int)($config['replicaStickMs'] ?? 500);
         // Replica health-gate (optional)
@@ -181,6 +202,10 @@ final class Database
         $inst->stickAfterWriteMs = max(0, $stickMs);
         $inst->replicaMaxLagMs = $replicaMaxLagMs;
         $inst->replicaHealthCheckSec = max(1, $replicaHealthCheckSec);
+        $fwMode = $config['sqlFirewallMode'] ?? 'strict';
+        if (is_bool($fwMode)) { $fwMode = $fwMode ? 'strict' : 'off'; }
+        if (!is_string($fwMode)) { $fwMode = 'strict'; }
+        $inst->setSqlFirewallMode($fwMode);
         if (is_string($dsn) && str_starts_with($dsn,'mysql:') && !str_contains($dsn,'charset=')) {
             $logger?->warning('DSN without charset=utf8mb4; consider adding it for MySQL.');
         }
@@ -209,12 +234,32 @@ final class Database
         try { $pdo->setAttribute(\PDO::ATTR_EMULATE_PREPARES, false); } catch (\Throwable) {}
         try { $pdo->setAttribute(\PDO::ATTR_DEFAULT_FETCH_MODE, \PDO::FETCH_ASSOC); } catch (\Throwable) {}
         try { $pdo->setAttribute(\PDO::ATTR_STRINGIFY_FETCHES, false); } catch (\Throwable) {}
+        try {
+            if ((string)$pdo->getAttribute(\PDO::ATTR_DRIVER_NAME) === 'mysql') {
+                if (defined('PDO::MYSQL_ATTR_MULTI_STATEMENTS')) {
+                    $pdo->setAttribute(\PDO::MYSQL_ATTR_MULTI_STATEMENTS, false);
+                }
+                if (defined('PDO::MYSQL_ATTR_LOCAL_INFILE')) {
+                    $pdo->setAttribute(\PDO::MYSQL_ATTR_LOCAL_INFILE, false);
+                }
+            }
+        } catch (\Throwable) {}
 
         if ($pdoRead instanceof \PDO) {
             try { $pdoRead->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION); } catch (\Throwable) {}
             try { $pdoRead->setAttribute(\PDO::ATTR_EMULATE_PREPARES, false); } catch (\Throwable) {}
             try { $pdoRead->setAttribute(\PDO::ATTR_DEFAULT_FETCH_MODE, \PDO::FETCH_ASSOC); } catch (\Throwable) {}
             try { $pdoRead->setAttribute(\PDO::ATTR_STRINGIFY_FETCHES, false); } catch (\Throwable) {}
+            try {
+                if ((string)$pdoRead->getAttribute(\PDO::ATTR_DRIVER_NAME) === 'mysql') {
+                    if (defined('PDO::MYSQL_ATTR_MULTI_STATEMENTS')) {
+                        $pdoRead->setAttribute(\PDO::MYSQL_ATTR_MULTI_STATEMENTS, false);
+                    }
+                    if (defined('PDO::MYSQL_ATTR_LOCAL_INFILE')) {
+                        $pdoRead->setAttribute(\PDO::MYSQL_ATTR_LOCAL_INFILE, false);
+                    }
+                }
+            } catch (\Throwable) {}
         }
 
         $inst = new self($config, $pdo, $logger, $pdoRead);
@@ -233,10 +278,14 @@ final class Database
         $inst->replicaMaxLagMs = isset($config['replicaMaxLagMs']) ? (int)$config['replicaMaxLagMs'] : null;
         $inst->replicaHealthCheckSec = max(1, (int)($config['replicaHealthCheckSec'] ?? 2));
 
-        $requireSqlComment = (bool)($config['requireSqlComment'] ?? (getenv('BC_REQUIRE_SQL_COMMENT') === '1'));
+        $requireSqlComment = (bool)($config['requireSqlComment'] ?? false);
         if ($requireSqlComment) {
             $inst->requireSqlComment(true);
         }
+        $fwMode = $config['sqlFirewallMode'] ?? 'strict';
+        if (is_bool($fwMode)) { $fwMode = $fwMode ? 'strict' : 'off'; }
+        if (!is_string($fwMode)) { $fwMode = 'strict'; }
+        $inst->setSqlFirewallMode($fwMode);
 
         self::$instance = $inst;
     }
@@ -257,9 +306,21 @@ final class Database
         if (is_string($dsn) && str_starts_with($dsn, 'mysql:') && defined('PDO::MYSQL_ATTR_USE_BUFFERED_QUERY')) {
             $options[\PDO::MYSQL_ATTR_USE_BUFFERED_QUERY] = false;
         }
+        if (is_string($dsn) && str_starts_with($dsn, 'mysql:') && defined('PDO::MYSQL_ATTR_MULTI_STATEMENTS')) {
+            $options[\PDO::MYSQL_ATTR_MULTI_STATEMENTS] = false;
+        }
+        if (is_string($dsn) && str_starts_with($dsn, 'mysql:') && defined('PDO::MYSQL_ATTR_LOCAL_INFILE')) {
+            $options[\PDO::MYSQL_ATTR_LOCAL_INFILE] = false;
+        }
         $pdo = new \PDO($dsn, $user, $pass, $options);
         if ($pdo->getAttribute(\PDO::ATTR_DRIVER_NAME) === 'mysql' && defined('PDO::MYSQL_ATTR_USE_BUFFERED_QUERY')) {
             $pdo->setAttribute(\PDO::MYSQL_ATTR_USE_BUFFERED_QUERY, false);
+        }
+        if ($pdo->getAttribute(\PDO::ATTR_DRIVER_NAME) === 'mysql' && defined('PDO::MYSQL_ATTR_MULTI_STATEMENTS')) {
+            $pdo->setAttribute(\PDO::MYSQL_ATTR_MULTI_STATEMENTS, false);
+        }
+        if ($pdo->getAttribute(\PDO::ATTR_DRIVER_NAME) === 'mysql' && defined('PDO::MYSQL_ATTR_LOCAL_INFILE')) {
+            $pdo->setAttribute(\PDO::MYSQL_ATTR_LOCAL_INFILE, false);
         }
 
         try {
@@ -327,67 +388,77 @@ final class Database
     private function choosePdoFor(string $sql): \PDO
     {
         // Scoped override
-        if ($this->routeOverride === 'primary') return $this->getPdo();
+        if ($this->routeOverride === 'primary') return $this->pdoPrimary();
         if ($this->routeOverride === 'replica' && $this->pdoRead !== null) {
             $s = ltrim($sql);
             if ($this->isSimpleSelectForReplica($s) && $this->isReplicaHealthy()) return $this->pdoRead;
-            return $this->getPdo();
+            return $this->pdoPrimary();
         }
 
-        if ($this->pdoRead === null) return $this->getPdo();
+        if ($this->pdoRead === null) return $this->pdoPrimary();
         // in transaction? always primary
-        if ($this->inTransaction()) return $this->getPdo();
+        if ($this->inTransaction()) return $this->pdoPrimary();
 
         // Inline hints
         $u = strtoupper($sql);
-        if (str_contains($u, '/*FORCE:PRIMARY*/')) { return $this->getPdo(); }
+        if (str_contains($u, '/*FORCE:PRIMARY*/')) { return $this->pdoPrimary(); }
         if (str_contains($u, '/*FORCE:REPLICA*/')) {
             if ($this->isSimpleSelectForReplica($sql) && $this->isReplicaHealthy()) {
-                return $this->pdoRead ?? $this->getPdo();
+                return $this->pdoRead ?? $this->pdoPrimary();
             }
-            return $this->getPdo();
+            return $this->pdoPrimary();
         }
 
         // Replica in cooldown?
         if ($this->replicaDownUntil && time() < $this->replicaDownUntil) {
-            return $this->getPdo();
+            return $this->pdoPrimary();
         }
 
         // stick-to-primary window after write
         if ($this->stickAfterWriteMs > 0 && $this->lastWriteAtMs > 0) {
             $delta = (int)round(microtime(true) * 1000.0 - $this->lastWriteAtMs);
             if ($delta < $this->stickAfterWriteMs) {
-                return $this->getPdo();
+                return $this->pdoPrimary();
             }
         }
 
         $s = ltrim($sql);
         // strip simple comments
         if (str_starts_with($s, '/*')) { $s = preg_replace('~/\*.*?\*/~s', '', $s) ?? $s; $s = ltrim($s); }
-        if (str_starts_with($s, '--')) { $s = preg_replace('~--.*?$~m', '', $s) ?? $s; $s = ltrim($s); }
-        if (!preg_match('~^([A-Z]+)~i', $s, $m)) return $this->getPdo();
+        if (str_starts_with($s, '--')) {
+            $isLineComment = true;
+            if ($this->isMysql()) {
+                $next = $s[2] ?? '';
+                $isLineComment = $next !== '' && ord($next) <= 0x20;
+            }
+            if ($isLineComment) {
+                $s = preg_replace('~--.*?$~m', '', $s) ?? $s;
+                $s = ltrim($s);
+            }
+        }
+        if (!preg_match('~^([A-Z]+)~i', $s, $m)) return $this->pdoPrimary();
         $verb = strtoupper($m[1]);
 
         // "WITH" can be SELECT or DML; route to primary unless it is clearly a simple SELECT (no locks).
         if ($verb === 'WITH') {
             if ($this->isSimpleSelectForReplica($s) && $this->isReplicaHealthy()) {
-                return $this->pdoRead ?? $this->getPdo();
+                return $this->pdoRead ?? $this->pdoPrimary();
             }
-            return $this->getPdo();
+            return $this->pdoPrimary();
         }
 
         // Route SELECT to replica only if there are no locks and no SELECT ... INTO.
         if ($verb === 'SELECT') {
             if ($this->isSelectNeedingPrimary($s)) {
-                return $this->getPdo();
+                return $this->pdoPrimary();
             }
-            if (!$this->isReplicaHealthy()) return $this->getPdo();
-            return $this->pdoRead ?? $this->getPdo();
+            if (!$this->isReplicaHealthy()) return $this->pdoPrimary();
+            return $this->pdoRead ?? $this->pdoPrimary();
         }
 
         // SHOW is read-only -> replica OK.
         if ($verb === 'SHOW') {
-            return $this->pdoRead ?? $this->getPdo();
+            return $this->pdoRead ?? $this->pdoPrimary();
         }
 
         // EXPLAIN: default to replica, but for PG EXPLAIN ANALYZE with DML prefer primary (it actually executes the DML).
@@ -396,14 +467,14 @@ final class Database
             $hasAnalyze = (bool)preg_match('~\bANALYZE\b~', $uu);
             $innerVerb = null;
             if (preg_match('~\bEXPLAIN(?:\s*\([^)]*\))?\s+([A-Z]+)~', $uu, $mm)) {
-                $innerVerb = $mm[1] ?? null;
+                $innerVerb = $mm[1];
             }
             if ($this->isPg() && $hasAnalyze && $innerVerb !== 'SELECT') {
-                return $this->getPdo();
+                return $this->pdoPrimary();
             }
-            return $this->pdoRead ?? $this->getPdo();
+            return $this->pdoRead ?? $this->pdoPrimary();
         }
-        return $this->getPdo();
+        return $this->pdoPrimary();
     }
 
     // SELECT requiring primary (FOR UPDATE/SHARE, LOCK IN SHARE MODE, SELECT INTO).
@@ -443,12 +514,28 @@ final class Database
         return self::$instance;
     }
 
-    public function getPdo(): \PDO
+    private function pdoPrimary(): \PDO
     {
         if ($this->pdo === null) {
             throw new DatabaseException('Database not initialized properly (PDO missing).');
         }
         return $this->pdo;
+    }
+
+    public function getPdo(): \PDO
+    {
+        if (self::$pdoAccessGuardLocked && self::$pdoAccessGuard === null) {
+            throw new DatabaseException('Database PDO access guard is locked but missing; restart the process.');
+        }
+
+        if (self::$pdoAccessGuard === null) {
+            $this->autoBootTrustKernelIfPossible();
+        }
+
+        if (self::$pdoAccessGuard !== null) {
+            (self::$pdoAccessGuard)('db.raw_pdo');
+        }
+        return $this->pdoPrimary();
     }
 
     public function hasReplica(): bool { return $this->pdoRead !== null; }
@@ -489,6 +576,17 @@ final class Database
     public function enableAutoExplain(bool $on = true, bool $analyze = false): void { $this->autoExplain = $on; $this->autoExplainAnalyze = $analyze; }
     /** Enable placeholder/parameter mismatch guard (warns via logger). */
     public function enablePlaceholderGuard(bool $on = true): void { $this->placeholderGuard = $on; }
+    /** SQL firewall mode: strict|warn|off. */
+    public function setSqlFirewallMode(string $mode): void
+    {
+        $m = strtolower(trim($mode));
+        if (!in_array($m, ['strict', 'warn', 'off'], true)) {
+            throw new DatabaseException('Invalid sqlFirewallMode (expected strict|warn|off).');
+        }
+        $this->sqlFirewallMode = $m;
+    }
+    /** Returns SQL firewall mode. */
+    public function sqlFirewallMode(): string { return $this->sqlFirewallMode; }
     /** Adds a query observer (e.g. Prometheus/StatsD). */
     public function addObserver(\BlackCat\Database\Support\QueryObserver $obs): void { $this->observers[] = $obs; }
     /** Maximum size of the recent-queries ring buffer. */
@@ -504,9 +602,6 @@ final class Database
     public function exec(string $sql, array $params = []): int
     {
         $this->circuitCheck();
-        if ($this->readOnlyGuard && $this->isWriteSql($sql)) {
-            throw new DatabaseException('Read-only guard: write statements are disabled');
-        }
         $stmt = $this->prepareAndRun($sql, $params);
         try {
             $n = $stmt->rowCount();
@@ -743,12 +838,12 @@ final class Database
     public function id(): string { return $this->dsnId; }
 
     public function serverVersion(): ?string {
-        try { return (string)$this->getPdo()->getAttribute(\PDO::ATTR_SERVER_VERSION); }
+        try { return (string)$this->pdoPrimary()->getAttribute(\PDO::ATTR_SERVER_VERSION); }
         catch (\Throwable $_) { return null; }
     }
 
     public function quote(string $value): string {
-        $q = $this->getPdo()->quote($value);
+        $q = $this->pdoPrimary()->quote($value);
         return $q === false ? "'" . str_replace("'", "''", $value) . "'" : $q;
     }
 
@@ -790,9 +885,9 @@ final class Database
         $sqlstate = $e->errorInfo[0] ?? (string)$e->getCode();
         $code     = (int)($e->errorInfo[1] ?? 0);
         if (in_array($sqlstate, ['40P01','40001','55P03'], true)) return true; // PG
-        if ($code === 1213 || $code === 1205 || $sqlstate === '40001') return true; // MySQL/MariaDB
+        if ($code === 1213 || $code === 1205) return true; // MySQL/MariaDB
         // Heuristic: treat common "communication errors" as transient.
-        $msg = strtolower($e->getMessage() ?? '');
+        $msg = strtolower($e->getMessage());
         if (str_contains($msg, 'server has gone away') || str_contains($msg, 'lost connection') || str_contains($msg, 'closed the connection unexpectedly')) {
             return true;
         }
@@ -872,7 +967,7 @@ final class Database
         }
 
         if ($this->isMysql()) {
-            $pdo = $this->getPdo();
+            $pdo = $this->pdoPrimary();
             if ($pdo->inTransaction()) {
                 return $fn($this);
             }
@@ -898,7 +993,7 @@ final class Database
      */
     public function withIsolationLevelStrict(string $level, callable $fn): mixed
     {
-        if ($this->isMysql() && $this->getPdo()->inTransaction()) {
+        if ($this->isMysql() && $this->pdoPrimary()->inTransaction()) {
             throw new DatabaseException('withIsolationLevelStrict: cannot change isolation inside active transaction on MySQL; call before BEGIN or wrap your workload.');
         }
         return $this->withIsolationLevel($level, $fn);
@@ -947,7 +1042,7 @@ final class Database
 
     public function transactionReadOnly(callable $fn): mixed
     {
-        $pdo = $this->getPdo();
+        $pdo = $this->pdoPrimary();
 
         if ($this->isPg()) {
             return $this->transaction(function() use($fn) {
@@ -1172,9 +1267,11 @@ final class Database
     public function upsert(string $table, array $rows, array $uniqueKeys, ?array $updateCols = null, int $chunk = 500): int {
         $batch = \array_is_list($rows) ? $rows : [$rows];
         if (!$batch) return 0;
-        $cols = array_keys($batch[0]);
+        /** @var list<string> $cols */
+        $cols = array_values(array_map(static fn ($c): string => (string) $c, array_keys($batch[0])));
         foreach ($batch as $i=>$r) {
-            if (array_keys($r) !== $cols) {
+            $rowCols = array_values(array_map(static fn ($c): string => (string) $c, array_keys($r)));
+            if ($rowCols !== $cols) {
                 throw new DatabaseException("upsert: row {$i} has different columns than the first row");
             }
         }
@@ -1219,7 +1316,11 @@ final class Database
     {
         // Anonymize the content of all string literals (even short ones).
         $s = preg_replace("/'(?:''|\\\\'|[^'])*'/", "'…'", $sql);
-        $s = preg_replace('/\s+/', ' ', trim((string)$s));
+        if ($s === null) {
+            $s = $sql;
+        }
+        $s2 = preg_replace('/\s+/', ' ', trim($s));
+        $s = $s2 === null ? trim($sql) : $s2;
         $max = 300;
         if (function_exists('mb_strlen') && function_exists('mb_substr')) {
             return mb_strlen($s) > $max ? mb_substr($s, 0, $max) . '...' : $s;
@@ -1230,7 +1331,17 @@ final class Database
     private function isWriteSql(string $sql): bool {
         $s = ltrim($sql);
         if (str_starts_with($s, '/*')) { $s = preg_replace('~/\*.*?\*/~s', '', $s) ?? $s; $s = ltrim($s); }
-        if (str_starts_with($s, '--')) { $s = preg_replace('~--.*?$~m', '', $s) ?? $s; $s = ltrim($s); }
+        if (str_starts_with($s, '--')) {
+            $isLineComment = true;
+            if ($this->isMysql()) {
+                $next = $s[2] ?? '';
+                $isLineComment = $next !== '' && ord($next) <= 0x20;
+            }
+            if ($isLineComment) {
+                $s = preg_replace('~--.*?$~m', '', $s) ?? $s;
+                $s = ltrim($s);
+            }
+        }
         if (!preg_match('~^([A-Z]+)~i', $s, $m)) return false;
         $verb = strtoupper($m[1]);
         return in_array($verb, ['INSERT','UPDATE','DELETE','REPLACE','MERGE','TRUNCATE','ALTER','CREATE','DROP','RENAME','GRANT','REVOKE','VACUUM'], true);
@@ -1269,7 +1380,7 @@ final class Database
     private function guardPlaceholders(string $sql, array $params): void {
         if ($params === [] || $this->usesPositionalOnly($sql)) return;
         preg_match_all('/:([A-Za-z_][A-Za-z0-9_]*)/', $sql, $m);
-        $need = array_unique($m[1] ?? []);
+        $need = array_unique($m[1]);
         $have = array_map(fn($k)=> ltrim((string)$k, ':'), array_keys($params));
         $missing = array_values(array_diff($need, $have));
         $extra   = array_values(array_diff($have, $need));
@@ -1335,7 +1446,7 @@ final class Database
     private function mapPdoToDomainException(\PDOException $e, string $fallbackMsg): DatabaseException {
         $sqlstate = $e->errorInfo[0] ?? (string)$e->getCode();
         $code     = (int)($e->errorInfo[1] ?? 0);
-        $msg      = strtolower($e->getMessage() ?? '');
+        $msg      = strtolower($e->getMessage());
         if (str_contains($msg, 'server has gone away') || str_contains($msg, 'lost connection') ||
             str_contains($msg, 'connection refused') || str_contains($msg, 'closed the connection unexpectedly')) {
             return new ConnectionGoneException($fallbackMsg, 0, $e);
@@ -1392,7 +1503,7 @@ final class Database
 
     public function driver(): ?string
     {
-        try { return (string)$this->getPdo()->getAttribute(\PDO::ATTR_DRIVER_NAME); }
+        try { return (string)$this->pdoPrimary()->getAttribute(\PDO::ATTR_DRIVER_NAME); }
         catch (\Throwable $_) { return null; }
     }
 
@@ -1407,7 +1518,7 @@ final class Database
 
     private function isServerGone(\PDOException $e): bool
     {
-        $m = strtolower($e->getMessage() ?? '');
+        $m = strtolower($e->getMessage());
         return str_contains($m, 'server has gone away')
             || str_contains($m, 'lost connection')
             || str_contains($m, 'connection refused')
@@ -1497,12 +1608,17 @@ final class Database
 
     private function detectReplicaLagMs(): ?int
     {
+        $pdo = $this->pdoRead;
+        if ($pdo === null) {
+            return null;
+        }
         try {
-            $drv = $this->pdoRead?->getAttribute(\PDO::ATTR_DRIVER_NAME);
+            $drv = (string)$pdo->getAttribute(\PDO::ATTR_DRIVER_NAME);
             if ($drv === 'pgsql') {
                 // NULL on primary; on replica it reports lag in ms.
                 $sql = "SELECT EXTRACT(EPOCH FROM (NOW() - pg_last_xact_replay_timestamp())) * 1000 AS lag_ms";
-                $row = $this->pdoRead->query($sql)?->fetch(\PDO::FETCH_ASSOC);
+                $stmt = $pdo->query($sql);
+                $row = $stmt instanceof \PDOStatement ? $stmt->fetch(\PDO::FETCH_ASSOC) : false;
                 $v = $row['lag_ms'] ?? null;
                 if ($v === null) return null;
                 return (int)round((float)$v);
@@ -1511,10 +1627,14 @@ final class Database
                 // MySQL 8: SHOW REPLICA STATUS; older versions / MariaDB: SHOW SLAVE STATUS.
                 $row = null;
                 try {
-                    $row = $this->pdoRead->query("SHOW REPLICA STATUS")?->fetch(\PDO::FETCH_ASSOC);
+                    $stmt = $pdo->query("SHOW REPLICA STATUS");
+                    $row = $stmt instanceof \PDOStatement ? $stmt->fetch(\PDO::FETCH_ASSOC) : false;
                 } catch (\Throwable $_) {}
                 if (!$row) {
-                    try { $row = $this->pdoRead->query("SHOW SLAVE STATUS")?->fetch(\PDO::FETCH_ASSOC); }
+                    try {
+                        $stmt = $pdo->query("SHOW SLAVE STATUS");
+                        $row = $stmt instanceof \PDOStatement ? $stmt->fetch(\PDO::FETCH_ASSOC) : false;
+                    }
                     catch (\Throwable $_) {}
                 }
                 if (is_array($row)) {
@@ -1537,6 +1657,7 @@ final class Database
     public function prepareAndRun(string $sql, array $params = []): \PDOStatement
     {
         $this->circuitCheck();
+        $this->sqlFirewallGuard($sql);
         if ($this->requireSqlComment) {
             $trim = ltrim($sql);
             // Allow internal check/config commands without a comment.
@@ -1551,8 +1672,29 @@ final class Database
                 throw new DatabaseException('SQL comment required (use Observability::sqlComment(meta))');
             }
         }
-        if ($this->readOnlyGuard && $this->isWriteSql($sql)) {
-            throw new DatabaseException('Read-only guard: write statements are disabled');
+        if ($this->isWriteSql($sql)) {
+            if ($this->readOnlyGuard) {
+                throw new DatabaseException('Read-only guard: write statements are disabled');
+            }
+            if (self::$writeGuardLocked && self::$writeGuard === null) {
+                throw new DatabaseException('Database write guard is locked but missing; restart the process.');
+            }
+            if (self::$writeGuard === null) {
+                $this->autoBootTrustKernelIfPossible();
+            }
+            if (self::$writeGuard !== null) {
+                (self::$writeGuard)($sql);
+            }
+        } else {
+            if (self::$readGuardLocked && self::$readGuard === null) {
+                throw new DatabaseException('Database read guard is locked but missing; restart the process.');
+            }
+            if (self::$readGuard === null) {
+                $this->autoBootTrustKernelIfPossible();
+            }
+            if (self::$readGuard !== null) {
+                (self::$readGuard)($sql);
+            }
         }
         if ($this->dangerousSqlGuard && $this->isDangerousWriteWithoutWhere($sql)) {
             throw new DatabaseException('Dangerous write without WHERE/LIMIT detected');
@@ -1562,6 +1704,7 @@ final class Database
         }
 
         $start   = microtime(true);
+        /** @var int $attempt */
         $attempt = 0;
         $usedReplica = false;
         $route = 'primary';
@@ -1574,7 +1717,7 @@ final class Database
         $this->notifyStart($sql, $params, $route);
 
         try {
-            if (getenv('BC_ORDER_GUARD') === '1') {
+            if (($this->config['orderGuard'] ?? false) === true || ($this->config['orderGuard'] ?? null) === 1 || ($this->config['orderGuard'] ?? null) === '1') {
                 if (preg_match('~\bORDER\s+(?!BY\b)~i', $sql)) {
                     $bt = array_slice(debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS), 0, 8);
                     $where = array_map(fn($f)=>($f['file'] ?? '?').':'.($f['line'] ?? '?'), $bt);
@@ -1583,7 +1726,7 @@ final class Database
                 $s = preg_replace("/'([^'\\\\]|\\\\.)*'/", "''", $sql) ?? $sql;
                 if (!preg_match('~\bORDER\s+BY\b~i', $s)) {
                     if (preg_match('~((?:[\w`\".]+\s+(?:ASC|DESC))(?:\s*,\s*[\w`\".]+\s+(?:ASC|DESC))*)\s*(?:LIMIT|OFFSET|$)~i', $s, $m)) {
-                        $off = $m[1] ?? '(n/a)';
+                        $off = $m[1];
                         $bt = array_slice(debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS), 0, 8);
                         $where = array_map(fn($f)=>($f['file'] ?? '?').':'.($f['line'] ?? '?'), $bt);
                         throw new DatabaseException("ORDER BY is missing; bare order clause detected: [{$off}] in SQL: ".$this->sanitizeSqlPreview($sql)." @ ".implode(' <- ', $where));
@@ -1720,6 +1863,235 @@ final class Database
         }
     }
 
+    private function sqlFirewallGuard(string $sql): void
+    {
+        if ($this->sqlFirewallMode === 'off') {
+            return;
+        }
+
+        $violations = $this->sqlFirewallViolations($sql);
+        if ($violations === []) {
+            return;
+        }
+
+        $msg = 'SQL firewall: blocked (' . implode(', ', $violations) . ')';
+        $ctx = [
+            'violations' => $violations,
+            'preview' => $this->sanitizeSqlPreview($sql),
+        ];
+
+        if ($this->sqlFirewallMode === 'warn') {
+            $this->logger?->warning($msg, $ctx);
+            return;
+        }
+
+        $this->logger?->error($msg, $ctx);
+        throw new DatabaseException($msg);
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function sqlFirewallViolations(string $sql): array
+    {
+        $san = $this->stripSqlLiteralsAndComments($sql);
+        $trim = rtrim($san);
+
+        $violations = [];
+
+        // Multi-statement guard (block "; ..." and multiple semicolons; allow a single trailing ';').
+        $firstSemi = strpos($trim, ';');
+        if ($firstSemi !== false) {
+            $lastSemi = strrpos($trim, ';');
+            $onlyTrailing = ($lastSemi === strlen($trim) - 1) && ($firstSemi === $lastSemi);
+            if (!$onlyTrailing) {
+                $violations[] = 'multi_statement';
+            }
+        }
+
+        $u = strtoupper($san);
+
+        // MySQL/MariaDB primitives commonly used to escalate SQL injection into file IO or time-based DoS.
+        if (preg_match('~\\bLOAD_FILE\\s*\\(~', $u)) $violations[] = 'load_file';
+        if (preg_match('~\\bINTO\\s+OUTFILE\\b~', $u)) $violations[] = 'into_outfile';
+        if (preg_match('~\\bINTO\\s+DUMPFILE\\b~', $u)) $violations[] = 'into_dumpfile';
+        if (preg_match('~\\bLOAD\\s+DATA\\b~', $u)) $violations[] = 'load_data';
+        if (preg_match('~\\bLOCAL\\s+INFILE\\b~', $u)) $violations[] = 'local_infile';
+        if (preg_match('~\\bBENCHMARK\\s*\\(~', $u)) $violations[] = 'benchmark';
+        if (preg_match('~\\bSLEEP\\s*\\(~', $u)) $violations[] = 'sleep';
+        if (preg_match('~\\bGET_LOCK\\s*\\(~', $u)) $violations[] = 'get_lock';
+
+        // Postgres: server-side COPY is a common escalation vector if DB creds are over-privileged.
+        if ($this->isPg() && preg_match('~^\\s*COPY\\b~i', $u)) {
+            $violations[] = 'copy';
+        }
+
+        return $violations;
+    }
+
+    private function stripSqlLiteralsAndComments(string $sql): string
+    {
+        $len = strlen($sql);
+        $out = '';
+
+        // MySQL/MariaDB only treats "--" as a comment when followed by whitespace/control.
+        // Other dialects (e.g. Postgres) treat any "--" as a line comment.
+        $mysqlDashDashNeedsSpace = $this->isMysql();
+
+        $NORMAL = 0;
+        $SINGLE = 1;
+        $DOUBLE = 2;
+        $BACKTICK = 3;
+        $LINE_COMMENT = 4;
+        $BLOCK_COMMENT = 5;
+
+        $state = $NORMAL;
+        for ($i = 0; $i < $len; $i++) {
+            $ch = $sql[$i];
+
+            if ($state === $NORMAL) {
+                if ($ch === "'") {
+                    $state = $SINGLE;
+                    $out .= ' ';
+                    continue;
+                }
+                if ($ch === '"') {
+                    $state = $DOUBLE;
+                    $out .= ' ';
+                    continue;
+                }
+                if ($ch === '`') {
+                    $state = $BACKTICK;
+                    $out .= ' ';
+                    continue;
+                }
+                if ($ch === '-' && ($i + 1) < $len && $sql[$i + 1] === '-') {
+                    if ($mysqlDashDashNeedsSpace) {
+                        $next = ($i + 2) < $len ? $sql[$i + 2] : '';
+                        // In MySQL/MariaDB "--" begins a comment only when followed by
+                        // whitespace/control (otherwise it is subtraction of a negative).
+                        if ($next === '' || ord($next) > 0x20) {
+                            $out .= $ch;
+                            continue;
+                        }
+                    }
+                    $state = $LINE_COMMENT;
+                    $out .= '  ';
+                    $i++;
+                    continue;
+                }
+                if ($ch === '#') {
+                    // MySQL/MariaDB supports "#" line comments; other dialects treat "#" as an operator/token.
+                    if ($mysqlDashDashNeedsSpace) {
+                        $state = $LINE_COMMENT;
+                        $out .= ' ';
+                        continue;
+                    }
+                    $out .= $ch;
+                    continue;
+                }
+                if ($ch === '/' && ($i + 1) < $len && $sql[$i + 1] === '*') {
+                    $state = $BLOCK_COMMENT;
+                    $out .= '  ';
+                    $i++;
+                    continue;
+                }
+                $out .= $ch;
+                continue;
+            }
+
+            if ($state === $LINE_COMMENT) {
+                if ($ch === "\n" || $ch === "\r") {
+                    $state = $NORMAL;
+                    $out .= $ch;
+                    continue;
+                }
+                $out .= ' ';
+                continue;
+            }
+
+            if ($state === $BLOCK_COMMENT) {
+                if ($ch === '*' && ($i + 1) < $len && $sql[$i + 1] === '/') {
+                    $state = $NORMAL;
+                    $out .= '  ';
+                    $i++;
+                    continue;
+                }
+                $out .= ' ';
+                continue;
+            }
+
+            if ($state === $SINGLE) {
+                if ($ch === '\\') {
+                    $out .= ' ';
+                    if (($i + 1) < $len) {
+                        $out .= ' ';
+                        $i++;
+                    }
+                    continue;
+                }
+                if ($ch === "'") {
+                    if (($i + 1) < $len && $sql[$i + 1] === "'") {
+                        $out .= '  ';
+                        $i++;
+                        continue;
+                    }
+                    $state = $NORMAL;
+                    $out .= ' ';
+                    continue;
+                }
+                $out .= ' ';
+                continue;
+            }
+
+            if ($state === $DOUBLE) {
+                if ($ch === '\\') {
+                    $out .= ' ';
+                    if (($i + 1) < $len) {
+                        $out .= ' ';
+                        $i++;
+                    }
+                    continue;
+                }
+                if ($ch === '"') {
+                    if (($i + 1) < $len && $sql[$i + 1] === '"') {
+                        $out .= '  ';
+                        $i++;
+                        continue;
+                    }
+                    $state = $NORMAL;
+                    $out .= ' ';
+                    continue;
+                }
+                $out .= ' ';
+                continue;
+            }
+
+            // BACKTICK
+            if ($ch === '\\') {
+                $out .= ' ';
+                if (($i + 1) < $len) {
+                    $out .= ' ';
+                    $i++;
+                }
+                continue;
+            }
+            if ($ch === '`') {
+                if (($i + 1) < $len && $sql[$i + 1] === '`') {
+                    $out .= '  ';
+                    $i++;
+                    continue;
+                }
+                $state = $NORMAL;
+                $out .= ' ';
+                continue;
+            }
+            $out .= ' ';
+        }
+
+        return $out;
+    }
+
     // query() unified with prepareAndRun(), so it does not bypass guards.
     public function query(string $sql): \PDOStatement
     {
@@ -1742,7 +2114,7 @@ final class Database
 
     public function transaction(callable $fn): mixed
     {
-        $pdo = $this->getPdo();
+        $pdo = $this->pdoPrimary();
 
         if (!$pdo->inTransaction()) {
             $this->beginTransaction();
@@ -1782,7 +2154,7 @@ final class Database
 
     public function inTransaction(): bool
     {
-        try { return $this->getPdo()->inTransaction(); }
+        try { return $this->pdoPrimary()->inTransaction(); }
         catch (\Throwable $_) { return false; }
     }
 
@@ -1827,9 +2199,6 @@ final class Database
     public function execute(string $sql, array $params = []): int
     {
         $this->circuitCheck();
-        if ($this->readOnlyGuard && $this->isWriteSql($sql)) {
-            throw new DatabaseException('Read-only guard: write statements are disabled');
-        }
         $stmt = $this->prepareAndRun($sql, $params);
         try {
             $n = $stmt->rowCount();
@@ -1844,7 +2213,7 @@ final class Database
 
     public function beginTransaction(): bool
     {
-        try { return $this->getPdo()->beginTransaction(); }
+        try { return $this->pdoPrimary()->beginTransaction(); }
         catch (\PDOException $e) {
             if ($this->logger !== null) {
                 try { $this->logger->error('Failed to begin transaction', ['exception' => $e, 'phase' => 'beginTransaction']); } catch (\Throwable $_) {}
@@ -1855,7 +2224,7 @@ final class Database
 
     public function commit(): bool
     {
-        try { return $this->getPdo()->commit(); }
+        try { return $this->pdoPrimary()->commit(); }
         catch (\PDOException $e) {
             if ($this->logger !== null) {
                 try { $this->logger->error('Failed to commit transaction', ['exception' => $e, 'phase' => 'commit']); } catch (\Throwable $_) {}
@@ -1866,7 +2235,7 @@ final class Database
 
     public function rollback(): bool
     {
-        try { return $this->getPdo()->rollBack(); }
+        try { return $this->pdoPrimary()->rollBack(); }
         catch (\PDOException $e) {
             if ($this->logger !== null) {
                 try { $this->logger->error('Failed to rollback transaction', ['exception' => $e, 'phase' => 'rollback']); } catch (\Throwable $_) {}
@@ -1878,7 +2247,8 @@ final class Database
     public function lastInsertId(?string $name = null): ?string
     {
         try {
-            return $this->getPdo()->lastInsertId($name);
+            $id = $this->pdoPrimary()->lastInsertId($name);
+            return $id === false ? null : $id;
         } catch (\Throwable $e) {
             $this->logger?->warning('lastInsertId() failed', [
                 'message' => $e->getMessage(),
@@ -1890,7 +2260,7 @@ final class Database
     private function supportsSavepoints(): bool
     {
         try {
-            $driver = $this->getPdo()->getAttribute(\PDO::ATTR_DRIVER_NAME);
+            $driver = $this->pdoPrimary()->getAttribute(\PDO::ATTR_DRIVER_NAME);
             return in_array($driver, ['mysql', 'pgsql', 'sqlite'], true);
         } catch (\Throwable $_) {
             return false;
@@ -1904,11 +2274,11 @@ final class Database
 
     public function ping(): bool
     {
-        try { $this->getPdo()->query('SELECT 1'); return true; }
+        try { $this->pdoPrimary()->query('SELECT 1'); return true; }
         catch (\Throwable $e) { return false; }
     }
 
-    public function fetchValue(string $sql, array $params = [], $default = null): mixed
+    public function fetchValue(string $sql, array $params = [], mixed $default = null): mixed
     {
         $stmt = $this->prepareAndRun($sql, $params);
         try {
@@ -1970,7 +2340,7 @@ final class Database
     }
 
     public function withEmulation(bool $on, callable $fn): mixed {
-        $pdo = $this->getPdo();
+        $pdo = $this->pdoPrimary();
         $orig = $pdo->getAttribute(\PDO::ATTR_EMULATE_PREPARES);
         try {
             $pdo->setAttribute(\PDO::ATTR_EMULATE_PREPARES, $on);
@@ -2024,8 +2394,123 @@ final class Database
     public function enableReadOnlyGuard(bool $on = true): void { $this->readOnlyGuard = $on; }
     public function isReadOnlyGuardEnabled(): bool { return $this->readOnlyGuard; }
 
+    public static function setWriteGuard(?callable $guard): void
+    {
+        if (self::$writeGuardLocked) {
+            throw new DatabaseException('Database write guard is locked.');
+        }
+        self::$writeGuard = $guard;
+    }
+
+    /**
+     * Optional security hook: called before executing read-only statements.
+     *
+     * In TrustKernel deployments this is used to fail-closed on DB reads when the
+     * kernel denies reads (e.g. integrity mismatch / paused controller / stale beyond max).
+     */
+    public static function setReadGuard(?callable $guard): void
+    {
+        if (self::$readGuardLocked) {
+            throw new DatabaseException('Database read guard is locked.');
+        }
+        self::$readGuard = $guard;
+    }
+
+    public static function lockWriteGuard(): void
+    {
+        if (self::$writeGuard === null) {
+            throw new DatabaseException('Database write guard cannot be locked when not set.');
+        }
+        self::$writeGuardLocked = true;
+    }
+
+    public static function isWriteGuardLocked(): bool
+    {
+        return self::$writeGuardLocked;
+    }
+
+    public static function hasWriteGuard(): bool
+    {
+        return self::$writeGuard !== null;
+    }
+
+    public static function lockReadGuard(): void
+    {
+        if (self::$readGuard === null) {
+            throw new DatabaseException('Database read guard cannot be locked when not set.');
+        }
+        self::$readGuardLocked = true;
+    }
+
+    public static function isReadGuardLocked(): bool
+    {
+        return self::$readGuardLocked;
+    }
+
+    public static function hasReadGuard(): bool
+    {
+        return self::$readGuard !== null;
+    }
+
+    /**
+     * Optional security hook: called before exposing raw PDO via {@see self::getPdo()}.
+     *
+     * This is intended to prevent bypassing kernel guards by calling `$db->getPdo()->exec(...)` directly.
+     *
+     * The callable receives a context string (currently: "db.raw_pdo").
+     */
+    public static function setPdoAccessGuard(?callable $guard): void
+    {
+        if (self::$pdoAccessGuardLocked) {
+            throw new DatabaseException('Database PDO access guard is locked.');
+        }
+        self::$pdoAccessGuard = $guard;
+    }
+
+    public static function lockPdoAccessGuard(): void
+    {
+        if (self::$pdoAccessGuard === null) {
+            throw new DatabaseException('Database PDO access guard cannot be locked when not set.');
+        }
+        self::$pdoAccessGuardLocked = true;
+    }
+
+    public static function isPdoAccessGuardLocked(): bool
+    {
+        return self::$pdoAccessGuardLocked;
+    }
+
+    public static function hasPdoAccessGuard(): bool
+    {
+        return self::$pdoAccessGuard !== null;
+    }
+
+    private function autoBootTrustKernelIfPossible(): void
+    {
+        if (self::$trustKernelAutoBootAttempted) {
+            return;
+        }
+        self::$trustKernelAutoBootAttempted = true;
+
+        try {
+            // Security-first:
+            // - If blackcat-config is installed, treat it as a trust-required deployment and fail-closed.
+            // - Otherwise (legacy stacks), best-effort boot when configured.
+            $configClass = implode('\\', ['BlackCat', 'Config', 'Runtime', 'Config']);
+            $repoClass = implode('\\', ['BlackCat', 'Config', 'Runtime', 'ConfigRepository']);
+            if (class_exists($configClass) && class_exists($repoClass)) {
+                \BlackCat\Core\Kernel\KernelBootstrap::bootOrFail($this->logger);
+                return;
+            }
+
+            \BlackCat\Core\Kernel\KernelBootstrap::bootIfConfigured($this->logger);
+        } catch (\Throwable $e) {
+            throw new DatabaseException('TrustKernel auto-boot failed: ' . $e->getMessage(), 0, $e);
+        }
+    }
+
     public static function encodeCursor(array $cursor): string {
-        $j = json_encode($cursor, JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);
+        $j = json_encode($cursor, JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES|JSON_THROW_ON_ERROR);
         return rtrim(strtr(base64_encode($j), '+/', '-_'), '=');
     }
     public static function decodeCursor(?string $token): ?array {

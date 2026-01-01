@@ -1,0 +1,35 @@
+# BlackCat kernel-only front controller (Nginx snippet)
+#
+# Goals:
+# - deny direct execution of arbitrary *.php files (only allow /index.php)
+# - route all requests through /index.php (single entrypoint)
+# - block common sensitive directories if they exist under web root
+#
+# IMPORTANT:
+# - adjust PHP-FPM socket/upstream to your server
+# - keep config/keys outside the web root (recommended)
+
+# Deny common sensitive directories if present under web root
+location ~ ^/(vendor|config|docs|tests|scripts|sql|var)/ {
+    deny all;
+    return 403;
+}
+
+# Deny any PHP file except /index.php
+location ~ \.php$ {
+    return 403;
+}
+
+# Allow only /index.php to be executed by PHP-FPM
+location = /index.php {
+    include fastcgi_params;
+    fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+    fastcgi_param PATH_INFO "";
+    fastcgi_pass unix:/run/php/php-fpm.sock;
+}
+
+# Single entrypoint routing
+location / {
+    try_files $uri $uri/ /index.php?$query_string;
+}
+
