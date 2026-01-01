@@ -212,19 +212,22 @@ final class Recaptcha
             },
         ]);
 
-        $ok = curl_exec($ch);
-        $err = curl_error($ch);
-        $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
+        try {
+            $ok = curl_exec($ch);
+            $err = curl_error($ch);
+            $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
 
-        if ($ok === false) {
-            if (strlen($buffer) > self::MAX_BODY_BYTES) {
-                return ['code' => 0, 'body' => '', 'error' => 'response_too_large'];
+            if ($ok === false) {
+                if (strlen($buffer) > self::MAX_BODY_BYTES) {
+                    return ['code' => 0, 'body' => '', 'error' => 'response_too_large'];
+                }
+                return ['code' => 0, 'body' => '', 'error' => $err ?: 'curl_error'];
             }
-            return ['code' => 0, 'body' => '', 'error' => $err ?: 'curl_error'];
-        }
 
-        return ['code' => $code, 'body' => $buffer, 'error' => $err ?: null];
+            return ['code' => $code, 'body' => $buffer, 'error' => $err ?: null];
+        } finally {
+            unset($ch);
+        }
     }
 
     /* ----------------------

@@ -62,27 +62,29 @@ final class DefaultWeb3Transport implements Web3TransportInterface
                 curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 2);
             }
 
-            $ok = curl_exec($ch);
-            if ($ok === false) {
-                $err = curl_error($ch);
-                curl_close($ch);
-                if (strlen($buffer) > self::MAX_RESPONSE_BYTES) {
-                    throw new \RuntimeException('RPC response too large (possible malicious endpoint or MITM).');
+            try {
+                $ok = curl_exec($ch);
+                if ($ok === false) {
+                    $err = curl_error($ch);
+                    if (strlen($buffer) > self::MAX_RESPONSE_BYTES) {
+                        throw new \RuntimeException('RPC response too large (possible malicious endpoint or MITM).');
+                    }
+                    throw new \RuntimeException('RPC request failed (curl): ' . $err);
                 }
-                throw new \RuntimeException('RPC request failed (curl): ' . $err);
-            }
 
-            $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            curl_close($ch);
-            if ($code < 200 || $code >= 300) {
-                throw new \RuntimeException('RPC HTTP error: ' . $code);
-            }
+                $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+                if ($code < 200 || $code >= 300) {
+                    throw new \RuntimeException('RPC HTTP error: ' . $code);
+                }
 
-            if ($buffer === '') {
-                throw new \RuntimeException('RPC returned empty response.');
-            }
+                if ($buffer === '') {
+                    throw new \RuntimeException('RPC returned empty response.');
+                }
 
-            return $buffer;
+                return $buffer;
+            } finally {
+                unset($ch);
+            }
         }
 
         /** @var array<string,mixed>|false $parsed */
