@@ -8,7 +8,8 @@ final class LocalIntegrityVerifier
 {
     /** @var array<string,array{mtime:int,ctime:int,size:int,hash:string}> */
     private array $hashCache = [];
-    private ?string $cacheRequestId = null;
+
+    private ?string $hashCacheRequestId = null;
 
     private string $rootDir;
 
@@ -37,6 +38,8 @@ final class LocalIntegrityVerifier
      */
     public function computeAndVerifyRoot(IntegrityManifestV1 $manifest): string
     {
+        $this->resetHashCacheIfNewRequest();
+
         foreach ($manifest->files as $path => $expectedHash) {
             $absolute = $this->absolutePathFor($path);
 
@@ -63,9 +66,28 @@ final class LocalIntegrityVerifier
      */
     public function computeAndVerifyRootStrict(IntegrityManifestV1 $manifest): string
     {
+        $this->resetHashCacheIfNewRequest();
+
         $root = $this->computeAndVerifyRoot($manifest);
         $this->assertNoUnexpectedFiles($manifest);
         return $root;
+    }
+
+    private function resetHashCacheIfNewRequest(): void
+    {
+        $rid = self::currentRequestId();
+        if ($rid === null) {
+            if ($this->hashCacheRequestId !== null) {
+                $this->hashCache = [];
+            }
+            $this->hashCacheRequestId = null;
+            return;
+        }
+
+        if ($this->hashCacheRequestId !== $rid) {
+            $this->hashCache = [];
+            $this->hashCacheRequestId = $rid;
+        }
     }
 
     private function assertNoUnexpectedFiles(IntegrityManifestV1 $manifest): void
@@ -116,8 +138,6 @@ final class LocalIntegrityVerifier
 
     private function sha256Bytes32Cached(string $absolutePath): string
     {
-        $this->resetCacheIfNewRequest();
-
         clearstatcache(true, $absolutePath);
         $mtime = @filemtime($absolutePath);
         $ctime = @filectime($absolutePath);
@@ -157,18 +177,6 @@ final class LocalIntegrityVerifier
         }
 
         return $hash;
-    }
-
-    private function resetCacheIfNewRequest(): void
-    {
-        $id = self::currentRequestId();
-        if ($id === null) {
-            return;
-        }
-        if ($this->cacheRequestId !== $id) {
-            $this->hashCache = [];
-            $this->cacheRequestId = $id;
-        }
     }
 
     private static function currentRequestId(): ?string

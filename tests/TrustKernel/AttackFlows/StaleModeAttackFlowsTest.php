@@ -20,6 +20,8 @@ final class StaleModeAttackFlowsTest extends TestCase
 
         $instanceController = '0x1111111111111111111111111111111111111111';
         $releaseRegistry = '0x2222222222222222222222222222222222222222';
+        /** @var array{outage:bool} $state */
+        $state = ['outage' => false];
 
         $cfg = new TrustKernelConfig(
             chainId: 4207,
@@ -50,21 +52,20 @@ final class StaleModeAttackFlowsTest extends TestCase
         );
 
         $transport = new ScenarioTransport(static function (string $url, array $req, int $timeout, int $callIndex) use (
+            &$state,
             $snapshotHex,
             $instanceController,
             $releaseRegistry,
             $fixture,
         ): string {
+            if ($state['outage'] === true) {
+                throw new \RuntimeException('simulated rpc outage');
+            }
+
             $method = $req['method'] ?? null;
 
             if ($method === 'eth_chainId') {
                 return json_encode(['jsonrpc' => '2.0', 'id' => 1, 'result' => '0x106f'], JSON_THROW_ON_ERROR);
-            }
-
-            // First `check()` performs 10 RPC calls in the happy path (2 endpoints, quorum=2).
-            // After that, simulate an RPC outage (for stale-mode behavior).
-            if ($callIndex > 10) {
-                throw new \RuntimeException('simulated rpc outage');
             }
 
             if ($method === 'eth_getCode') {
@@ -100,6 +101,7 @@ final class StaleModeAttackFlowsTest extends TestCase
             $status1 = $kernel->check();
             self::assertTrue($status1->trustedNow);
 
+            $state['outage'] = true;
             usleep(1_100_000);
 
             $status2 = $kernel->check();
