@@ -29,10 +29,14 @@ final class TrustKernel
     private ?string $composerLockCachedSha256 = null;
     private ?int $composerLockCachedMtime = null;
     private ?int $composerLockCachedSize = null;
+    private ?int $composerLockCachedCtime = null;
+    private ?int $composerLockCachedInode = null;
 
     private ?string $imageDigestCachedSha256 = null;
     private ?int $imageDigestCachedMtime = null;
     private ?int $imageDigestCachedSize = null;
+    private ?int $imageDigestCachedCtime = null;
+    private ?int $imageDigestCachedInode = null;
 
     private ?TrustKernelStatus $lastStatus = null;
     private ?int $lastStatusAt = null;
@@ -1057,16 +1061,6 @@ final class TrustKernel
 
     private function computeComposerLockSha256Bytes32OrThrow(): string
     {
-        if ($this->composerLockCachedSha256 !== null && $this->composerLockCachedMtime !== null && $this->composerLockCachedSize !== null) {
-            $path = rtrim(trim($this->config->integrityRootDir), "/\\") . DIRECTORY_SEPARATOR . 'composer.lock';
-            clearstatcache(true, $path);
-            $mtime = @filemtime($path);
-            $size = @filesize($path);
-            if (is_int($mtime) && is_int($size) && $mtime === $this->composerLockCachedMtime && $size === $this->composerLockCachedSize) {
-                return $this->composerLockCachedSha256;
-            }
-        }
-
         $rootDir = $this->config->integrityRootDir;
         $rootDir = rtrim(trim($rootDir), "/\\");
         if ($rootDir === '' || str_contains($rootDir, "\0")) {
@@ -1074,44 +1068,118 @@ final class TrustKernel
         }
 
         $path = $rootDir . DIRECTORY_SEPARATOR . 'composer.lock';
-        if (is_link($path)) {
+        if (self::isSymlinkPath($path)) {
             throw new TrustKernelException('composer.lock must not be a symlink.');
         }
+
+        $metaCacheKey = self::tryReadFileCacheMeta($path);
+        if (
+            $this->composerLockCachedSha256 !== null
+            && $this->composerLockCachedMtime !== null
+            && $this->composerLockCachedSize !== null
+            && $this->composerLockCachedCtime !== null
+            && $this->composerLockCachedInode !== null
+            && $metaCacheKey !== null
+        ) {
+            if (
+                $metaCacheKey['mtime'] === $this->composerLockCachedMtime
+                && $metaCacheKey['size'] === $this->composerLockCachedSize
+                && $metaCacheKey['ctime'] === $this->composerLockCachedCtime
+                && $metaCacheKey['inode'] === $this->composerLockCachedInode
+            ) {
+                return $this->composerLockCachedSha256;
+            }
+        }
+
         if (!is_file($path) || !is_readable($path)) {
             throw new TrustKernelException('composer.lock is not readable: ' . $path);
         }
 
         $maxBytes = 8 * 1024 * 1024;
-        $size = @filesize($path);
-        if (is_int($size) && $size > $maxBytes) {
-            throw new TrustKernelException('composer.lock is too large.');
-        }
+        $attempts = 0;
+        while (true) {
+            $attempts++;
 
-        $raw = @file_get_contents($path, false, null, 0, $maxBytes + 1);
-        if (!is_string($raw)) {
-            throw new TrustKernelException('Unable to read composer.lock.');
-        }
-        if (strlen($raw) > $maxBytes) {
-            throw new TrustKernelException('composer.lock is too large.');
-        }
+            $metaBefore = self::tryReadFileCacheMeta($path);
+            if ($metaBefore !== null && $metaBefore['size'] > $maxBytes) {
+                throw new TrustKernelException('composer.lock is too large.');
+            }
 
-        try {
-            /** @var mixed $decoded */
-            $decoded = json_decode($raw, true, 512, JSON_THROW_ON_ERROR);
-        } catch (\JsonException $e) {
-            throw new TrustKernelException('composer.lock JSON is invalid.', 0, $e);
-        }
+            $size = @filesize($path);
+            if (is_int($size) && $size > $maxBytes) {
+                throw new TrustKernelException('composer.lock is too large.');
+            }
 
-        if (!is_array($decoded)) {
-            throw new TrustKernelException('composer.lock JSON must decode to an object/array.');
-        }
+            $raw = @file_get_contents($path, false, null, 0, $maxBytes + 1);
+            if (!is_string($raw)) {
+                throw new TrustKernelException('Unable to read composer.lock.');
+            }
+            if (strlen($raw) > $maxBytes) {
+                throw new TrustKernelException('composer.lock is too large.');
+            }
 
-        /** @var array<string,mixed> $decoded */
-        $sha = CanonicalJson::sha256Bytes32($decoded);
-        $this->composerLockCachedSha256 = $sha;
-        $this->composerLockCachedMtime = @filemtime($path) ?: null;
-        $this->composerLockCachedSize = @filesize($path) ?: null;
-        return $sha;
+            try {
+                /** @var mixed $decoded */
+                $decoded = json_decode($raw, true, 512, JSON_THROW_ON_ERROR);
+            } catch (\JsonException $e) {
+                throw new TrustKernelException('composer.lock JSON is invalid.', 0, $e);
+            }
+
+            if (!is_array($decoded)) {
+                throw new TrustKernelException('composer.lock JSON must decode to an object/array.');
+            }
+
+            /** @var array<string,mixed> $decoded */
+            $sha = CanonicalJson::sha256Bytes32($decoded);
+
+            $metaAfter = self::tryReadFileCacheMeta($path);
+            if ($metaBefore !== null && $metaAfter !== null) {
+                if ($metaBefore !== $metaAfter) {
+                    if ($attempts < 2) {
+                        continue;
+                    }
+                    throw new TrustKernelException('composer.lock changed while reading.');
+                }
+
+                $this->composerLockCachedSha256 = $sha;
+                $this->composerLockCachedMtime = $metaAfter['mtime'];
+                $this->composerLockCachedSize = $metaAfter['size'];
+                $this->composerLockCachedCtime = $metaAfter['ctime'];
+                $this->composerLockCachedInode = $metaAfter['inode'];
+                return $sha;
+            }
+
+            // If we cannot stat reliably, do not keep a weak cache.
+            $this->composerLockCachedSha256 = null;
+            $this->composerLockCachedMtime = null;
+            $this->composerLockCachedSize = null;
+            $this->composerLockCachedCtime = null;
+            $this->composerLockCachedInode = null;
+
+            // Best-effort TOCTOU detection even without stat(): re-read and compare the derived hash.
+            $raw2 = @file_get_contents($path, false, null, 0, $maxBytes + 1);
+            if (!is_string($raw2) || strlen($raw2) > $maxBytes) {
+                throw new TrustKernelException('Unable to re-read composer.lock.');
+            }
+
+            try {
+                /** @var mixed $decoded2 */
+                $decoded2 = json_decode($raw2, true, 512, JSON_THROW_ON_ERROR);
+            } catch (\JsonException $e) {
+                throw new TrustKernelException('composer.lock JSON is invalid (re-read).', 0, $e);
+            }
+
+            if (!is_array($decoded2)) {
+                throw new TrustKernelException('composer.lock JSON must decode to an object/array (re-read).');
+            }
+
+            /** @var array<string,mixed> $decoded2 */
+            $sha2 = CanonicalJson::sha256Bytes32($decoded2);
+            if (!hash_equals($sha, $sha2)) {
+                throw new TrustKernelException('composer.lock changed while reading.');
+            }
+            return $sha;
+        }
     }
 
     private function computePhpFingerprintSha256Bytes32(): string
@@ -1150,57 +1218,187 @@ final class TrustKernel
             throw new TrustKernelException('Image digest file path is invalid.');
         }
 
-        if ($this->imageDigestCachedSha256 !== null && $this->imageDigestCachedMtime !== null && $this->imageDigestCachedSize !== null) {
-            clearstatcache(true, $path);
-            $mtime = @filemtime($path);
-            $size = @filesize($path);
-            if (is_int($mtime) && is_int($size) && $mtime === $this->imageDigestCachedMtime && $size === $this->imageDigestCachedSize) {
+        if (self::isSymlinkPath($path)) {
+            throw new TrustKernelException('Image digest file must not be a symlink.');
+        }
+
+        $metaCacheKey = self::tryReadFileCacheMeta($path);
+        if (
+            $this->imageDigestCachedSha256 !== null
+            && $this->imageDigestCachedMtime !== null
+            && $this->imageDigestCachedSize !== null
+            && $this->imageDigestCachedCtime !== null
+            && $this->imageDigestCachedInode !== null
+            && $metaCacheKey !== null
+        ) {
+            if (
+                $metaCacheKey['mtime'] === $this->imageDigestCachedMtime
+                && $metaCacheKey['size'] === $this->imageDigestCachedSize
+                && $metaCacheKey['ctime'] === $this->imageDigestCachedCtime
+                && $metaCacheKey['inode'] === $this->imageDigestCachedInode
+            ) {
                 return $this->imageDigestCachedSha256;
             }
         }
 
-        if (is_link($path)) {
-            throw new TrustKernelException('Image digest file must not be a symlink.');
-        }
         if (!is_file($path) || !is_readable($path)) {
             throw new TrustKernelException('Image digest file is not readable: ' . $path);
         }
 
         $maxBytes = 4096;
-        $size = @filesize($path);
-        if (is_int($size) && $size > $maxBytes) {
-            throw new TrustKernelException('Image digest file is too large.');
+        $attempts = 0;
+        while (true) {
+            $attempts++;
+
+            $metaBefore = self::tryReadFileCacheMeta($path);
+            if ($metaBefore !== null && $metaBefore['size'] > $maxBytes) {
+                throw new TrustKernelException('Image digest file is too large.');
+            }
+
+            $size = @filesize($path);
+            if (is_int($size) && $size > $maxBytes) {
+                throw new TrustKernelException('Image digest file is too large.');
+            }
+
+            $raw = @file_get_contents($path, false, null, 0, $maxBytes + 1);
+            if (!is_string($raw)) {
+                throw new TrustKernelException('Unable to read image digest file.');
+            }
+            if (strlen($raw) > $maxBytes) {
+                throw new TrustKernelException('Image digest file is too large.');
+            }
+
+            $digest = trim($raw);
+            if ($digest === '' || str_contains($digest, "\0")) {
+                throw new TrustKernelException('Image digest file is empty/invalid.');
+            }
+
+            if (str_starts_with($digest, 'sha256:')) {
+                $digest = substr($digest, 7);
+            }
+            if (str_starts_with($digest, '0x') || str_starts_with($digest, '0X')) {
+                $digest = substr($digest, 2);
+            }
+            $digest = trim($digest);
+            if (!preg_match('/^[a-fA-F0-9]{64}$/', $digest)) {
+                throw new TrustKernelException('Image digest must be 32 bytes of hex (sha256).');
+            }
+
+            $out = '0x' . strtolower($digest);
+
+            $metaAfter = self::tryReadFileCacheMeta($path);
+            if ($metaBefore !== null && $metaAfter !== null) {
+                if ($metaBefore !== $metaAfter) {
+                    if ($attempts < 2) {
+                        continue;
+                    }
+                    throw new TrustKernelException('Image digest file changed while reading.');
+                }
+
+                $this->imageDigestCachedSha256 = $out;
+                $this->imageDigestCachedMtime = $metaAfter['mtime'];
+                $this->imageDigestCachedSize = $metaAfter['size'];
+                $this->imageDigestCachedCtime = $metaAfter['ctime'];
+                $this->imageDigestCachedInode = $metaAfter['inode'];
+                return $out;
+            }
+
+            // Fail safe: if we cannot stat reliably, do not keep a weak cache.
+            $this->imageDigestCachedSha256 = null;
+            $this->imageDigestCachedMtime = null;
+            $this->imageDigestCachedSize = null;
+            $this->imageDigestCachedCtime = null;
+            $this->imageDigestCachedInode = null;
+
+            // Best-effort TOCTOU detection even without stat(): re-read and compare.
+            $raw2 = @file_get_contents($path, false, null, 0, $maxBytes + 1);
+            if (!is_string($raw2) || strlen($raw2) > $maxBytes) {
+                throw new TrustKernelException('Unable to re-read image digest file.');
+            }
+
+            $digest2 = trim($raw2);
+            if (str_starts_with($digest2, 'sha256:')) {
+                $digest2 = substr($digest2, 7);
+            }
+            if (str_starts_with($digest2, '0x') || str_starts_with($digest2, '0X')) {
+                $digest2 = substr($digest2, 2);
+            }
+            $digest2 = trim($digest2);
+            if (!preg_match('/^[a-fA-F0-9]{64}$/', $digest2)) {
+                throw new TrustKernelException('Image digest must be 32 bytes of hex (sha256).');
+            }
+
+            $out2 = '0x' . strtolower($digest2);
+            if (!hash_equals($out, $out2)) {
+                throw new TrustKernelException('Image digest file changed while reading.');
+            }
+            return $out;
+        }
+    }
+
+    /**
+     * Returns a strong-ish cache key for a security-critical file.
+     *
+     * Rationale:
+     * - `mtime`/`size` alone can be forged by an attacker with filesystem access (e.g. edit + touch -r).
+     * - `ctime` is not user-settable on typical Unix filesystems and changes on content changes.
+     * - `inode` changes on atomic replace/rename.
+     *
+     * If these fields are not available/reliable, we return null and the caller must not keep a weak cache.
+     *
+     * @return array{mtime:int,size:int,ctime:int,inode:int}|null
+     */
+    private static function tryReadFileCacheMeta(string $path): ?array
+    {
+        // On Windows `filectime()`/stat('ctime') is typically the creation time, not an inode-change time,
+        // so it is not a reliable tamper signal. Fail safe: disable file-based caching on Windows.
+        $osFamily = (string) constant('PHP_OS_FAMILY');
+        if ($osFamily === 'Windows') {
+            return null;
         }
 
-        $raw = @file_get_contents($path, false, null, 0, $maxBytes + 1);
-        if (!is_string($raw)) {
-            throw new TrustKernelException('Unable to read image digest file.');
-        }
-        if (strlen($raw) > $maxBytes) {
-            throw new TrustKernelException('Image digest file is too large.');
+        clearstatcache(true, $path);
+        $st = @stat($path);
+        if (!is_array($st)) {
+            return null;
         }
 
-        $digest = trim($raw);
-        if ($digest === '' || str_contains($digest, "\0")) {
-            throw new TrustKernelException('Image digest file is empty/invalid.');
+        $mtime = $st['mtime'] ?? null;
+        $size = $st['size'] ?? null;
+        $ctime = $st['ctime'] ?? null;
+        $inode = $st['ino'] ?? null;
+
+        if (!is_int($mtime) || !is_int($size) || !is_int($ctime) || !is_int($inode)) {
+            return null;
         }
 
-        if (str_starts_with($digest, 'sha256:')) {
-            $digest = substr($digest, 7);
-        }
-        if (str_starts_with($digest, '0x') || str_starts_with($digest, '0X')) {
-            $digest = substr($digest, 2);
-        }
-        $digest = trim($digest);
-        if (!preg_match('/^[a-fA-F0-9]{64}$/', $digest)) {
-            throw new TrustKernelException('Image digest must be 32 bytes of hex (sha256).');
+        if ($mtime <= 0 || $ctime <= 0 || $inode <= 0 || $size < 0) {
+            return null;
         }
 
-        $out = '0x' . strtolower($digest);
-        $this->imageDigestCachedSha256 = $out;
-        $this->imageDigestCachedMtime = @filemtime($path) ?: null;
-        $this->imageDigestCachedSize = @filesize($path) ?: null;
-        return $out;
+        return [
+            'mtime' => $mtime,
+            'size' => $size,
+            'ctime' => $ctime,
+            'inode' => $inode,
+        ];
+    }
+
+    private static function isSymlinkPath(string $path): bool
+    {
+        clearstatcache(true, $path);
+        $st = @lstat($path);
+        if (!is_array($st)) {
+            return false;
+        }
+
+        $mode = $st['mode'] ?? null;
+        if (!is_int($mode)) {
+            return false;
+        }
+
+        // POSIX S_IFMT = 0170000, S_IFLNK = 0120000.
+        return (($mode & 0170000) === 0120000);
     }
 
     private static function currentRequestId(): ?string
