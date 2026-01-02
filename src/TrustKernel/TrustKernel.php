@@ -567,37 +567,28 @@ final class TrustKernel
                         $expectedNorm = Bytes32::normalizeHex($expected);
 
                         // Detect runtime config tamper: the on-disk file must remain equal to the config used for boot.
-                        clearstatcache(true, $sourcePath);
-                        if (is_link($sourcePath)) {
-                            $addError('runtime_config_source_symlink', 'Runtime config file must not be a symlink: ' . $sourcePath);
-                        } else {
-                            $maxBytes = 8 * 1024 * 1024; // 8 MiB
-                            $size = @filesize($sourcePath);
-                            if (is_int($size) && $size > $maxBytes) {
+                        $maxBytes = 8 * 1024 * 1024; // 8 MiB
+                        $res = self::tryReadCanonicalJsonFileSha256Bytes32($sourcePath, $maxBytes);
+                        if (!$res['ok']) {
+                            $message = $res['message'];
+                            if ($message === '') {
+                                $message = 'Runtime config file could not be validated: ' . $sourcePath;
+                            }
+                            if ($res['error'] === 'symlink') {
+                                $addError('runtime_config_source_symlink', 'Runtime config file must not be a symlink: ' . $sourcePath);
+                            } elseif ($res['error'] === 'too_large') {
                                 $addError('runtime_config_source_too_large', 'Runtime config file is too large: ' . $sourcePath);
+                            } elseif ($res['error'] === 'invalid') {
+                                $addError('runtime_config_source_invalid', 'Runtime config file JSON is invalid: ' . $sourcePath . ($message !== '' ? (' (' . $message . ')') : ''));
+                            } elseif ($res['error'] === 'changed') {
+                                $addError('runtime_config_source_changed', 'Runtime config file changed while reading (restart required).');
                             } else {
-                                $rawNow = @file_get_contents($sourcePath, false, null, 0, $maxBytes + 1);
-                                if (!is_string($rawNow) || $rawNow === '') {
-                                    $addError('runtime_config_source_unreadable', 'Runtime config file is not readable: ' . $sourcePath);
-                                } elseif (strlen($rawNow) > $maxBytes) {
-                                    $addError('runtime_config_source_too_large', 'Runtime config file is too large: ' . $sourcePath);
-                                } else {
-                                    try {
-                                        /** @var mixed $decodedNow */
-                                        $decodedNow = json_decode($rawNow, true, 512, JSON_THROW_ON_ERROR);
-                                        if (!is_array($decodedNow)) {
-                                            $addError('runtime_config_source_invalid', 'Runtime config JSON must decode to an object/array: ' . $sourcePath);
-                                        } else {
-                                            /** @var array<string,mixed> $decodedNow */
-                                            $current = CanonicalJson::sha256Bytes32($decodedNow);
-                                            if (!hash_equals($expectedNorm, Bytes32::normalizeHex($current))) {
-                                                $addError('runtime_config_source_changed', 'Runtime config file differs from the booted config (restart required).');
-                                            }
-                                        }
-                                    } catch (\JsonException $e) {
-                                        $addError('runtime_config_source_invalid', 'Runtime config file JSON is invalid: ' . $sourcePath . ' (' . $e->getMessage() . ')');
-                                    }
-                                }
+                                $addError('runtime_config_source_unreadable', 'Runtime config file is not readable: ' . $sourcePath);
+                            }
+                        } else {
+                            $current = $res['sha'];
+                            if (!hash_equals($expectedNorm, Bytes32::normalizeHex($current))) {
+                                $addError('runtime_config_source_changed', 'Runtime config file differs from the booted config (restart required).');
                             }
                         }
 
@@ -838,44 +829,24 @@ final class TrustKernel
                             $runtimeConfigOk = false;
                             $addError('stale_runtime_config_missing', 'Stale-mode runtime config commitment is not available.');
                         } else {
-                            clearstatcache(true, $sourcePath);
-                            if (is_link($sourcePath)) {
+                            $maxBytes = 8 * 1024 * 1024; // 8 MiB
+                            $res = self::tryReadCanonicalJsonFileSha256Bytes32($sourcePath, $maxBytes);
+                            if (!$res['ok']) {
                                 $runtimeConfigOk = false;
-                                $addError('stale_runtime_config_symlink', 'Stale-mode runtime config file must not be a symlink: ' . $sourcePath);
-                            } else {
-                                $maxBytes = 8 * 1024 * 1024; // 8 MiB
-                                $size = @filesize($sourcePath);
-                                if (is_int($size) && $size > $maxBytes) {
-                                    $runtimeConfigOk = false;
+                                if ($res['error'] === 'symlink') {
+                                    $addError('stale_runtime_config_symlink', 'Stale-mode runtime config file must not be a symlink: ' . $sourcePath);
+                                } elseif ($res['error'] === 'too_large') {
                                     $addError('stale_runtime_config_too_large', 'Stale-mode runtime config file is too large: ' . $sourcePath);
+                                } elseif ($res['error'] === 'invalid') {
+                                    $addError('stale_runtime_config_invalid', 'Stale-mode runtime config JSON is invalid: ' . $sourcePath);
                                 } else {
-                                    $rawNow = @file_get_contents($sourcePath, false, null, 0, $maxBytes + 1);
-                                    if (!is_string($rawNow)) {
-                                        $runtimeConfigOk = false;
-                                        $addError('stale_runtime_config_unreadable', 'Stale-mode runtime config file is not readable: ' . $sourcePath);
-                                    } elseif (strlen($rawNow) > $maxBytes) {
-                                        $runtimeConfigOk = false;
-                                        $addError('stale_runtime_config_too_large', 'Stale-mode runtime config file is too large: ' . $sourcePath);
-                                    } else {
-                                        try {
-                                            /** @var mixed $decodedNow */
-                                            $decodedNow = json_decode($rawNow, true, 512, JSON_THROW_ON_ERROR);
-                                            if (!is_array($decodedNow)) {
-                                                $runtimeConfigOk = false;
-                                                $addError('stale_runtime_config_invalid', 'Stale-mode runtime config JSON must decode to an object/array: ' . $sourcePath);
-                                            } else {
-                                                /** @var array<string,mixed> $decodedNow */
-                                                $currentCfgSha = CanonicalJson::sha256Bytes32($decodedNow);
-                                                $runtimeConfigOk = hash_equals(Bytes32::normalizeHex($expectedCfgSha), Bytes32::normalizeHex($currentCfgSha));
-                                                if (!$runtimeConfigOk) {
-                                                    $addError('stale_runtime_config_mismatch', 'Stale-mode runtime config commitment mismatch.');
-                                                }
-                                            }
-                                        } catch (\JsonException $e) {
-                                            $runtimeConfigOk = false;
-                                            $addError('stale_runtime_config_invalid', 'Stale-mode runtime config JSON is invalid: ' . $sourcePath . ' (' . $e->getMessage() . ')');
-                                        }
-                                    }
+                                    $addError('stale_runtime_config_unreadable', 'Stale-mode runtime config file is not readable: ' . $sourcePath);
+                                }
+                            } else {
+                                $currentCfgSha = $res['sha'];
+                                $runtimeConfigOk = hash_equals(Bytes32::normalizeHex($expectedCfgSha), Bytes32::normalizeHex($currentCfgSha));
+                                if (!$runtimeConfigOk) {
+                                    $addError('stale_runtime_config_mismatch', 'Stale-mode runtime config commitment mismatch.');
                                 }
                             }
                         }
@@ -1337,6 +1308,172 @@ final class TrustKernel
     }
 
     /**
+     * Read and canonicalize a local JSON file and return sha256 (bytes32), with basic TOCTOU hardening.
+     *
+     * @return array{ok:true,sha:string}|array{ok:false,error:'symlink'|'too_large'|'unreadable'|'invalid'|'changed',message:string}
+     */
+    private static function tryReadCanonicalJsonFileSha256Bytes32(string $path, int $maxBytes): array
+    {
+        if ($maxBytes < 0) {
+            return [
+                'ok' => false,
+                'error' => 'unreadable',
+                'message' => 'invalid maxBytes',
+            ];
+        }
+
+        $path = trim($path);
+        if ($path === '' || str_contains($path, "\0")) {
+            return [
+                'ok' => false,
+                'error' => 'unreadable',
+                'message' => 'invalid path',
+            ];
+        }
+
+        if (self::isSymlinkPath($path)) {
+            return [
+                'ok' => false,
+                'error' => 'symlink',
+                'message' => 'symlink',
+            ];
+        }
+
+        clearstatcache(true, $path);
+        if (!is_file($path) || !is_readable($path)) {
+            return [
+                'ok' => false,
+                'error' => 'unreadable',
+                'message' => 'not readable',
+            ];
+        }
+
+        $attempts = 0;
+        while (true) {
+            $attempts++;
+
+            $metaBefore = self::tryReadFileCacheMeta($path);
+            if ($metaBefore !== null && $metaBefore['size'] > $maxBytes) {
+                return [
+                    'ok' => false,
+                    'error' => 'too_large',
+                    'message' => 'too large',
+                ];
+            }
+
+            $size = @filesize($path);
+            if (is_int($size) && $size > $maxBytes) {
+                return [
+                    'ok' => false,
+                    'error' => 'too_large',
+                    'message' => 'too large',
+                ];
+            }
+
+            $raw = @file_get_contents($path, false, null, 0, $maxBytes + 1);
+            if (!is_string($raw)) {
+                return [
+                    'ok' => false,
+                    'error' => 'unreadable',
+                    'message' => 'read failed',
+                ];
+            }
+            if (strlen($raw) > $maxBytes) {
+                return [
+                    'ok' => false,
+                    'error' => 'too_large',
+                    'message' => 'too large',
+                ];
+            }
+
+            try {
+                /** @var mixed $decoded */
+                $decoded = json_decode($raw, true, 512, JSON_THROW_ON_ERROR);
+            } catch (\JsonException $e) {
+                return [
+                    'ok' => false,
+                    'error' => 'invalid',
+                    'message' => $e->getMessage(),
+                ];
+            }
+
+            if (!is_array($decoded)) {
+                return [
+                    'ok' => false,
+                    'error' => 'invalid',
+                    'message' => 'JSON must decode to an object/array',
+                ];
+            }
+
+            /** @var array<string,mixed> $decoded */
+            $sha = CanonicalJson::sha256Bytes32($decoded);
+
+            $metaAfter = self::tryReadFileCacheMeta($path);
+            if ($metaBefore !== null && $metaAfter !== null) {
+                if ($metaBefore !== $metaAfter) {
+                    if ($attempts < 2) {
+                        continue;
+                    }
+                    return [
+                        'ok' => false,
+                        'error' => 'changed',
+                        'message' => 'file changed while reading',
+                    ];
+                }
+
+                return [
+                    'ok' => true,
+                    'sha' => $sha,
+                ];
+            }
+
+            // Fail safe: if we cannot stat reliably, do best-effort TOCTOU detection by re-reading and comparing hash.
+            $raw2 = @file_get_contents($path, false, null, 0, $maxBytes + 1);
+            if (!is_string($raw2) || strlen($raw2) > $maxBytes) {
+                return [
+                    'ok' => false,
+                    'error' => 'unreadable',
+                    'message' => 'unable to re-read file',
+                ];
+            }
+
+            try {
+                /** @var mixed $decoded2 */
+                $decoded2 = json_decode($raw2, true, 512, JSON_THROW_ON_ERROR);
+            } catch (\JsonException $e) {
+                return [
+                    'ok' => false,
+                    'error' => 'invalid',
+                    'message' => $e->getMessage(),
+                ];
+            }
+
+            if (!is_array($decoded2)) {
+                return [
+                    'ok' => false,
+                    'error' => 'invalid',
+                    'message' => 'JSON must decode to an object/array',
+                ];
+            }
+
+            /** @var array<string,mixed> $decoded2 */
+            $sha2 = CanonicalJson::sha256Bytes32($decoded2);
+            if (!hash_equals($sha, $sha2)) {
+                return [
+                    'ok' => false,
+                    'error' => 'changed',
+                    'message' => 'file changed while reading',
+                ];
+            }
+
+            return [
+                'ok' => true,
+                'sha' => $sha,
+            ];
+        }
+    }
+
+    /**
      * Returns a strong-ish cache key for a security-critical file.
      *
      * Rationale:
@@ -1352,8 +1489,11 @@ final class TrustKernel
     {
         // On Windows `filectime()`/stat('ctime') is typically the creation time, not an inode-change time,
         // so it is not a reliable tamper signal. Fail safe: disable file-based caching on Windows.
-        $osFamily = (string) constant('PHP_OS_FAMILY');
-        if ($osFamily === 'Windows') {
+        static $isWindows = null;
+        if (!is_bool($isWindows)) {
+            $isWindows = stripos((string) php_uname('s'), 'windows') !== false;
+        }
+        if ($isWindows) {
             return null;
         }
 

@@ -392,7 +392,10 @@ final class TrustKernelConfig
             if (!is_string($releaseRegistry)) {
                 throw new \RuntimeException('Invalid config type for trust.web3.contracts.release_registry (expected string).');
             }
-            self::assertEvmAddress($releaseRegistry, 'trust.web3.contracts.release_registry');
+            // Allow explicit zero address to support installs that intentionally disable the on-chain ReleaseRegistry
+            // pointer (InstanceController.releaseRegistry == 0). This is still covered by the runtime-config attestation,
+            // so tampering remains detectable and fail-closed in strict mode.
+            self::assertEvmAddressAllowZero($releaseRegistry, 'trust.web3.contracts.release_registry');
         } else {
             $releaseRegistry = null;
         }
@@ -638,6 +641,18 @@ final class TrustKernelConfig
 
         if (strtolower($address) === '0x0000000000000000000000000000000000000000') {
             throw new \RuntimeException('Invalid EVM address for ' . $key . ' (zero address).');
+        }
+    }
+
+    private static function assertEvmAddressAllowZero(string $address, string $key): void
+    {
+        $address = trim($address);
+        if ($address === '') {
+            throw new \RuntimeException('Missing required config string: ' . $key);
+        }
+
+        if (!preg_match('/^0x[a-fA-F0-9]{40}$/', $address)) {
+            throw new \RuntimeException('Invalid EVM address for ' . $key . '.');
         }
     }
 }
