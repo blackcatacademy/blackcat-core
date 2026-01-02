@@ -1264,6 +1264,12 @@ final class TrustKernel
      */
     private static function tryReadFileCacheMeta(string $path): ?array
     {
+        // On Windows `filectime()`/stat('ctime') is typically the creation time, not an inode-change time,
+        // so it is not a reliable tamper signal. Fail safe: disable file-based caching on Windows.
+        if (PHP_OS_FAMILY === 'Windows') {
+            return null;
+        }
+
         clearstatcache(true, $path);
         $st = @stat($path);
         if (!is_array($st)) {
