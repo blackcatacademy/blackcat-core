@@ -18,7 +18,7 @@ final class DbCredentialsAgentException extends \RuntimeException {}
  */
 final class DbCredentialsAgentClient
 {
-    private const TIMEOUT_SEC = 1;
+    private const TIMEOUT_SEC = 3;
     private const MAX_REQ_BYTES = 8 * 1024;
     private const MAX_RESP_BYTES = 64 * 1024;
 
