@@ -192,7 +192,7 @@ final class GuardInstallAttackFlowsTest extends TestCase
         }
     }
 
-    public function testInstallGuardsWarnsButDoesNotThrowInWarnPolicy(): void
+    public function testInstallGuardsWarnPolicyStillFailsClosedWhenUntrusted(): void
     {
         $fixture = IntegrityFixture::create(['app.txt' => 'ok']);
 
@@ -309,15 +309,31 @@ final class GuardInstallAttackFlowsTest extends TestCase
             // ok
         }
 
-        // Must NOT throw (warn mode).
+        // Warn policy is allowed to relax *some* environmental requirements (e.g. quorum), but it must never
+        // allow reads/writes when the kernel is untrusted (fail-closed boundary).
         /** @var callable(string):void $keyGuard */
-        $keyGuard('read');
-        // Must NOT throw (warn mode).
+        try {
+            $keyGuard('read');
+            self::fail('Expected TrustKernelException (untrusted secrets.read).');
+        } catch (TrustKernelException) {
+            // ok
+        }
+
         /** @var callable(string):void $readGuard */
-        $readGuard('SELECT 1');
-        // Must NOT throw (warn mode).
+        try {
+            $readGuard('SELECT 1');
+            self::fail('Expected TrustKernelException (untrusted db.read).');
+        } catch (TrustKernelException) {
+            // ok
+        }
+
         /** @var callable(string):void $dbGuard */
-        $dbGuard('UPDATE example SET x=1');
+        try {
+            $dbGuard('UPDATE example SET x=1');
+            self::fail('Expected TrustKernelException (untrusted db.write).');
+        } catch (TrustKernelException) {
+            // ok
+        }
         /** @var callable(string):void $pdoGuard */
         try {
             $pdoGuard('db.raw_pdo');
@@ -326,9 +342,12 @@ final class GuardInstallAttackFlowsTest extends TestCase
             // ok
         }
 
-        $keys = KeyManager::getAllRawKeys('APP_SALT', $keysDir, 'app_salt', 32);
-        self::assertCount(1, $keys);
-        self::assertSame(str_repeat('a', 32), $keys[0]);
+        try {
+            KeyManager::getAllRawKeys('APP_SALT', $keysDir, 'app_salt', 32);
+            self::fail('Expected TrustKernelException due to untrusted secrets.read.');
+        } catch (TrustKernelException) {
+            // ok
+        }
 
         $banner = array_values(array_filter(
             $logger->records,

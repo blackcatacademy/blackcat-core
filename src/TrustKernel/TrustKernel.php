@@ -2037,7 +2037,7 @@ final class TrustKernel
 
         if ($this->effectiveEnforcement === 'warn') {
             $this->logger?->warning($msg);
-            return;
+            throw new TrustKernelException($msg);
         }
 
         $this->logger?->error($msg);
